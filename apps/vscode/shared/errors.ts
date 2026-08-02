@@ -85,6 +85,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "provider.rate_limit": "Too many requests. Please try again later.",
   "provider.auth_error": "Authentication failed. Please sign in again.",
   "provider.connection_error": "Could not connect to the model provider.",
+  "provider.usage_limit": "Usage limit reached. Wait for the quota window to reset, or purchase extra usage or upgrade your plan.",
   "request.prompt_input_empty": "Prompt cannot be empty.",
   internal: "Internal error occurred.",
 };

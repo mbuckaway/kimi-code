@@ -17,6 +17,7 @@ import {
   APIContextOverflowError,
   APIEmptyResponseError,
   APIProviderOverloadedError,
+  APIProviderQuotaExhaustedError,
   APIStatusError,
   APITimeoutError,
   ChatProviderError,
@@ -52,6 +53,17 @@ describe('ProtocolErrors domain', () => {
     }
     expect(errorInfo('provider.rate_limit').retryable).toBe(true);
     expect(errorInfo('provider.filtered').title).toBe('Provider filtered response');
+  });
+
+  it('marks provider.usage_limit public and non-retryable', () => {
+    // Retryable usage-limit codes would feed the swarm requeue/suspend loop,
+    // which cannot help until the quota window resets.
+    expect(errorInfo('provider.usage_limit')).toMatchObject({
+      title: 'Usage limit reached',
+      retryable: false,
+      public: true,
+    });
+    expect(ProtocolErrors.retryable).not.toContain('provider.usage_limit');
   });
 });
 
@@ -136,6 +148,19 @@ describe('translateProviderError — classification', () => {
 
   it('maps a plain provider error to the generic api code', () => {
     expect(translateProviderError(new ChatProviderError('weird')).code).toBe('provider.api_error');
+  });
+
+  it('maps a quota-exhausted error to the dedicated usage-limit code', () => {
+    // Not provider.rate_limit (retryable — would drive the swarm requeue
+    // loop) and not provider.api_error (too generic to branch on).
+    const translated = translateProviderError(
+      new APIProviderQuotaExhaustedError(
+        "You've reached your usage limit for this billing cycle.",
+        'req-usage',
+      ),
+    );
+    expect(translated.code).toBe('provider.usage_limit');
+    expect(translated.details).toMatchObject({ statusCode: 429, requestId: 'req-usage' });
   });
 
   it('maps unknown errors and non-errors to internal', () => {

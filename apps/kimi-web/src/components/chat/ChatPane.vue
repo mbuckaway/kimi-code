@@ -16,6 +16,7 @@ import MoonSpinner from '../ui/MoonSpinner.vue';
 import Spinner from '../ui/Spinner.vue';
 import Icon from '../ui/Icon.vue';
 import Tooltip from '../ui/Tooltip.vue';
+import Banner from '../ui/Banner.vue';
 import { useConfirmDialog } from '../../composables/useConfirmDialog';
 import { copyTextToClipboard } from '../../lib/clipboard';
 import { openFileAttachment } from '../../lib/openFileAttachment';
@@ -638,6 +639,9 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
         <template v-for="(blk, bi) in assistantRenderBlocks(turn)" :key="renderBlockKey(blk, bi)">
           <ThinkingBlock v-if="blk.kind === 'thinking'" :text="blk.thinking" mobile :streaming="isStreamingRenderBlock(turn, blk)" @open="emit('openThinking', { turnId: turn.id, blockIndex: blk.sourceIndex })" />
           <div v-else-if="blk.kind === 'text' && blk.text" class="msg"><Markdown :text="blk.text" :streaming="isStreamingRenderBlock(turn, blk)" :open-file="(target) => emit('openFile', target)" /></div>
+          <!-- Terminal error notice of a failed turn (e.g. usage limit reached):
+               keeps the failure visible in the conversation, not only as a toast. -->
+          <Banner v-else-if="blk.kind === 'error'" variant="danger">{{ blk.text }}</Banner>
           <ToolGroup
             v-else-if="blk.kind === 'tool-stack'"
             :tools="blk.tools"
@@ -1057,7 +1061,8 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
 .a-msg > :deep(.agent-group),
 .a-msg > :deep(.box),
 .a-msg > :deep(.swarm-card),
-.a-msg > :deep(.media-tool) {
+.a-msg > :deep(.media-tool),
+.a-msg > :deep(.ui-banner) {
   margin-top: var(--chat-block-gap);
 }
 .a-msg > .msg:first-child,
@@ -1067,7 +1072,8 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
 .a-msg > :deep(.agent-group:first-child),
 .a-msg > :deep(.box:first-child),
 .a-msg > :deep(.swarm-card:first-child),
-.a-msg > :deep(.media-tool:first-child) {
+.a-msg > :deep(.media-tool:first-child),
+.a-msg > :deep(.ui-banner:first-child) {
   margin-top: 0;
 }
 .a-msg :deep(code) {

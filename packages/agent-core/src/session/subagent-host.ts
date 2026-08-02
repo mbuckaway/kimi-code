@@ -28,6 +28,7 @@ import {
 } from './subagent-binding';
 import {
   SubagentBatch,
+  isUsageLimitTurnError,
   resolveSwarmMaxConcurrency,
   type SubagentResult,
   type SubagentSuspendedEvent,
@@ -682,6 +683,9 @@ function shouldSuppressQueuedAttemptFailureEvent(
   error: unknown,
 ): boolean {
   if (options.suppressRateLimitFailureEvent !== true) return false;
+  // A usage-limit-coded failure is final — it must stay visible, not be
+  // swallowed by the rate-limit suppression its message wording matches.
+  if (isUsageLimitTurnError(error)) return false;
   if (isProviderRateLimitError(error)) return true;
   return isAbortError(error) || options.signal.aborted;
 }

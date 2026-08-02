@@ -717,6 +717,30 @@ describe('AgentLLMRequesterService trace id', () => {
     expect(request.trace.traceId).toBe('trace-fail-1');
   });
 
+  it('computes retryable from the unwrapped cause of a coded provider failure', async () => {
+    // The requester boundary throws translateProviderError's Error2 wrapping
+    // the raw status error; the telemetry must read retryability from the
+    // wrapped cause, or a retryable 429 reports retryable: false.
+    const requester = createTracedRequester(null);
+    Object.defineProperty(requester, 'request', {
+      value: async function* () {
+        const events: ModelRequestEvent[] = [];
+        for (const event of events) yield event;
+        throw new Error2(ErrorCodes.PROVIDER_RATE_LIMIT, 'too many requests', {
+          cause: new APIStatusError(429, 'too many requests', 'req-429'),
+        });
+      },
+    });
+    const { service, telemetryRecords } = createService(requester, passthroughProjector);
+    const request = service.start();
+    await expect(request.result).rejects.toThrow();
+
+    expect(telemetryRecords).toContainEqual({
+      event: 'api_error',
+      properties: expect.objectContaining({ retryable: true, status_code: 429 }),
+    });
+  });
+
   it('keeps the header-captured trace when the request fails after headers arrived', async () => {
     // A failure after the response headers arrived (empty response, mid-stream
     // decode error) carries no trace on the error itself; the trace captured

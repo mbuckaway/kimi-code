@@ -1,6 +1,7 @@
 import { isProviderRateLimitError, type TokenUsage } from '@moonshot-ai/kosong';
 import * as retry from 'retry';
 
+import { ErrorCodes } from '../errors';
 import type {
   RunSubagentOptions,
   SpawnSubagentOptions,
@@ -346,7 +347,11 @@ export class SubagentBatch<T> {
         usage: completion.usage,
       };
     } catch (error) {
-      if (isProviderRateLimitError(error)) {
+      // A usage-limit failure must not enter the rate-limit requeue loop: it
+      // crosses the subagent turn boundary as a re-minted Error whose message
+      // can still match the rate-limit wording fallback, but requeueing
+      // cannot help until the quota window resets.
+      if (!isUsageLimitTurnError(error) && isProviderRateLimitError(error)) {
         return {
           type: 'rate_limited',
           agentId: handle.agentId,
@@ -659,6 +664,18 @@ export class SubagentBatch<T> {
     if (status === 'aborted') return 'The user manually interrupted this subagent batch.';
     return error instanceof Error ? error.message : String(error);
   }
+}
+
+// Usage-limit failures cross the subagent turn boundary as a re-minted Error
+// whose message carries the wire code prefix (see runChildTurnToCompletion in
+// subagent-host); the code prefix, not the message wording, decides that
+// rate-limit reactions (requeue, failure-event suppression) do not apply.
+// Lives here rather than in subagent-host so both files can use it without an
+// import cycle (subagent-host already value-imports this module).
+const USAGE_LIMIT_MESSAGE_PREFIX = `[${ErrorCodes.PROVIDER_USAGE_LIMIT}]`;
+
+export function isUsageLimitTurnError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith(USAGE_LIMIT_MESSAGE_PREFIX);
 }
 
 /**

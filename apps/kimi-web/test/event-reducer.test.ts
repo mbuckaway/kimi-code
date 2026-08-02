@@ -675,4 +675,31 @@ describe('reduceAppEvent unknown agent error', () => {
     const next = reduceRaw({ _agentWarning: true, message: 'heads up' });
     expect(next.warnings[0]).toBe(`${i18n.global.t('warnings.noteLabel')}: heads up`);
   });
+
+  it('maps a usage-limit failure to a dedicated sticky notice', () => {
+    const next = reduceRaw({
+      _agentError: true,
+      code: 'provider.usage_limit',
+      message: 'Weekly quota exceeded.',
+      name: 'UsageLimitError',
+    });
+    const notice = next.warnings[0];
+    if (typeof notice !== 'object' || notice === null) throw new Error('expected notice');
+    expect(notice.severity).toBe('error');
+    expect(notice.title).toBe(i18n.global.t('warnings.agentError.usageLimit'));
+    expect(notice.message).toBe('Weekly quota exceeded.');
+    // Sticky: the toast must not auto-dismiss — the user closes it explicitly.
+    expect(notice.sticky).toBe(true);
+  });
+
+  it('does not mark other agent errors sticky', () => {
+    const next = reduceRaw({
+      _agentError: true,
+      code: 'provider.rate_limit',
+      message: 'slow down',
+    });
+    const notice = next.warnings[0];
+    if (typeof notice !== 'object' || notice === null) throw new Error('expected notice');
+    expect(notice.sticky).toBeUndefined();
+  });
 });

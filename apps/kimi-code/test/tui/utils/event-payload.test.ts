@@ -6,6 +6,7 @@ import {
   appendStreamingArgsPreview,
   formatErrorMessage,
   formatErrorPayload,
+  formatUsageLimitErrorNotice,
   parseStreamingArgs,
 } from '#/tui/utils/event-payload';
 
@@ -67,5 +68,22 @@ describe('error payload formatting', () => {
     });
 
     expect(formatErrorMessage(error)).toBe(conciseFilteredMessage);
+  });
+});
+
+describe('usage-limit error notice', () => {
+  it('keeps the provider message and adds recovery guidance', () => {
+    const notice = formatUsageLimitErrorNotice('Weekly quota exceeded for model example-model.');
+
+    expect(notice).toContain('Weekly quota exceeded for model example-model.');
+    expect(notice).toContain('/usage');
+    expect(notice).toContain('reset');
+    expect(notice).toContain('upgrade');
+  });
+
+  it('does not leak the raw wire error code', () => {
+    const notice = formatUsageLimitErrorNotice('quota exceeded');
+
+    expect(notice).not.toContain('provider.usage_limit');
   });
 });

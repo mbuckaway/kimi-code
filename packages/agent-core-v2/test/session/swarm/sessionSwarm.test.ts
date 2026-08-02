@@ -15,6 +15,7 @@ import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { APIProviderRateLimitError } from '#/kosong/contract/errors';
+import { ProtocolErrors } from '#/kosong/protocol/errors';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { ITelemetryService, noopTelemetryService } from '#/app/telemetry/telemetry';
 import {
@@ -377,6 +378,70 @@ describe('AgentRunBatch scheduling contract', () => {
         },
       ]);
       expect(onSuspended).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not requeue a usage-limit-coded failure as a rate limit', async () => {
+    vi.useFakeTimers();
+    try {
+      const onSuspended = vi.fn();
+      const { runBatch, attempts } = createMockAgentRunBatchRunner({ onSuspended });
+      const running = runBatch(
+        Array.from({ length: 3 }, (_, index) => queuedAgentRunTask(index + 1)),
+        { signal: new AbortController().signal },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toHaveLength(3);
+      attempts.forEach((attempt) => {
+        attempt.markReady();
+      });
+
+      attempts[0]!.outcome.resolve({
+        task: attempts[0]!.task,
+        agentId: 'agent-1',
+        status: 'completed',
+        result: 'completed 1',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The Error2 carries the usage-limit wire code while its message still
+      // matches the rate-limit wording fallback; task 3 is still unfinished,
+      // so a misread rate limit would requeue task 2 and suspend the batch.
+      attempts[1]!.outcome.resolve({ type: 'usage_limited', agentId: 'agent-2' });
+      await vi.advanceTimersByTimeAsync(0);
+
+      attempts[2]!.outcome.resolve({
+        task: attempts[2]!.task,
+        agentId: 'agent-3',
+        status: 'completed',
+        result: 'completed 3',
+      });
+      await expect(running).resolves.toMatchObject([
+        {
+          task: { data: 1 },
+          agentId: 'agent-1',
+          status: 'completed',
+          result: 'completed 1',
+        },
+        {
+          task: { data: 2 },
+          agentId: 'agent-2',
+          status: 'failed',
+          state: 'started',
+          error: 'Too many requests: reached your usage limit for this billing cycle',
+        },
+        {
+          task: { data: 3 },
+          agentId: 'agent-3',
+          status: 'completed',
+          result: 'completed 3',
+        },
+      ]);
+      expect(onSuspended).not.toHaveBeenCalled();
+      expect(attempts).toHaveLength(3);
     } finally {
       vi.useRealTimers();
     }
@@ -1248,6 +1313,72 @@ describe('SessionSwarmService metadata compatibility', () => {
       expect.objectContaining({ type: 'subagent.spawned' }),
     );
   });
+
+  it('does not suppress the failure event for a usage-limit-coded child failure', async () => {
+    agents['agent-usage'] = {
+      labels: { parentAgentId: 'main' },
+    };
+    handles.set('agent-usage', agentHandle('agent-usage', lifecycle, eventBus));
+    const published: DomainEvent[] = [];
+    (eventBus.publish as ReturnType<typeof vi.fn>).mockImplementation((event: DomainEvent) => {
+      published.push(event);
+    });
+    runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+      options?.onReady?.();
+      return {
+        agentId,
+        turn: {} as never,
+        // The Error2 carries the usage-limit wire code while its message
+        // still matches the rate-limit wording fallback — the suppression
+        // must key on the code, not the wording.
+        completion: Promise.reject(
+          new Error2(
+            ProtocolErrors.codes.PROVIDER_USAGE_LIMIT,
+            'Too many requests: reached your usage limit for this billing cycle',
+          ),
+        ),
+      };
+    });
+    const service = ix.get(ISessionSwarmService);
+
+    const results = await service.run({
+      callerAgentId: 'main',
+      tasks: [resumeSessionTask('agent-usage')],
+    });
+
+    expect(results).toMatchObject([{ agentId: 'agent-usage', status: 'failed' }]);
+    expect(published).toContainEqual(
+      expect.objectContaining({ type: 'subagent.failed', subagentId: 'agent-usage' }),
+    );
+  });
+
+  it('suppresses the failure event for a rate-limited child failure', async () => {
+    agents['agent-rate'] = {
+      labels: { parentAgentId: 'main' },
+    };
+    handles.set('agent-rate', agentHandle('agent-rate', lifecycle, eventBus));
+    const published: DomainEvent[] = [];
+    (eventBus.publish as ReturnType<typeof vi.fn>).mockImplementation((event: DomainEvent) => {
+      published.push(event);
+    });
+    runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+      options?.onReady?.();
+      return {
+        agentId,
+        turn: {} as never,
+        completion: Promise.reject(new APIProviderRateLimitError('Rate limited')),
+      };
+    });
+    const service = ix.get(ISessionSwarmService);
+
+    const results = await service.run({
+      callerAgentId: 'main',
+      tasks: [resumeSessionTask('agent-rate')],
+    });
+
+    expect(results).toMatchObject([{ agentId: 'agent-rate', status: 'failed' }]);
+    expect(published).not.toContainEqual(expect.objectContaining({ type: 'subagent.failed' }));
+  });
 });
 
 function spawnSessionTask(swarmItem?: string): SessionSwarmSpawnTask {
@@ -1407,6 +1538,10 @@ type MockAgentRunAttemptOutcome<T> =
   | {
       readonly type: 'rate_limited';
       readonly agentId: string;
+    }
+  | {
+      readonly type: 'usage_limited';
+      readonly agentId: string;
     };
 
 type MockAgentRunAttemptRecord = {
@@ -1532,6 +1667,18 @@ function completionFromMockAgentRunOutcome<T>(
           reject(new APIProviderRateLimitError('Rate limited', result.agentId));
           return;
         }
+        if (isMockAgentRunUsageLimitOutcome(result)) {
+          // The wire-round-tripped shape a usage-limit failure has at the
+          // batch decision point: a coded Error2 whose message still matches
+          // the rate-limit wording fallback.
+          reject(
+            new Error2(
+              ProtocolErrors.codes.PROVIDER_USAGE_LIMIT,
+              'Too many requests: reached your usage limit for this billing cycle',
+            ),
+          );
+          return;
+        }
         if (result.status === 'completed') {
           resolve({ result: result.result ?? '', usage: result.usage });
           return;
@@ -1550,6 +1697,12 @@ function isMockAgentRunRateLimitOutcome<T>(
   outcome: MockAgentRunAttemptOutcome<T>,
 ): outcome is Extract<MockAgentRunAttemptOutcome<T>, { readonly type: 'rate_limited' }> {
   return 'type' in outcome && outcome.type === 'rate_limited';
+}
+
+function isMockAgentRunUsageLimitOutcome<T>(
+  outcome: MockAgentRunAttemptOutcome<T>,
+): outcome is Extract<MockAgentRunAttemptOutcome<T>, { readonly type: 'usage_limited' }> {
+  return 'type' in outcome && outcome.type === 'usage_limited';
 }
 
 function queuedAgentRunTask(index: number): QueuedAgentRunTask<number> {

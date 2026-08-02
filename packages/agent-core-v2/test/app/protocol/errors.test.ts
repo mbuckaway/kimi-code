@@ -154,16 +154,28 @@ describe('translateProviderError', () => {
   });
 
   describe('quota-exhausted 429', () => {
-    it('maps to provider.api_error, not provider.rate_limit', () => {
+    it('maps to provider.usage_limit, not provider.rate_limit', () => {
       const translated = translateProviderError(
         new APIProviderQuotaExhaustedError(
           'Your account is suspended due to insufficient balance, please recharge your account',
           'req-quota',
         ),
       );
-      expect(translated.code).toBe('provider.api_error');
+      expect(translated.code).toBe('provider.usage_limit');
       expect(translated.message).toContain('recharge');
       expect(translated.details).toMatchObject({ statusCode: 429, requestId: 'req-quota' });
+    });
+
+    it('maps the #2121 managed-subscription 403 usage-limit failure to provider.usage_limit', () => {
+      const translated = translateProviderError(
+        new APIProviderQuotaExhaustedError(
+          "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.",
+          'req-usage',
+        ),
+      );
+      expect(translated.code).toBe('provider.usage_limit');
+      expect(translated.message).toContain('usage limit');
+      expect(translated.details).toMatchObject({ requestId: 'req-usage' });
     });
   });
 });

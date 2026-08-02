@@ -34,6 +34,7 @@ export const PROVIDER_RATE_LIMIT_ERROR_CODE = 'provider.rate_limit';
 export const PROVIDER_AUTH_ERROR_CODE = 'provider.auth_error';
 export const PROVIDER_CONNECTION_ERROR_CODE = 'provider.connection_error';
 export const PROVIDER_OVERLOADED_ERROR_CODE = 'provider.overloaded';
+export const PROVIDER_USAGE_LIMIT_ERROR_CODE = 'provider.usage_limit';
 export const CONTEXT_OVERFLOW_ERROR_CODE = 'context.overflow';
 
 export type ProviderErrorCode =
@@ -43,6 +44,7 @@ export type ProviderErrorCode =
   | typeof PROVIDER_AUTH_ERROR_CODE
   | typeof PROVIDER_CONNECTION_ERROR_CODE
   | typeof PROVIDER_OVERLOADED_ERROR_CODE
+  | typeof PROVIDER_USAGE_LIMIT_ERROR_CODE
   | typeof CONTEXT_OVERFLOW_ERROR_CODE;
 
 export function sanitizeStatusErrorMessage(message: string): string {
@@ -160,7 +162,7 @@ export class APIProviderQuotaExhaustedError extends APIStatusError {
     retryAfterMs?: number | null,
     traceId?: string | null,
   ) {
-    super(429, message, requestId, retryAfterMs, traceId, PROVIDER_API_ERROR_CODE);
+    super(429, message, requestId, retryAfterMs, traceId, PROVIDER_USAGE_LIMIT_ERROR_CODE);
     this.name = 'APIProviderQuotaExhaustedError';
   }
 }

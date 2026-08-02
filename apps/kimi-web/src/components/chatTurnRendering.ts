@@ -39,7 +39,8 @@ export type AssistantRenderBlock =
   | { kind: 'thinking'; thinking: string; sourceIndex: number }
   | { kind: 'text'; text: string; sourceIndex: number }
   | { kind: 'tool'; tool: ToolStackItem['tool']; sourceIndex: number }
-  | { kind: 'tool-stack'; tools: ToolStackItem[] };
+  | { kind: 'tool-stack'; tools: ToolStackItem[] }
+  | { kind: 'error'; text: string; code?: string; sourceIndex: number };
 
 export function rendersToolCard(block: Extract<TurnBlock, { kind: 'tool' }>): boolean {
   return !(block.tool.status === 'ok' && block.tool.media);
@@ -83,6 +84,8 @@ export function assistantRenderBlocks(turn: ChatTurn): AssistantRenderBlock[] {
       rendered.push({ kind: 'thinking', thinking: block.thinking, sourceIndex });
     } else if (block.kind === 'text') {
       rendered.push({ kind: 'text', text: block.text, sourceIndex });
+    } else if (block.kind === 'error') {
+      rendered.push({ kind: 'error', text: block.text, code: block.code, sourceIndex });
     }
   });
 
@@ -104,6 +107,10 @@ export function turnToMarkdown(turn: ChatTurn): string {
       parts.push(`> **Thinking**\n> ${blk.thinking.split('\n').join('\n> ')}`);
     } else if (blk.kind === 'text' && blk.text) {
       parts.push(blk.text);
+    } else if (blk.kind === 'error' && blk.text) {
+      // Keep the failure visible in a copied transcript, as a quote like thinking.
+      const label = blk.code !== undefined ? `**Error** (${blk.code})` : '**Error**';
+      parts.push(`> ${label}\n> ${blk.text.split('\n').join('\n> ')}`);
     } else if (blk.kind === 'tool' && blk.tool.output && blk.tool.output.length > 0) {
       const output = blk.tool.output.join('\n');
       parts.push(`\`\`\`\n[${blk.tool.name}]\n${output}\n\`\`\``);

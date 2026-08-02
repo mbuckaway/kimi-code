@@ -26,6 +26,7 @@ import {
   PROVIDER_FILTERED_ERROR_CODE,
   PROVIDER_OVERLOADED_ERROR_CODE,
   PROVIDER_RATE_LIMIT_ERROR_CODE,
+  PROVIDER_USAGE_LIMIT_ERROR_CODE,
   throwIfAbortError,
 } from '#/kosong/contract/errors';
 
@@ -39,6 +40,7 @@ export const ProtocolErrors = {
     PROVIDER_AUTH_ERROR: PROVIDER_AUTH_ERROR_CODE,
     PROVIDER_CONNECTION_ERROR: PROVIDER_CONNECTION_ERROR_CODE,
     PROVIDER_OVERLOADED: PROVIDER_OVERLOADED_ERROR_CODE,
+    PROVIDER_USAGE_LIMIT: PROVIDER_USAGE_LIMIT_ERROR_CODE,
     CONTEXT_OVERFLOW: CONTEXT_OVERFLOW_ERROR_CODE,
   },
   retryable: [
@@ -72,6 +74,15 @@ export const ProtocolErrors = {
       public: true,
       action: 'Retry after the provider recovers from overload.',
     },
+    // Deliberately NOT in `retryable`: requeueing cannot help until the
+    // account's quota window resets.
+    'provider.usage_limit': {
+      title: 'Usage limit reached',
+      retryable: false,
+      public: true,
+      action:
+        'Wait for the quota window to reset (check /usage), or purchase extra usage or upgrade your plan.',
+    },
     'context.overflow': {
       title: 'Context overflow',
       retryable: true,
@@ -95,4 +106,14 @@ export function translateProviderError(error: unknown): Error2 {
     });
   }
   return new Error2(CoreErrors.codes.INTERNAL, String(error), { cause: error });
+}
+
+/**
+ * Whether the error carries the `provider.usage_limit` wire code. Usage-limit
+ * reactions must key on the code, not the message: the text can still match
+ * the rate-limit wording fallback, but retrying/requeueing cannot help until
+ * the quota window resets.
+ */
+export function isProviderUsageLimitError(error: unknown): boolean {
+  return isError2(error) && error.code === ProtocolErrors.codes.PROVIDER_USAGE_LIMIT;
 }

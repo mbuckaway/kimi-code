@@ -33,6 +33,10 @@ export interface AppNotice {
   title: string;
   message?: string;
   details?: AppNoticeDetail[];
+  /** When true the toast never auto-dismisses — the user closes it explicitly.
+   *  Reserved for failures that silently stop the user's work (e.g. the account
+   *  usage limit), which must stay visible until acknowledged. */
+  sticky?: boolean;
 }
 
 export type AppWarning = string | AppNotice;
@@ -186,6 +190,21 @@ export interface CompactionMarkerMetadata {
   trigger: 'manual' | 'auto';
   tokensBefore?: number;
   tokensAfter?: number;
+}
+
+/**
+ * Metadata key of the client-side turn-error marker message the projector
+ * appends when a turn ends with reason 'failed' and a coded error payload.
+ * It folds into the failed assistant turn as a terminal error block (the
+ * transcript protocol's `notice` frame equivalent) so the failure stays
+ * visible in the conversation instead of only flashing by as a toast. Like
+ * the compaction marker it is client-side only — a snapshot reload drops it.
+ */
+export const TURN_ERROR_MARKER_METADATA_KEY = 'kimiWeb.turnError';
+
+export interface TurnErrorMarkerMetadata {
+  code?: string;
+  message: string;
 }
 
 // ---------------------------------------------------------------------------

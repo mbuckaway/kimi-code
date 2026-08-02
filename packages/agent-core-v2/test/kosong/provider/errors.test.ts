@@ -115,6 +115,11 @@ const QUOTA_MESSAGE =
 const TOKEN_QUOTA_MESSAGE =
   'You exceeded your current token quota: <org-0123456789abcdef> 31275, please check your account balance';
 
+// The managed Kimi subscription's usage limit, observed in
+// https://github.com/MoonshotAI/kimi-code/issues/2121.
+const USAGE_LIMIT_403_MESSAGE =
+  "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.";
+
 function moonshotQuota429(message: string, type?: string): OpenAIAPIError {
   return new OpenAIAPIError(
     429,
@@ -122,6 +127,10 @@ function moonshotQuota429(message: string, type?: string): OpenAIAPIError {
     `429 ${message}`,
     new Headers(),
   );
+}
+
+function moonshotError403(message: string): OpenAIAPIError {
+  return new OpenAIAPIError(403, undefined, `403 ${message}`, new Headers());
 }
 
 describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
@@ -157,6 +166,32 @@ describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
     expect(classifyKimiQuotaError(undefined)).toBeUndefined();
   });
 
+  it('classifies the #2121 managed-subscription 403 usage-limit message as quota-exhausted', () => {
+    const error = classifyKimiQuotaError(moonshotError403(USAGE_LIMIT_403_MESSAGE));
+    expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
+    expect(isRetryableGenerateError(error)).toBe(false);
+  });
+
+  it.each([
+    "You've reached your usage limit for this billing cycle.",
+    'Your account hit the usage limit for this billing cycle.',
+    'Your quota will be refreshed in the next cycle.',
+  ])('falls back to usage-limit wording "%s" on a 403', (message) => {
+    expect(classifyKimiQuotaError(moonshotError403(message))).toBeInstanceOf(
+      APIProviderQuotaExhaustedError,
+    );
+  });
+
+  it.each([
+    'Invalid authentication credentials',
+    TOKEN_QUOTA_MESSAGE,
+    'Your account is suspended due to insufficient balance, please recharge your account',
+  ])('answers undefined for a 403 without usage-limit wording "%s"', (message) => {
+    // Billing wordings stay 429-only: on a 403 they read as auth/permission
+    // failures, not quota exhaustion.
+    expect(classifyKimiQuotaError(moonshotError403(message))).toBeUndefined();
+  });
+
   it('classifies the Anthropic SDK error shape (body nested under .error)', () => {
     const source = AnthropicAPIError.generate(
       429,
@@ -182,6 +217,20 @@ describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
       APIProviderQuotaExhaustedError,
     );
   });
+
+  it('reaches the 403 usage-limit classification through both Kimi traits', () => {
+    const context: TraitContext = {
+      config: { protocol: 'openai', providerType: 'kimi', modelName: '' } as ProtocolAdapterConfig,
+      providerId: 'kimi',
+    };
+    const source = moonshotError403(USAGE_LIMIT_403_MESSAGE);
+    expect(kimiOpenAITrait.convertError!(source, context)).toBeInstanceOf(
+      APIProviderQuotaExhaustedError,
+    );
+    expect(kimiAnthropicTrait.convertError!(source, context)).toBeInstanceOf(
+      APIProviderQuotaExhaustedError,
+    );
+  });
 });
 
 describe('convertError hook consult at the OpenAI boundary', () => {
@@ -198,6 +247,17 @@ describe('convertError hook consult at the OpenAI boundary', () => {
     expect(convertOpenAIError(source, hooks?.convertError)).toBeInstanceOf(
       APIProviderQuotaExhaustedError,
     );
+  });
+
+  it('classifies the #2121 403 usage-limit response through the composed hook', () => {
+    const hooks = composeOpenAIChatHooks([{ trait: kimiOpenAITrait, context: kimiContext }]);
+    const source = moonshotError403(USAGE_LIMIT_403_MESSAGE);
+
+    const error = convertOpenAIError(source, hooks?.convertError);
+    expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
+    expect(isRetryableGenerateError(error)).toBe(false);
+    // Without the Kimi trait hook the same 403 stays a plain status error.
+    expect(convertOpenAIError(source)).not.toBeInstanceOf(APIProviderQuotaExhaustedError);
   });
 
   it('binds convertError with last-declarer-wins semantics', () => {

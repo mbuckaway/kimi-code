@@ -9,8 +9,8 @@
 // TOOL-role messages fold their toolResult content into the preceding assistant
 // group rather than becoming separate turns.
 
-import type { AppMessage, AppApprovalRequest, AppTask, CompactionMarkerMetadata } from '../api/types';
-import { COMPACTION_MARKER_METADATA_KEY } from '../api/types';
+import type { AppMessage, AppApprovalRequest, AppTask, CompactionMarkerMetadata, TurnErrorMarkerMetadata } from '../api/types';
+import { COMPACTION_MARKER_METADATA_KEY, TURN_ERROR_MARKER_METADATA_KEY } from '../api/types';
 import type { AgentMember, ApprovalBlock, ChatTurn, CronTurnData, DiffLine, ToolCall, ToolMedia, TurnAttachment, TurnBlock } from '../types';
 
 const READ_MEDIA_TOOL_RE = /^read[_-]?media(?:file)?$/i;
@@ -743,6 +743,34 @@ export function messagesToTurns(
 
   for (const msg of messages) {
     if (msg.role === 'system') continue;
+
+    // A failed turn's coded error (client-side marker appended by the projector
+    // on turn.ended failed) folds into the pending assistant group as a terminal
+    // error block — the transcript protocol's `notice` frame equivalent. This
+    // also fills the empty bubble an interrupted step leaves behind, so the
+    // failure stays visible in the conversation instead of only as a toast.
+    const turnError = msg.metadata?.[TURN_ERROR_MARKER_METADATA_KEY] as
+      | TurnErrorMarkerMetadata
+      | undefined;
+    if (turnError !== undefined) {
+      if (!continuesAssistantGroup(pendingGroup, msg.promptId)) {
+        flushGroup();
+        pendingGroup = {
+          id: msg.id,
+          promptId: msg.promptId,
+          textParts: [],
+          thinkingParts: [],
+          tools: [],
+          blocks: [],
+          approval: undefined,
+          approvalId: undefined,
+          foldedSigs: [],
+          durationMs: undefined,
+        };
+      }
+      pendingGroup?.blocks.push({ kind: 'error', text: turnError.message, code: turnError.code });
+      continue;
+    }
 
     // Compaction summaries become a divider turn — never a chat bubble. The
     // snapshot variant carries no token stats (marker metadata is client-side).

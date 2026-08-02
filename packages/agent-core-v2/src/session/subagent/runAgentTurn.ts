@@ -14,6 +14,7 @@
  */
 
 import { APIProviderRateLimitError, isProviderRateLimitError } from '#/kosong/contract/errors';
+import { isProviderUsageLimitError } from '#/kosong/protocol/errors';
 import { type TokenUsage } from '#/kosong/contract/usage';
 
 import { linkAbortSignal, userCancellationReason } from '#/_base/utils/abort';
@@ -167,6 +168,10 @@ function classifyTurnResult(result: TurnResult): void {
       return;
     case 'failed': {
       const error = result.error;
+      // A usage-limit-coded failure must not be reclassified as a rate limit
+      // by the message fallback: requeueing cannot help until the quota
+      // window resets. Throw it through with its wire code intact.
+      if (isProviderUsageLimitError(error)) throw error;
       if (isProviderRateLimitError(error)) throw error;
       const payload = toKimiErrorPayload(error);
       if (payload.code === ErrorCodes.PROVIDER_RATE_LIMIT) {
