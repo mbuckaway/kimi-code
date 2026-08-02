@@ -33,6 +33,12 @@ function isError(warning: AppWarning): boolean {
   return warning.startsWith(`${t('warnings.errorLabel')}:`) || /\b4\d\d\b|error|失败|failed/i.test(warning);
 }
 
+/** Sticky notices never auto-dismiss — the user closes them explicitly, so no
+    timer is ever started for them (pause/resume no-op on the missing entry). */
+function isSticky(warning: AppWarning): boolean {
+  return isNotice(warning) && warning.sticky === true;
+}
+
 function warningKey(warning: AppWarning): string {
   if (!isNotice(warning)) return `text:${warning}`;
   return `notice:${warning.severity}:${warning.title}:${warning.message ?? ''}:${JSON.stringify(warning.details ?? [])}`;
@@ -165,7 +171,7 @@ watch(
         return reused;
       }
       const item: ToastItem = { id: nextId++, key, warning, detailsOpen: false, copied: false };
-      runTimer(item.id, toastDuration(warning));
+      if (!isSticky(warning)) runTimer(item.id, toastDuration(warning));
       return item;
     });
     for (const gone of unmatched) {

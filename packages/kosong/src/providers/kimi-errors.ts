@@ -21,6 +21,19 @@ const KIMI_QUOTA_EXHAUSTED_MESSAGE_PATTERNS = [
   /account (?:is )?in arrears/,
 ] as const;
 
+// Message fallback for the managed Kimi subscription's usage limit, which the
+// backend returns as a 403 (not a 429) — observed in
+// https://github.com/MoonshotAI/kimi-code/issues/2121: "You've reached your
+// usage limit for this billing cycle. Your quota will be refreshed in the
+// next cycle. ...". A 403 is otherwise an auth/permission failure, so only
+// these usage-limit-specific wordings promote it to quota-exhausted; the
+// billing wordings above stay 429-only.
+const KIMI_USAGE_LIMIT_MESSAGE_PATTERNS = [
+  /reached your usage limit/,
+  /usage limit for this billing cycle/,
+  /quota will be refreshed/,
+] as const;
+
 function readStringProp(value: object, key: string): string | undefined {
   const raw = (value as Record<string, unknown>)[key];
   return typeof raw === 'string' ? raw : undefined;
@@ -51,30 +64,45 @@ function collectErrorCodes(error: object): string[] {
 }
 
 /**
- * Classify a raw provider failure as Moonshot's quota/balance-exhausted 429,
- * or answer `undefined` to keep the base classification. This is the Kimi
- * vendor's error knowledge, kept out of the shared OpenAI conversion: the
- * Kimi provider (and the Kimi files client) passes it to
- * `convertOpenAIError` as the vendor hook, consulted after the abort guard
- * with the raw SDK error — the base conversion would otherwise drop the
- * SDK-parsed body `error.type`/`error.code` this reads.
+ * Classify a raw provider failure as Moonshot's quota/balance-exhausted 429
+ * or the managed subscription's usage-limit 403, or answer `undefined` to
+ * keep the base classification. This is the Kimi vendor's error knowledge,
+ * kept out of the shared OpenAI conversion: the Kimi provider (and the Kimi
+ * files client) passes it to `convertOpenAIError` as the vendor hook,
+ * consulted after the abort guard with the raw SDK error — the base
+ * conversion would otherwise drop the SDK-parsed body `error.type`/
+ * `error.code` this reads.
+ *
+ * The 403 case needs stricter evidence than the 429 case: a bare 403 is an
+ * auth/permission failure, so it is only promoted when the message matches
+ * the usage-limit wording observed in
+ * https://github.com/MoonshotAI/kimi-code/issues/2121. The structured
+ * `exceeded_current_quota_error` code and the billing wordings remain
+ * 429-only.
  */
 export function classifyKimiQuotaError(
   error: unknown,
 ): APIProviderQuotaExhaustedError | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
   const status = (error as Record<string, unknown>)['status'];
-  if (status !== 429) return undefined;
+  if (status !== 429 && status !== 403) return undefined;
 
   const message = readStringProp(error, 'message') ?? '';
-  const structuredHit = collectErrorCodes(error).some((code) =>
-    KIMI_QUOTA_EXHAUSTED_ERROR_CODES.has(code),
-  );
   const lowerMessage = message.toLowerCase();
-  const wordingHit = KIMI_QUOTA_EXHAUSTED_MESSAGE_PATTERNS.some((pattern) =>
+  const usageLimitHit = KIMI_USAGE_LIMIT_MESSAGE_PATTERNS.some((pattern) =>
     pattern.test(lowerMessage),
   );
-  if (!structuredHit && !wordingHit) return undefined;
+  if (status === 403) {
+    if (!usageLimitHit) return undefined;
+  } else {
+    const structuredHit = collectErrorCodes(error).some((code) =>
+      KIMI_QUOTA_EXHAUSTED_ERROR_CODES.has(code),
+    );
+    const wordingHit = KIMI_QUOTA_EXHAUSTED_MESSAGE_PATTERNS.some((pattern) =>
+      pattern.test(lowerMessage),
+    );
+    if (!structuredHit && !wordingHit && !usageLimitHit) return undefined;
+  }
 
   const requestId = readStringProp(error, 'requestID') ?? null;
   const headers = (error as Record<string, unknown>)['headers'];

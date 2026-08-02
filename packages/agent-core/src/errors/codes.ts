@@ -53,6 +53,7 @@ export const ErrorCodes = {
   PROVIDER_RATE_LIMIT: 'provider.rate_limit',
   PROVIDER_AUTH_ERROR: 'provider.auth_error',
   PROVIDER_CONNECTION_ERROR: 'provider.connection_error',
+  PROVIDER_USAGE_LIMIT: 'provider.usage_limit',
 
   SKILL_NOT_FOUND: 'skill.not_found',
   SKILL_TYPE_UNSUPPORTED: 'skill.type_unsupported',
@@ -333,6 +334,15 @@ export const KIMI_ERROR_INFO = {
     retryable: true,
     public: true,
     action: 'Check network connectivity and retry.',
+  },
+  // Deliberately non-retryable: retrying cannot help until the account's
+  // quota window resets.
+  'provider.usage_limit': {
+    title: 'Usage limit reached',
+    retryable: false,
+    public: true,
+    action:
+      'Wait for the quota window to reset (check /usage), or purchase extra usage or upgrade your plan.',
   },
 
   'skill.not_found': {

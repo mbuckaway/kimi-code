@@ -141,6 +141,19 @@ describe('assistantRenderBlocks', () => {
       { kind: 'text', text: 'answer', sourceIndex: 1 },
     ]);
   });
+
+  it('passes a turn-error block through with its code and source index', () => {
+    const rendered = assistantRenderBlocks(
+      assistantTurn([
+        { kind: 'text', text: 'partial' },
+        { kind: 'error', text: 'Weekly quota exceeded.', code: 'provider.usage_limit' },
+      ]),
+    );
+    expect(rendered).toEqual([
+      { kind: 'text', text: 'partial', sourceIndex: 0 },
+      { kind: 'error', text: 'Weekly quota exceeded.', code: 'provider.usage_limit', sourceIndex: 1 },
+    ]);
+  });
 });
 
 describe('turnFinalText', () => {
@@ -164,6 +177,16 @@ describe('turnToMarkdown', () => {
     ]);
     expect(turnToMarkdown(turn)).toBe(
       ['> **Thinking**\n> line1\n> line2', 'hello', '```\n[bash]\nout1\nout2\n```'].join('\n\n'),
+    );
+  });
+
+  it('renders a turn-error block as a quote so copied transcripts keep the failure', () => {
+    const turn = assistantTurn([
+      { kind: 'text', text: 'partial' },
+      { kind: 'error', text: 'Weekly quota exceeded.', code: 'provider.usage_limit' },
+    ]);
+    expect(turnToMarkdown(turn)).toBe(
+      ['partial', '> **Error** (provider.usage_limit)\n> Weekly quota exceeded.'].join('\n\n'),
     );
   });
 });

@@ -226,7 +226,11 @@ export interface CronTurnData {
 export type TurnBlock =
   | { kind: 'text'; text: string }
   | { kind: 'thinking'; thinking: string }
-  | { kind: 'tool'; tool: ToolCall };
+  | { kind: 'tool'; tool: ToolCall }
+  // A failed turn's coded error, folded in from the client-side turn-error
+  // marker (the transcript protocol's `notice` frame equivalent) — renders as
+  // a terminal error notice inside the failed turn.
+  | { kind: 'error'; text: string; code?: string };
 
 /** One attachment on a user turn: an uploaded file, image or video. Images
     and pasted media carry no name; the chip falls back to a generic label.

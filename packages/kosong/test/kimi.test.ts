@@ -2178,6 +2178,10 @@ describe('classifyKimiQuotaError', () => {
     'Your account org-0123456789abcdef <ak-test> is suspended due to insufficient balance, please recharge your account or check your plan and billing details';
   const TOKEN_QUOTA_MESSAGE =
     'You exceeded your current token quota: <org-0123456789abcdef> 31275, please check your account balance';
+  // The managed Kimi subscription's usage limit, observed in
+  // https://github.com/MoonshotAI/kimi-code/issues/2121.
+  const USAGE_LIMIT_403_MESSAGE =
+    "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.";
 
   function quota429(message: string, type?: string): OpenAIAPIError {
     return new OpenAIAPIError(
@@ -2186,6 +2190,10 @@ describe('classifyKimiQuotaError', () => {
       `429 ${message}`,
       new Headers(),
     );
+  }
+
+  function error403(message: string): OpenAIAPIError {
+    return new OpenAIAPIError(403, undefined, `403 ${message}`, new Headers());
   }
 
   it('classifies a structured exceeded_current_quota_error body as quota-exhausted', () => {
@@ -2218,6 +2226,32 @@ describe('classifyKimiQuotaError', () => {
     ).toBeUndefined();
     expect(classifyKimiQuotaError(new Error(QUOTA_MESSAGE))).toBeUndefined();
     expect(classifyKimiQuotaError(undefined)).toBeUndefined();
+  });
+
+  it('classifies the #2121 managed-subscription 403 usage-limit message as quota-exhausted', () => {
+    const error = classifyKimiQuotaError(error403(USAGE_LIMIT_403_MESSAGE));
+    expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
+    expect(isRetryableGenerateError(error)).toBe(false);
+  });
+
+  it.each([
+    "You've reached your usage limit for this billing cycle.",
+    'Your account hit the usage limit for this billing cycle.',
+    'Your quota will be refreshed in the next cycle.',
+  ])('falls back to usage-limit wording "%s" on a 403', (message) => {
+    expect(classifyKimiQuotaError(error403(message))).toBeInstanceOf(
+      APIProviderQuotaExhaustedError,
+    );
+  });
+
+  it.each([
+    'Invalid authentication credentials',
+    'You exceeded your current token quota: <org-0123456789abcdef> 31275, please check your account balance',
+    'Your account is suspended due to insufficient balance, please recharge your account',
+  ])('answers undefined for a 403 without usage-limit wording "%s"', (message) => {
+    // Billing wordings stay 429-only: on a 403 they read as auth/permission
+    // failures, not quota exhaustion.
+    expect(classifyKimiQuotaError(error403(message))).toBeUndefined();
   });
 
   it('classifies the Anthropic SDK error shape (body nested under .error)', () => {

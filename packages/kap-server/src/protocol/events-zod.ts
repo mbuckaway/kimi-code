@@ -344,6 +344,7 @@ export const kimiErrorCodeSchema = z.enum([
   'provider.rate_limit',
   'provider.auth_error',
   'provider.connection_error',
+  'provider.usage_limit',
   'provider.overloaded',
   'provider.not_found',
   'skill.not_found',

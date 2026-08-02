@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AppMessage, AppMessageContent } from '../src/api/types';
+import { TURN_ERROR_MARKER_METADATA_KEY } from '../src/api/types';
 import { latestTodos } from '../src/composables/latestTodos';
 import { messagesToTurns } from '../src/composables/messagesToTurns';
 import { isPlayableMediaUrl } from '../src/composables/useFilePreview';
@@ -115,6 +116,55 @@ describe('messagesToTurns', () => {
     );
 
     expect(turns).toMatchObject([{ role: 'compaction', text: 'summary' }]);
+  });
+
+  it('folds a turn-error marker into the failed turn as a terminal error block', () => {
+    const turns = messagesToTurns(
+      [
+        message('u1', 'user', [{ type: 'text', text: 'hello' }]),
+        // The pending assistant bubble left behind by the interrupted step.
+        message('a1', 'assistant', [], { promptId: 'p1' }),
+        message('e1', 'assistant', [{ type: 'text', text: 'Weekly quota exceeded.' }], {
+          promptId: 'p1',
+          metadata: {
+            [TURN_ERROR_MARKER_METADATA_KEY]: {
+              code: 'provider.usage_limit',
+              message: 'Weekly quota exceeded.',
+            },
+          },
+        }),
+      ],
+      [],
+      undefined,
+      false,
+    );
+
+    expect(turns).toHaveLength(2);
+    expect(turns[1]?.role).toBe('assistant');
+    expect(turns[1]?.blocks).toEqual([
+      { kind: 'error', text: 'Weekly quota exceeded.', code: 'provider.usage_limit' },
+    ]);
+  });
+
+  it('renders a turn-error marker as its own assistant turn when no turn is open', () => {
+    const turns = messagesToTurns(
+      [
+        message('u1', 'user', [{ type: 'text', text: 'hello' }]),
+        message('e1', 'assistant', [{ type: 'text', text: 'boom' }], {
+          promptId: 'p1',
+          metadata: {
+            [TURN_ERROR_MARKER_METADATA_KEY]: { code: 'provider.api_error', message: 'boom' },
+          },
+        }),
+      ],
+      [],
+      undefined,
+      false,
+    );
+
+    expect(turns).toHaveLength(2);
+    expect(turns[1]?.role).toBe('assistant');
+    expect(turns[1]?.blocks).toEqual([{ kind: 'error', text: 'boom', code: 'provider.api_error' }]);
   });
 
   it('renders a live multi-member swarm inline as a tool card', () => {

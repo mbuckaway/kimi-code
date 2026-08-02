@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { classifyFrame, createAgentProjector, subagentProgressText } from '../src/api/daemon/agentEventProjector';
+import { TURN_ERROR_MARKER_METADATA_KEY } from '../src/api/types';
 
 describe('subagentProgressText', () => {
   it('drops turn.step.started as noise', () => {
@@ -435,6 +436,67 @@ describe('turn.step.retrying bubble reuse', () => {
     // emptied one left by the interrupted retry attempt.
     const started = projector.project('turn.step.started', { type: 'turn.step.started', turnId: 1, step: 2, agentId: 'main', sessionId: sid }, sid);
     expect(started.filter((e) => e.type === 'messageCreated')).toHaveLength(1);
+  });
+});
+
+describe('turn failure inline error entry', () => {
+  it('appends a turn-error marker message when a turn fails with a coded error', () => {
+    const projector = createAgentProjector();
+    const sid = 's1';
+    projector.bindNextPromptId(sid, 'pr_1');
+    projector.project('turn.started', { agentId: 'main', turnId: 1 }, sid);
+
+    const events = projector.project(
+      'turn.ended',
+      {
+        agentId: 'main',
+        turnId: 1,
+        reason: 'failed',
+        error: { code: 'provider.usage_limit', message: 'Weekly quota exceeded.', name: 'UsageLimitError' },
+      },
+      sid,
+    );
+
+    const created = events.filter((e) => e.type === 'messageCreated');
+    expect(created).toHaveLength(1);
+    const marker = created[0]!;
+    if (marker.type !== 'messageCreated') throw new Error('expected messageCreated');
+    expect(marker.message.role).toBe('assistant');
+    expect(marker.message.promptId).toBe('pr_1');
+    expect(marker.message.content).toEqual([{ type: 'text', text: 'Weekly quota exceeded.' }]);
+    expect(marker.message.metadata?.[TURN_ERROR_MARKER_METADATA_KEY]).toEqual({
+      code: 'provider.usage_limit',
+      message: 'Weekly quota exceeded.',
+    });
+  });
+
+  it('projects no marker for a completed turn or a failure without an error payload', () => {
+    const projector = createAgentProjector();
+    const sid = 's1';
+    projector.project('turn.started', { agentId: 'main', turnId: 1 }, sid);
+    const completed = projector.project('turn.ended', { agentId: 'main', turnId: 1, reason: 'completed' }, sid);
+    expect(completed.some((e) => e.type === 'messageCreated')).toBe(false);
+
+    projector.project('turn.started', { agentId: 'main', turnId: 2 }, sid);
+    const failedNoPayload = projector.project('turn.ended', { agentId: 'main', turnId: 2, reason: 'failed' }, sid);
+    expect(failedNoPayload.some((e) => e.type === 'messageCreated')).toBe(false);
+  });
+
+  it('keeps the marker id stable per turn so a replayed event dedupes in the reducer', () => {
+    const projector = createAgentProjector();
+    const sid = 's1';
+    const payload = {
+      agentId: 'main',
+      turnId: 1,
+      reason: 'failed',
+      error: { code: 'provider.usage_limit', message: 'Weekly quota exceeded.' },
+    };
+    const first = projector.project('turn.ended', payload, sid).find((e) => e.type === 'messageCreated');
+    const second = projector.project('turn.ended', payload, sid).find((e) => e.type === 'messageCreated');
+    if (first?.type !== 'messageCreated' || second?.type !== 'messageCreated') {
+      throw new Error('expected messageCreated');
+    }
+    expect(second.message.id).toBe(first.message.id);
   });
 });
 

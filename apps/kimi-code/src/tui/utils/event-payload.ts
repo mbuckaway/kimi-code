@@ -112,6 +112,21 @@ export function formatErrorPayload(error: ErrorPayloadLike): string {
   return `[${error.code}] ${error.message}`;
 }
 
+/**
+ * Plain-language notice for a subscription usage-limit failure. Keeps the
+ * provider's message and adds recovery guidance instead of rendering the raw
+ * `[provider.usage_limit] <message>` payload: the failure is expected plan
+ * behavior, not a bug, so the user should check /usage, wait for the quota
+ * window to reset, or upgrade — not file a report.
+ */
+export function formatUsageLimitErrorNotice(message: string): string {
+  return (
+    `Usage limit reached: ${message}\n` +
+    'Run /usage to see your plan limits and reset times. ' +
+    'Wait for the quota window to reset, or upgrade your plan for a higher limit.'
+  );
+}
+
 function formatProviderFilteredMessage(
   details: Record<string, unknown> | undefined,
 ): string | undefined {

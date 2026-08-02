@@ -313,6 +313,78 @@ describe('SubagentBatch scheduling contract', () => {
     }
   });
 
+  it('does not requeue a wire-round-tripped usage-limit failure as a rate limit', async () => {
+    vi.useFakeTimers();
+    try {
+      const onSuspended = vi.fn();
+      const { runBatch, attempts } = createMockBatchRunner({ onSuspended });
+      const running = runBatch(Array.from({ length: 3 }, (_, index) => queuedTask(index + 1)), {
+        signal,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toHaveLength(3);
+      attempts.forEach((attempt) => {
+        attempt.markReady();
+      });
+
+      attempts[0]!.outcome.resolve({
+        task: attempts[0]!.task,
+        agentId: 'agent-1',
+        status: 'completed',
+        result: 'completed 1',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The usage-limit wire code crosses the subagent turn boundary embedded
+      // in a re-minted Error message (see runChildTurnToCompletion in
+      // subagent-host); the trailing text deliberately matches the rate-limit
+      // message fallback, which must not win over the wire code. Task 3 is
+      // still unfinished, so a misread rate limit would requeue task 2.
+      attempts[1]!.outcome.resolve({
+        task: attempts[1]!.task,
+        agentId: 'agent-2',
+        status: 'failed',
+        error:
+          '[provider.usage_limit] Too many requests: reached your usage limit for this billing cycle',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      attempts[2]!.outcome.resolve({
+        task: attempts[2]!.task,
+        agentId: 'agent-3',
+        status: 'completed',
+        result: 'completed 3',
+      });
+      await expect(running).resolves.toMatchObject([
+        {
+          task: { data: 1 },
+          agentId: 'agent-1',
+          status: 'completed',
+          result: 'completed 1',
+        },
+        {
+          task: { data: 2 },
+          agentId: 'agent-2',
+          status: 'failed',
+          state: 'started',
+          error:
+            '[provider.usage_limit] Too many requests: reached your usage limit for this billing cycle',
+        },
+        {
+          task: { data: 3 },
+          agentId: 'agent-3',
+          status: 'completed',
+          result: 'completed 3',
+        },
+      ]);
+      expect(onSuspended).not.toHaveBeenCalled();
+      expect(attempts).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rate-limit capacity blocks launches while active attempts fill all slots', async () => {
     vi.useFakeTimers();
     try {

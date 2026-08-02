@@ -25,6 +25,7 @@ import type {
   AppSessionUsage,
   AppTask,
 } from '../types';
+import { TURN_ERROR_MARKER_METADATA_KEY } from '../types';
 import { i18n } from '../../i18n';
 import { toolLabel, toolSummary } from '../../lib/toolMeta';
 import { toAppMessageContent } from './mappers';
@@ -1006,6 +1007,40 @@ export function createAgentProjector(): AgentProjector {
         s.turnCount++;
         const usageSnapshot = buildUsageSnapshot(s);
         out.push({ type: 'sessionUsageUpdated', sessionId, usage: usageSnapshot });
+
+        // A failed turn's coded error must stay visible in the conversation,
+        // not only flash by as a toast: append a client-side marker message
+        // that messagesToTurns folds into the failed turn as a terminal error
+        // block (transcript `notice` frame parity). The id is deterministic per
+        // (session, turn) so a replayed event dedupes in the reducer.
+        const turnError = p?.error as { code?: unknown; message?: unknown } | undefined;
+        if (
+          reason === 'failed' &&
+          turnError !== undefined &&
+          typeof turnError.message === 'string' &&
+          turnError.message.length > 0
+        ) {
+          const turnId: number | undefined = typeof p?.turnId === 'number' ? p.turnId : undefined;
+          const markerPromptId =
+            (turnId !== undefined ? s.turnPromptId.get(turnId) : undefined) ?? s.currentPromptId;
+          out.push({
+            type: 'messageCreated',
+            message: {
+              id: `turnerror_${sessionId}_${turnId ?? 'unknown'}`,
+              sessionId,
+              role: 'assistant',
+              content: [{ type: 'text', text: turnError.message }],
+              createdAt: new Date().toISOString(),
+              promptId: markerPromptId,
+              metadata: {
+                [TURN_ERROR_MARKER_METADATA_KEY]: {
+                  code: typeof turnError.code === 'string' ? turnError.code : undefined,
+                  message: turnError.message,
+                },
+              },
+            },
+          });
+        }
 
         // No busy projection here — see turn.started. The daemon's
         // `event.session.work_changed` flips the session busy fact.

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
 import { testKaos } from '../fixtures/test-kaos';
-import { APIStatusError, type Message, type ToolCall } from '@moonshot-ai/kosong';
+import { APIStatusError, APIProviderQuotaExhaustedError, type Message, type ToolCall } from '@moonshot-ai/kosong';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Agent, AgentOptions } from '../../src/agent';
@@ -149,6 +149,85 @@ describe('SessionSubagentHost', () => {
         args: expect.objectContaining({
           error: 'Aborted',
         }),
+      }),
+    );
+  });
+
+  it('does not suppress the failure event for a usage-limit-coded queued failure', async () => {
+    const parent = testAgent();
+    parent.configure();
+    parent.newEvents();
+
+    const generate: GenerateFn = async () => {
+      throw new APIProviderQuotaExhaustedError(
+        'Too many requests: reached your usage limit for this billing cycle',
+        'req-usage',
+      );
+    };
+    const child = testAgent({ generate });
+    child.configure();
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Investigate',
+      description: 'Investigate',
+      runInBackground: false,
+      signal,
+      suppressRateLimitFailureEvent: true,
+    });
+
+    // The re-minted message still matches the rate-limit wording fallback,
+    // but the usage-limit wire code must win: the failure is reported.
+    await expect(handle.completion).rejects.toThrow('[provider.usage_limit]');
+    expect(parent.allEvents).toContainEqual(
+      expect.objectContaining({
+        type: '[rpc]',
+        event: 'subagent.failed',
+        args: expect.objectContaining({
+          subagentId: 'agent-0',
+          error: expect.stringContaining('[provider.usage_limit]'),
+        }),
+      }),
+    );
+  });
+
+  it('suppresses the failure event for a rate-limited queued failure', async () => {
+    const parent = testAgent();
+    parent.configure();
+    parent.newEvents();
+
+    const generate: GenerateFn = async () => {
+      throw new APIStatusError(429, 'Too many requests', 'req-429');
+    };
+    const child = testAgent({
+      generate,
+      initialConfig: {
+        providers: {},
+        loopControl: { maxRetriesPerStep: 0 },
+      },
+    });
+    child.configure();
+    const session = fakeSession(parent.agent, child.agent);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const handle = await host.spawn({
+      profileName: 'coder',
+      parentToolCallId: 'call_agent',
+      prompt: 'Investigate',
+      description: 'Investigate',
+      runInBackground: false,
+      signal,
+      suppressRateLimitFailureEvent: true,
+    });
+
+    await expect(handle.completion).rejects.toThrow('Too many requests');
+    expect(parent.allEvents).not.toContainEqual(
+      expect.objectContaining({
+        type: '[rpc]',
+        event: 'subagent.failed',
       }),
     );
   });

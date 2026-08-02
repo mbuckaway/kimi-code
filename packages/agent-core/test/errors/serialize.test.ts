@@ -50,19 +50,36 @@ describe('toKimiErrorPayload — APIStatusError message sanitization', () => {
 });
 
 describe('toKimiErrorPayload — quota-exhausted 429', () => {
-  it('maps a quota-exhausted 429 to provider.api_error, not provider.rate_limit', () => {
+  it('maps a quota-exhausted 429 to provider.usage_limit, not provider.rate_limit', () => {
     // provider.rate_limit is retryable and re-minted as a rate-limit error
     // across the wire boundary, which drives the swarm requeue/suspend loop;
-    // quota exhaustion must carry the non-retryable generic code instead.
+    // quota exhaustion carries the dedicated non-retryable code instead.
     const payload = toKimiErrorPayload(
       new APIProviderQuotaExhaustedError(
         'Your account is suspended due to insufficient balance, please recharge your account',
         'req-quota',
       ),
     );
-    expect(payload.code).toBe('provider.api_error');
+    expect(payload.code).toBe('provider.usage_limit');
     expect(payload.retryable).toBe(false);
     expect(payload.message).toContain('recharge');
     expect(payload.details).toMatchObject({ statusCode: 429, requestId: 'req-quota' });
+  });
+
+  it('maps the #2121 managed-subscription 403 usage-limit failure to provider.usage_limit', () => {
+    // classifyKimiQuotaError promotes the 403 "usage limit for this billing
+    // cycle" response to APIProviderQuotaExhaustedError; serialization must
+    // keep it out of provider.rate_limit even though the message could match
+    // rate-limit wording downstream.
+    const payload = toKimiErrorPayload(
+      new APIProviderQuotaExhaustedError(
+        "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.",
+        'req-usage',
+      ),
+    );
+    expect(payload.code).toBe('provider.usage_limit');
+    expect(payload.retryable).toBe(false);
+    expect(payload.message).toContain('usage limit');
+    expect(payload.details).toMatchObject({ requestId: 'req-usage' });
   });
 });

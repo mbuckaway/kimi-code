@@ -248,8 +248,13 @@ const AGENT_ERROR_TITLE_KEYS: Readonly<Record<string, string>> = {
   'provider.overloaded': 'overloaded',
   'provider.filtered': 'filtered',
   'provider.api_error': 'api',
+  'provider.usage_limit': 'usageLimit',
   'context.overflow': 'contextOverflow',
 };
+
+/** Codes whose failure silently stops the user's work and must stay on screen
+ *  until explicitly dismissed (sticky toast, no auto-dismiss timer). */
+const AGENT_ERROR_STICKY_CODES: ReadonlySet<string> = new Set(['provider.usage_limit']);
 
 interface AgentErrorRaw {
   code?: string;
@@ -293,6 +298,7 @@ function buildAgentErrorNotice(raw: AgentErrorRaw): AppNotice {
     title: t(`warnings.agentError.${titleKey}`),
     message: raw.message,
     details: details.length > 0 ? details : undefined,
+    sticky: raw.code !== undefined && AGENT_ERROR_STICKY_CODES.has(raw.code) ? true : undefined,
   };
 }
 

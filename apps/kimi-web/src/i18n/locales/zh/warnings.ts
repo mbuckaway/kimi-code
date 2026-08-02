@@ -10,6 +10,7 @@ export default {
     overloaded: '模型服务过载',
     filtered: '响应被提供方过滤',
     api: '模型接口返回错误',
+    usageLimit: '用量已达上限',
     contextOverflow: '上下文超出模型限制',
   },
   details: {

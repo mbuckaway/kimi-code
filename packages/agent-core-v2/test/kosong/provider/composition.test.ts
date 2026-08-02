@@ -67,6 +67,7 @@ import '#/kosong/provider/bases/openai/index';
 import { OpenAIResponsesChatProvider } from '#/kosong/provider/bases/openai/openai-responses';
 import { OpenAILegacyChatProvider } from '#/kosong/provider/bases/openai/openai-legacy';
 import { ProtocolAdapterRegistry } from '#/kosong/provider/protocolAdapterRegistry';
+import { translateProviderError } from '#/kosong/protocol/errors';
 import {
   getProviderDefinition,
   getProviderDefinitions,
@@ -800,6 +801,63 @@ describe('quota-exhausted classification through the real composition (behavior 
     expect(caught).toBeInstanceOf(APIProviderRateLimitError);
     expect(caught).not.toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(caught)).toBe(true);
+  });
+
+  // The managed subscription's usage limit arrives as a 403, observed in
+  // https://github.com/MoonshotAI/kimi-code/issues/2121.
+  const USAGE_LIMIT_403_MESSAGE =
+    "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.";
+
+  function mockUsageLimit403Client(provider: ChatProvider): void {
+    const client = sdkClient(provider) as {
+      messages: { create: unknown };
+      beta: { messages: { create: unknown } };
+    };
+    const reject = vi.fn().mockImplementation(() => {
+      throw AnthropicAPIError.generate(
+        403,
+        { type: 'error', error: { type: 'error', message: USAGE_LIMIT_403_MESSAGE } },
+        `403 ${USAGE_LIMIT_403_MESSAGE}`,
+        new Headers(),
+      );
+    });
+    client.messages.create = reject;
+    client.beta.messages.create = reject;
+  }
+
+  it('flows the #2121 403 usage limit end-to-end over the (kimi, anthropic) composition', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'anthropic',
+      providerType: 'kimi',
+      modelName: 'kimi-for-coding',
+      apiKey: 'sk-probe',
+    });
+    mockUsageLimit403Client(provider);
+
+    const caught = await provider.generate('', [], PROBE_HISTORY).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    // Raw 403 → quota-exhausted contract error → provider.usage_limit wire code.
+    expect(caught).toBeInstanceOf(APIProviderQuotaExhaustedError);
+    expect(isRetryableGenerateError(caught)).toBe(false);
+    expect(translateProviderError(caught).code).toBe('provider.usage_limit');
+  });
+
+  it('keeps the same 403 an auth failure on a plain anthropic composition', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'anthropic',
+      modelName: 'claude-opus-4-6',
+      apiKey: 'sk-probe',
+    });
+    mockUsageLimit403Client(provider);
+
+    const caught = await provider.generate('', [], PROBE_HISTORY).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(caught).not.toBeInstanceOf(APIProviderQuotaExhaustedError);
+    expect(translateProviderError(caught).code).toBe('provider.auth_error');
   });
 });
 

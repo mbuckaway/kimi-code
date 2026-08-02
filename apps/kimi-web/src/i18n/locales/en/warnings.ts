@@ -10,6 +10,7 @@ export default {
     overloaded: 'Model overloaded',
     filtered: 'Response filtered by the provider',
     api: 'Model API error',
+    usageLimit: 'Usage limit reached',
     contextOverflow: 'Context size exceeded',
   },
   details: {

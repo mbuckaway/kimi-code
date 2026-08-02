@@ -41,12 +41,14 @@ import {
 import {
   OAUTH_LOGIN_REQUIRED_CODE,
   OAUTH_LOGIN_REQUIRED_STARTUP_NOTICE,
+  PROVIDER_USAGE_LIMIT_CODE,
 } from '../constant/kimi-tui';
 import { buildGoalCompletionMessage } from '../utils/goal-completion';
 import {
   argsRecord,
   formatErrorPayload,
   formatErrorMessage,
+  formatUsageLimitErrorNotice,
   isTodoItemShape,
   serializeToolResultOutput,
   stringValue,
@@ -899,6 +901,12 @@ export class SessionEventHandler {
     this.host.streamingUI.finalizeLiveTextBuffers('idle');
     if (event.code === OAUTH_LOGIN_REQUIRED_CODE) {
       this.host.showError(OAUTH_LOGIN_REQUIRED_STARTUP_NOTICE);
+      return;
+    }
+    if (event.code === PROVIDER_USAGE_LIMIT_CODE) {
+      // Expected plan behavior, not a bug: plain-language guidance instead of
+      // the raw `[code] message`, and no error-report hint.
+      this.host.showError(formatUsageLimitErrorNotice(event.message));
       return;
     }
     this.host.showError(formatErrorPayload(event));

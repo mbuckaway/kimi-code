@@ -19,14 +19,14 @@
  */
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
-import { userCancellationReason } from '#/_base/utils/abort';
+import { isAbortError, userCancellationReason } from '#/_base/utils/abort';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
+import { isProviderUsageLimitError } from '#/kosong/protocol/errors';
 import { type TokenUsage } from '#/kosong/contract/usage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IEventBus } from '#/app/event/eventBus';
-import { isAbortError } from '#/_base/utils/abort';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 
 import { type AgentRunHandle, ISessionSubagentService } from './subagent';
@@ -177,6 +177,9 @@ export async function mirrorAgentRun(
 
 function shouldSuppressFailure(options: MirrorAgentRunOptions, error: unknown): boolean {
   if (options.suppressRateLimitFailureEvent !== true) return false;
+  // A usage-limit-coded failure is final — it must stay visible, not be
+  // swallowed by the rate-limit suppression its message wording matches.
+  if (isProviderUsageLimitError(error)) return false;
   if (isProviderRateLimitError(error)) return true;
   return isAbortError(error) || options.signal.aborted;
 }

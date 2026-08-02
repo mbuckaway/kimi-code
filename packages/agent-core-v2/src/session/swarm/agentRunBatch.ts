@@ -8,6 +8,7 @@
  */
 
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
+import { isProviderUsageLimitError } from '#/kosong/protocol/errors';
 import { type TokenUsage } from '#/kosong/contract/usage';
 import * as retry from 'retry';
 
@@ -322,7 +323,10 @@ export class AgentRunBatch<T> {
         usage: completion.usage,
       };
     } catch (error) {
-      if (isProviderRateLimitError(error)) {
+      // A usage-limit-coded failure must not enter the rate-limit requeue
+      // loop: its message can still match the rate-limit wording fallback,
+      // but requeueing cannot help until the quota window resets.
+      if (!isProviderUsageLimitError(error) && isProviderRateLimitError(error)) {
         return {
           type: 'rate_limited',
           agentId: handle.agentId,

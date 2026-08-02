@@ -296,7 +296,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       alias: modelAlias,
       provider_type: model?.providerType ?? model?.protocol,
       protocol: model?.protocol,
-      retryable: isRetryableGenerateError(error),
+      retryable: isRetryableGenerateError(unwrapErrorCause(error)),
       duration_ms: Math.max(0, Date.now() - startedAt),
       turn_id: source?.turnId,
       request_kind: requestKindForTelemetry(source),
