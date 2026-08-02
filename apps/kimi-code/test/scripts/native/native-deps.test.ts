@@ -78,6 +78,16 @@ describe('resolveTargetDeps', () => {
   it('throws on unsupported target', () => {
     expect(() => resolveTargetDeps('linux-x64-musl')).toThrow(/unsupported/i);
   });
+
+  it('includes fsevents only for darwin targets', () => {
+    for (const target of ['darwin-arm64', 'darwin-x64']) {
+      const dep = resolveTargetDeps(target).find((d) => d.resolvedName === 'fsevents');
+      expect(dep?.nativeFileRelatives).toEqual(['fsevents.node']);
+    }
+    for (const target of ['linux-arm64', 'linux-x64', 'win32-arm64', 'win32-x64']) {
+      expect(resolveTargetDeps(target).map((d) => d.resolvedName)).not.toContain('fsevents');
+    }
+  });
 });
 
 describe('nativeDeps registry shape', () => {
@@ -96,5 +106,14 @@ describe('nativeDeps registry shape', () => {
     const piTui = nativeDeps.find((d) => d.id === 'pi-tui');
     expect(piTui?.collect).toBe('native-file-only');
     expect(piTui?.parent).toBe(null);
+  });
+
+  it('has fsevents (collect=js-and-native-file, no parent, darwin-only)', () => {
+    const fsevents = nativeDeps.find((d) => d.id === 'fsevents');
+    expect(fsevents?.collect).toBe('js-and-native-file');
+    expect(fsevents?.parent).toBe(null);
+    expect(fsevents?.targets?.('darwin-arm64')).toBe(true);
+    expect(fsevents?.targets?.('linux-x64')).toBe(false);
+    expect(fsevents?.targets?.('win32-x64')).toBe(false);
   });
 });
