@@ -20,6 +20,7 @@ const optionalRuntimeRequires = new Set([
   'cpu-features',
   'fast-json-stringify/lib/serializer',
   'fast-json-stringify/lib/validator',
+  'fsevents',
   'utf-8-validate',
 ]);
 const optionalRelativeRuntimeRequires = new Set(['./crypto/build/Release/sshcrypto.node']);

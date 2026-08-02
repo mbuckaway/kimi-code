@@ -150,6 +150,9 @@ importers:
       '@mariozechner/clipboard':
         specifier: ^0.3.9
         version: 0.3.9
+      fsevents:
+        specifier: ^2.3.3
+        version: 2.3.3
       node-pty:
         specifier: ^1.1.0
         version: 1.1.0
@@ -822,6 +825,10 @@ importers:
       vite:
         specifier: ^6.3.3
         version: 6.4.2(@types/node@22.19.17)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.21.0)(yaml@2.8.3)
+    optionalDependencies:
+      fsevents:
+        specifier: ^2.3.3
+        version: 2.3.3
 
   packages/kaos:
     dependencies:

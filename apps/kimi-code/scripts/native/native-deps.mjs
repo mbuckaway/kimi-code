@@ -57,6 +57,9 @@ export function isSupportedTarget(target) {
  *           (used by 'js-and-native-file' and 'native-file-only';
  *           native-files mode auto-scans *.node). 'native-file-only' collects
  *           package.json + these .node files but skips the package entry JS.
+ * @property {(target: string) => boolean} [targets]
+ *           — optional per-target filter (e.g. darwin-only packages); without
+ *           it the dep is collected for every target
  */
 
 /** @type {readonly NativeDepDescriptor[]} */
@@ -84,6 +87,17 @@ export const nativeDeps = Object.freeze([
     parent: null,
     nativeFileRelatives: (target) => piTuiNativeFileByTarget[target] ?? [],
   },
+  {
+    id: 'fsevents',
+    name: () => 'fsevents',
+    // fsevents is a darwin-only optional dependency of agent-core-v2 (loaded
+    // via createRequire at runtime), so the SEA ships its package.json + entry
+    // JS + fsevents.node for macOS targets only.
+    collect: 'js-and-native-file',
+    parent: null,
+    nativeFileRelatives: () => ['fsevents.node'],
+    targets: (target) => target.startsWith('darwin-'),
+  },
 ]);
 
 /**
@@ -94,7 +108,7 @@ export function resolveTargetDeps(target) {
     throw new Error(`Unsupported native asset target: ${target}`);
   }
   return nativeDeps
-    .filter((d) => d.collect !== 'virtual')
+    .filter((d) => d.collect !== 'virtual' && (d.targets?.(target) ?? true))
     .map((d) => ({
       ...d,
       resolvedName: d.name(target),
