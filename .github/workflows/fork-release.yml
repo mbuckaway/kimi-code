@@ -1,0 +1,214 @@
+name: Fork release
+
+# Fork-only release pipeline (mbuckaway/kimi-code). Two modes on push to
+# fork/main:
+#   - version: an ordinary push computes the next <upstream-base>-MB.<x>.<y>
+#     version, opens a version-bump PR ("chore: release …") and auto-merges
+#     it (rulesets forbid direct pushes to fork/main).
+#   - publish: the merged version-bump commit triggers tagging
+#     (v<version>, no slashes so release asset URLs stay clean), a GitHub
+#     Release, unsigned native builds, and a refresh of the gh-pages update
+#     channel that fork CLIs poll (KIMI_CODE_CDN_BASE →
+#     https://mbuckaway.github.io/kimi-code).
+# Requires FORK_SYNC_PAT for the version PR (a GITHUB_TOKEN merge would not
+# re-trigger this workflow for the publish half).
+
+on:
+  push:
+    branches:
+      - fork/main
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'MB counter bump for the next release'
+        type: choice
+        options:
+          - minor
+          - major
+        default: minor
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  route:
+    name: Decide version vs publish
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.route.outputs.mode }}
+    steps:
+      - name: Inspect trigger
+        id: route
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=version" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.head_commit.message }}" == chore:\ release\ * ]]; then
+            echo "mode=publish" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=version" >> "$GITHUB_OUTPUT"
+          fi
+
+  version:
+    name: Open release version PR
+    needs: route
+    if: needs.route.outputs.mode == 'version'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Checkout fork/main
+        uses: actions/checkout@v6
+        with:
+          ref: fork/main
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_PAT }}
+
+      - name: Fetch main and tags
+        run: |
+          git fetch origin main
+          git fetch origin --tags --force
+
+      - name: Compute next version
+        id: v
+        run: |
+          set -euo pipefail
+          BASE=$(git show origin/main:apps/kimi-code/package.json \
+            | grep -m1 '"version"' | sed -E 's/.*"version": *"([^"]+)".*/\1/' | cut -d- -f1)
+          LAST=$(git tag -l "v$BASE-MB.*" | sed "s/^v$BASE-MB\.//" | sort -t. -k1,1n -k2,2n | tail -1)
+          BUMP="${{ github.event.inputs.bump }}"
+          [ -z "$BUMP" ] && BUMP=minor
+          if [ -z "$LAST" ]; then
+            NEXT="1.0"
+          else
+            MAJ=${LAST%%.*}
+            MIN=${LAST##*.}
+            if [ "$BUMP" = "major" ]; then
+              MAJ=$((MAJ + 1)); MIN=0
+            else
+              MIN=$((MIN + 1))
+            fi
+            NEXT="$MAJ.$MIN"
+          fi
+          echo "version=$BASE-MB.$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next fork version: $BASE-MB.$NEXT (base $BASE, bump $BUMP, last ${LAST:-none})"
+
+      - name: Commit version bump, open PR, auto-merge
+        run: |
+          set -euo pipefail
+          V="${{ steps.v.outputs.version }}"
+          BR="release/v$V"
+          git config user.name "fork-release[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BR"
+          node -e "const fs=require('fs');const p='apps/kimi-code/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version='$V';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+          git commit -am "chore: release $V"
+          git push origin "$BR"
+          PR_URL=$(gh pr create --base fork/main --head "$BR" \
+            --title "chore: release $V" \
+            --body "Automated fork release version bump. Merging triggers the publish half of fork-release.yml.")
+          gh pr merge "$PR_URL" --auto --squash
+
+  prepare:
+    name: Tag and create GitHub Release
+    needs: route
+    if: needs.route.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - name: Checkout fork/main
+        uses: actions/checkout@v6
+        with:
+          ref: fork/main
+          fetch-depth: 0
+
+      - name: Resolve version and tag
+        id: v
+        run: |
+          V=$(grep -m1 '"version"' apps/kimi-code/package.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "fork-release[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.v.outputs.tag }}"
+          git push origin "${{ steps.v.outputs.tag }}"
+          gh release create "${{ steps.v.outputs.tag }}" \
+            --target fork/main \
+            --title "kimi-code ${{ steps.v.outputs.version }} (mbuckaway fork)" \
+            --generate-notes
+
+  native-artifacts:
+    name: Native build (unsigned)
+    needs: prepare
+    uses: ./.github/workflows/_native-build.yml
+    with:
+      upload-artifact-prefix: kimi-code-native
+      retention-days: 7
+      sign-macos: false
+
+  publish-assets:
+    name: Upload assets and refresh update channel
+    needs:
+      - prepare
+      - native-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork/main
+        uses: actions/checkout@v6
+        with:
+          ref: fork/main
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: kimi-code-native-*
+          path: dist-native-release
+          merge-multiple: true
+
+      - name: Produce manifest.json
+        run: node apps/kimi-code/scripts/native/produce-manifest.mjs dist-native-release "${{ needs.prepare.outputs.tag }}"
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" dist-native-release/* --clobber
+
+      - name: Generate update channel files
+        run: node fork/scripts/publish-update-channel.mjs "${{ needs.prepare.outputs.version }}" dist-native-release dist-channel
+
+      - name: Publish update channel to gh-pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          WORK=$(mktemp -d)
+          if git ls-remote --exit-code origin gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORK"
+          else
+            git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORK"
+            git -C "$WORK" checkout --orphan gh-pages
+            git -C "$WORK" rm -rf .
+          fi
+          cp -R dist-channel/. "$WORK"/
+          git -C "$WORK" config user.name "fork-release[bot]"
+          git -C "$WORK" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$WORK" add -A
+          if git -C "$WORK" diff --cached --quiet; then
+            echo "Update channel already current"
+            exit 0
+          fi
+          git -C "$WORK" commit -m "chore: update channel $VERSION"
+          git -C "$WORK" push origin gh-pages
