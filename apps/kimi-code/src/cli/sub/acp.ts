@@ -11,6 +11,10 @@
  *    distinguish ACP sessions from the TUI.
  *  - {@link runAcpServer} owns the JSON-RPC stdio bridge and redirects
  *    rogue `console.*` traffic to stderr.
+ *  - `--socket <path>` (or `[acp].socket` in config.toml) pivots to
+ *    {@link runAcpServerOnSocket}: the same harness and slash-command
+ *    wiring, served over a Unix domain socket / Windows named pipe so
+ *    several clients can share one long-lived process.
  *  - `--login` pivots into the device-code login flow instead of
  *    starting the server. This is the entry point ACP clients hit
  *    via the first-class `AuthMethodTerminal` path when they re-invoke
@@ -24,10 +28,18 @@ import type { Command } from 'commander';
 import {
   ACP_BUILTIN_SLASH_COMMANDS,
   runAcpServer,
+  runAcpServerOnSocket,
   type AvailableCommand,
   type SlashCommandsSnapshot,
 } from '@moonshot-ai/acp-adapter';
-import { createKimiHarness, type Session, type SkillSummary } from '@moonshot-ai/kimi-code-sdk';
+import {
+  createKimiHarness,
+  loadRuntimeConfigSafe,
+  resolveConfigPath,
+  resolveKimiHome,
+  type Session,
+  type SkillSummary,
+} from '@moonshot-ai/kimi-code-sdk';
 
 import { KIMI_CODE_HOME_ENV } from '#/constant/app';
 import { createKimiCodeHostIdentity, getVersion } from '#/cli/version';
@@ -44,7 +56,11 @@ export function registerAcpCommand(parent: Command): void {
       'Run the device-code login flow then exit (entry point for ACP terminal-auth).',
       false,
     )
-    .action(async (opts: { login?: boolean }) => {
+    .option(
+      '--socket <path>',
+      'Listen on a Unix domain socket (macOS/Linux) or Windows named pipe (\\\\.\\pipe\\...) instead of stdio.',
+    )
+    .action(async (opts: { login?: boolean; socket?: string }) => {
       if (opts.login === true) {
         await runLoginFlow();
         return;
@@ -108,15 +124,40 @@ export function registerAcpCommand(parent: Command): void {
           skillCommandMap: built.commandMap,
         };
       };
+      // Transport resolution order: an explicit --socket flag wins;
+      // otherwise fall back to `[acp].socket` in config.toml; otherwise
+      // stdio (the default). loadRuntimeConfigSafe never throws — a
+      // missing or broken config simply yields no socket, and the config
+      // file is only read when the flag is absent.
+      const socketPath =
+        opts.socket ??
+        loadRuntimeConfigSafe(resolveConfigPath({ homeDir: resolveKimiHome() })).config.acp
+          ?.socket;
       try {
-        await runAcpServer(harness, {
-          agentInfo: { name: 'Kimi Code CLI', version: getVersion() },
-          slashCommands: resolveSlashCommands,
-          ...(terminalAuthEnv ? { terminalAuthEnv } : {}),
-          ...(legacyCommand !== undefined && legacyCommand.length > 0
-            ? { terminalAuthLegacyCommand: legacyCommand }
-            : {}),
-        });
+        if (socketPath !== undefined) {
+          const running = runAcpServerOnSocket(harness, {
+            socketPath,
+            agentInfo: { name: 'Kimi Code CLI', version: getVersion() },
+            slashCommands: resolveSlashCommands,
+            terminalAuthEnv,
+            terminalAuthLegacyCommand:
+              legacyCommand !== undefined && legacyCommand.length > 0 ? legacyCommand : undefined,
+          });
+          // The adapter prints nothing itself and its promise settles only
+          // on shutdown (signal-driven drain), so this stderr line — the
+          // single user-visible listen message — is written up front.
+          process.stderr.write(`acp server listening on ${socketPath}\n`);
+          await running;
+        } else {
+          await runAcpServer(harness, {
+            agentInfo: { name: 'Kimi Code CLI', version: getVersion() },
+            slashCommands: resolveSlashCommands,
+            ...(terminalAuthEnv ? { terminalAuthEnv } : {}),
+            ...(legacyCommand !== undefined && legacyCommand.length > 0
+              ? { terminalAuthLegacyCommand: legacyCommand }
+              : {}),
+          });
+        }
         process.exit(0);
       } catch (err) {
         process.stderr.write(`acp server: fatal error: ${String(err)}\n`);

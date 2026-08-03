@@ -226,6 +226,13 @@ export const ImageConfigSchema = z.object({
 
 export type ImageConfig = z.infer<typeof ImageConfigSchema>;
 
+export const AcpConfigSchema = z.object({
+  /** Unix socket path the ACP (Agent Client Protocol) adapter listens on. */
+  socket: z.string().optional(),
+});
+
+export type AcpConfig = z.infer<typeof AcpConfigSchema>;
+
 export const ModelCatalogConfigSchema = z.object({
   /** Interval (ms) between automatic provider-model refreshes. `0` disables. */
   refreshIntervalMs: z.number().int().min(0).optional(),
@@ -358,6 +365,7 @@ export const KimiConfigSchema = z.object({
   secondaryModel: SecondaryModelConfigSchema.optional(),
   mcp: McpConfigSchema.optional(),
   image: ImageConfigSchema.optional(),
+  acp: AcpConfigSchema.optional(),
   modelCatalog: ModelCatalogConfigSchema.optional(),
   experimental: ExperimentalConfigSchema.optional(),
   telemetry: z.boolean().optional(),
@@ -376,6 +384,7 @@ const SubagentConfigPatchSchema = SubagentConfigSchema.partial();
 const SecondaryModelConfigPatchSchema = SecondaryModelConfigSchema.partial();
 const McpConfigPatchSchema = McpConfigSchema.partial();
 const ImageConfigPatchSchema = ImageConfigSchema.partial();
+const AcpConfigPatchSchema = AcpConfigSchema.partial();
 const ModelCatalogConfigPatchSchema = ModelCatalogConfigSchema.partial();
 const ExperimentalConfigPatchSchema = ExperimentalConfigSchema;
 const MoonshotServiceConfigPatchSchema = MoonshotServiceConfigSchema.partial();
@@ -407,6 +416,7 @@ export const KimiConfigPatchSchema = z
     secondaryModel: SecondaryModelConfigPatchSchema.optional(),
     mcp: McpConfigPatchSchema.optional(),
     image: ImageConfigPatchSchema.optional(),
+    acp: AcpConfigPatchSchema.optional(),
     modelCatalog: ModelCatalogConfigPatchSchema.optional(),
     experimental: ExperimentalConfigPatchSchema.optional(),
     telemetry: z.boolean().optional(),

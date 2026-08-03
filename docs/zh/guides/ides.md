@@ -8,6 +8,8 @@ Kimi Code CLI 支持通过 [Agent Client Protocol (ACP)](https://agentclientprot
 
 ACP 适配层暴露子命令 `kimi acp`，IDE 通过子进程方式启动它，并在标准输入/输出上跑 JSON-RPC。每次 IDE 创建会话时，CLI 会复用它的鉴权状态——不需要重复登录。
 
+本页介绍的集成都是把 `kimi acp` 作为 stdio 子进程拉起。如果你想让一个共享的常驻 agent 进程服务多个客户端——比如自己的编辑器插件或 Python 库这类自定义客户端——该命令也可以监听本地 socket，见 [Socket 传输](../reference/kimi-acp.md#socket-传输)。
+
 ::: tip 路径提示
 macOS 下从 IDE GUI 启动的子进程通常**不会**继承终端 shell 的 `PATH`，所以如果 `kimi` 不在 `/usr/local/bin` 这类系统目录里，IDE 配置中要使用绝对路径。终端里运行 `which kimi` 可以查到当前生效的路径。
 :::

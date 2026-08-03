@@ -1,3 +1,10 @@
+import { randomUUID } from 'node:crypto';
+import { EventEmitter, once } from 'node:events';
+import { createConnection, type Socket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Duplex } from 'node:stream';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -14,10 +21,12 @@ import {
   type WriteTextFileRequest,
   type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
-import type { KimiHarness } from '@moonshot-ai/kimi-code-sdk';
+import type { KimiHarness, Session } from '@moonshot-ai/kimi-code-sdk';
 
 import { AcpServer } from '../src/server';
+import { runAcpServerOnSocket } from '../src/socket';
 import { TERMINAL_AUTH_METHOD } from '../src';
+import { AUTHED_STATUS } from './_helpers/harness-stubs';
 
 /** Minimal Client that throws on every callback so tests fail loudly. */
 class StubClient implements Client {
@@ -200,5 +209,98 @@ describe('AcpServer + AgentSideConnection', () => {
       _meta?: { 'terminal-auth'?: unknown } | null;
     };
     expect(method._meta?.['terminal-auth']).toBeUndefined();
+  });
+});
+
+/**
+ * Unique socket path per test run: filesystem path on POSIX, named-pipe
+ * path on Windows (same `node:net` API serves both). The id is
+ * truncated because macOS caps unix-socket paths at 104 bytes and the
+ * temp-dir prefix already eats half of it.
+ */
+function makeSocketPath(): string {
+  const id = randomUUID().replaceAll('-', '').slice(0, 12);
+  return process.platform === 'win32'
+    ? `\\\\.\\pipe\\acp-server-test-${id}`
+    : join(tmpdir(), `acp-srv-${id}.sock`);
+}
+
+/** Poll-connect: the server has no readiness callback, so a refused
+ * connect just means `listen()` hasn't completed yet. */
+async function connectWhenReady(socketPath: string): Promise<Socket> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const socket = createConnection(socketPath);
+    try {
+      await once(socket, 'connect');
+      return socket;
+    } catch (error) {
+      lastError = error;
+      socket.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+describe('runAcpServerOnSocket', () => {
+  it('serves two concurrent clients over one socket with independent sessions', async () => {
+    // Same minimal authed-harness shape session-new.test.ts uses: the
+    // socket runner only forwards to `runAcpServerWithStream`, so
+    // session/new exercises the exact server path already covered
+    // in-memory — what's new here is the transport multiplexing.
+    const harness = {
+      auth: { status: async () => AUTHED_STATUS },
+      createSession: async (options: { id?: string; workDir: string }) =>
+        ({
+          id: options.id ?? 'fallback',
+          prompt: async () => undefined,
+          cancel: async () => undefined,
+          onEvent: () => () => undefined,
+        }) as unknown as Session,
+      getConfig: async () => ({ providers: {}, models: {} }),
+      close: async () => undefined,
+    } as unknown as KimiHarness;
+
+    const signals = new EventEmitter();
+    const socketPath = makeSocketPath();
+    const run = runAcpServerOnSocket(harness, { socketPath, signals });
+
+    const openClient = async (): Promise<{ socket: Socket; client: ClientSideConnection }> => {
+      const socket = await connectWhenReady(socketPath);
+      const { readable, writable } = Duplex.toWeb(socket);
+      const client = new ClientSideConnection(
+        (_agent) => new StubClient(),
+        ndJsonStream(writable, readable),
+      );
+      return { socket, client };
+    };
+
+    const a = await openClient();
+    const b = await openClient();
+
+    const [initA, initB] = await Promise.all([
+      a.client.initialize({ protocolVersion: 1 }),
+      b.client.initialize({ protocolVersion: 1 }),
+    ]);
+    expect(initA.protocolVersion).toBe(1);
+    expect(initB.protocolVersion).toBe(1);
+
+    const [sessionA, sessionB] = await Promise.all([
+      a.client.newSession({ cwd: '/tmp/a', mcpServers: [] }),
+      b.client.newSession({ cwd: '/tmp/b', mcpServers: [] }),
+    ]);
+    expect(typeof sessionA.sessionId).toBe('string');
+    expect(typeof sessionB.sessionId).toBe('string');
+    expect(sessionA.sessionId).not.toBe(sessionB.sessionId);
+
+    // Orderly client disconnects before the signal so the drain isn't
+    // racing in-flight requests.
+    a.socket.end();
+    b.socket.end();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    signals.emit('SIGINT');
+    await run;
   });
 });

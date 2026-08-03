@@ -83,7 +83,7 @@ export interface SlashCommandsSnapshot {
   readonly skillCommandMap?: ReadonlyMap<string, string>;
 }
 
-type SlashCommandsResolver =
+export type SlashCommandsResolver =
   | ReadonlyArray<AvailableCommand>
   | SlashCommandsSnapshot
   | ((
@@ -1040,6 +1040,46 @@ export class AcpServer implements Agent {
 }
 
 /**
+ * Options shared by every runner that spins up {@link AcpServer}
+ * instances (stdio via {@link runAcpServer}, arbitrary streams via
+ * {@link runAcpServerWithStream}, sockets via `runAcpServerOnSocket`).
+ * Extracted so a new transport doesn't have to redeclare (and drift
+ * from) the pass-through field list.
+ */
+export interface AcpServerRunnerOptions {
+  /**
+   * Optional agent identity metadata advertised in the `initialize`
+   * response (`InitializeResponse.agentInfo`). When omitted, the
+   * field is left out of the response rather than serialized as
+   * `null`, matching the kimi-cli reference implementation.
+   */
+  agentInfo?: Implementation;
+  /**
+   * Env vars to forward to the `kimi login` subprocess clients spawn
+   * via `terminal-auth`. See {@link AcpServer} ctor for the use case.
+   */
+  terminalAuthEnv?: Readonly<Record<string, string>>;
+  /**
+   * Absolute path to the agent binary, advertised in the legacy
+   * `_meta['terminal-auth'].command` fallback. See {@link AcpServer}
+   * ctor for compatibility rationale.
+   */
+  terminalAuthLegacyCommand?: string;
+  /**
+   * Slash commands to advertise to ACP clients so their slash-command
+   * palette is populated. See {@link AcpServer} ctor for details.
+   */
+  slashCommands?: SlashCommandsResolver;
+  /**
+   * @internal Test seam — supply a fake `EventEmitter` (or a
+   * subset that exposes `.once` / `.off`) to drive SIGINT / SIGTERM
+   * without touching the real `process` listener set. Defaults to
+   * `process` in production.
+   */
+  signals?: Pick<NodeJS.EventEmitter, 'once' | 'off'>;
+}
+
+/**
  * Drive an {@link AcpServer} over an arbitrary ACP {@link Stream}.
  *
  * Useful for tests that build the stream with `ndJsonStream` over an
@@ -1048,12 +1088,7 @@ export class AcpServer implements Agent {
 export async function runAcpServerWithStream(
   harness: KimiHarness,
   stream: Stream,
-  opts?: {
-    agentInfo?: Implementation;
-    terminalAuthEnv?: Readonly<Record<string, string>>;
-    terminalAuthLegacyCommand?: string;
-    slashCommands?: SlashCommandsResolver;
-  },
+  opts?: Omit<AcpServerRunnerOptions, 'signals'>,
 ): Promise<void> {
   const conn = new AgentSideConnection((c) => new AcpServer(harness, c, opts), stream);
   await conn.closed;
@@ -1081,39 +1116,9 @@ export async function runAcpServerWithStream(
  */
 export async function runAcpServer(
   harness: KimiHarness,
-  opts?: {
+  opts?: AcpServerRunnerOptions & {
     input?: NodeJS.ReadableStream;
     output?: NodeJS.WritableStream;
-    /**
-     * Optional agent identity metadata advertised in the `initialize`
-     * response (`InitializeResponse.agentInfo`). When omitted, the
-     * field is left out of the response rather than serialized as
-     * `null`, matching the kimi-cli reference implementation.
-     */
-    agentInfo?: Implementation;
-    /**
-     * Env vars to forward to the `kimi login` subprocess clients spawn
-     * via `terminal-auth`. See {@link AcpServer} ctor for the use case.
-     */
-    terminalAuthEnv?: Readonly<Record<string, string>>;
-    /**
-     * Absolute path to the agent binary, advertised in the legacy
-     * `_meta['terminal-auth'].command` fallback. See {@link AcpServer}
-     * ctor for compatibility rationale.
-     */
-    terminalAuthLegacyCommand?: string;
-    /**
-     * Slash commands to advertise to ACP clients so their slash-command
-     * palette is populated. See {@link AcpServer} ctor for details.
-     */
-    slashCommands?: SlashCommandsResolver;
-    /**
-     * @internal Test seam — supply a fake `EventEmitter` (or a
-     * subset that exposes `.once` / `.off`) to drive SIGINT / SIGTERM
-     * without touching the real `process` listener set. Defaults to
-     * `process` in production.
-     */
-    signals?: Pick<NodeJS.EventEmitter, 'once' | 'off'>;
   },
 ): Promise<void> {
   // Stdout is the JSON-RPC channel; protect it before anything else

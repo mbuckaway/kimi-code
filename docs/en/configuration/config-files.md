@@ -318,6 +318,14 @@ Like the `tools` / `disallowedTools` fields of an agent file, this section shape
 
 `max_edge_px` can be overridden by the `KIMI_IMAGE_MAX_EDGE_PX` environment variable and `read_byte_budget` by `KIMI_IMAGE_READ_BYTE_BUDGET`; both take higher priority than `config.toml`.
 
+## `acp`
+
+`acp` configures the [`kimi acp`](../reference/kimi-acp.md) subcommand's transport. With no `[acp]` section, the command speaks JSON-RPC over stdin/stdout as before.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `socket` | `string` | unset | Path of a Unix domain socket (macOS/Linux) or Windows named pipe (`\\.\pipe\...`) to listen on instead of stdio; the `--socket` flag overrides this value. See [Socket transport](../reference/kimi-acp.md#socket-transport) |
+
 <!--
 ## `experimental`
 

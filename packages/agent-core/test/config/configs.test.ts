@@ -245,6 +245,43 @@ read_byte_budget = 524288
     expect(roundTripped.image).toEqual({ maxEdgePx: 2500, readByteBudget: 524288 });
   });
 
+  it('parses the [acp] section', () => {
+    const config = parseConfigString(
+      `
+[acp]
+socket = "/tmp/kimi-acp.sock"
+`,
+      'config.toml',
+    );
+
+    expect(config.acp).toEqual({ socket: '/tmp/kimi-acp.sock' });
+  });
+
+  it('leaves acp undefined when the [acp] section is absent', () => {
+    const config = parseConfigString('default_model = "kimi-code/kimi-for-coding"', 'config.toml');
+
+    expect(config.acp).toBeUndefined();
+  });
+
+  it('round-trips the [acp] section', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'acp-round-trip.toml');
+    const toml = `
+[acp]
+socket = "/tmp/kimi-acp.sock"
+`;
+    const config = parseConfigString(toml, configPath);
+    expect(config.acp).toEqual({ socket: '/tmp/kimi-acp.sock' });
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('[acp]');
+    expect(text).toContain('socket');
+    expect(text).toContain('/tmp/kimi-acp.sock');
+    const roundTripped = parseConfigString(text, configPath);
+    expect(roundTripped.acp).toEqual({ socket: '/tmp/kimi-acp.sock' });
+  });
+
   it('round-trips a custom registry source field on a provider', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'round-trip.toml');
@@ -610,6 +647,16 @@ micro_compaction = false
       () => mergeConfigPatch({ providers: {} }, { theme: 'dark' } as never),
       ErrorCodes.CONFIG_INVALID,
     );
+  });
+
+  it('accepts acp patches and merges the socket path', () => {
+    const base = parseConfigString('default_model = "kimi-code/kimi-for-coding"');
+
+    const merged = mergeConfigPatch(base, {
+      acp: { socket: '/tmp/kimi-acp.sock' },
+    });
+
+    expect(merged.acp).toEqual({ socket: '/tmp/kimi-acp.sock' });
   });
 
   it('replaces hooks arrays in config patches', () => {

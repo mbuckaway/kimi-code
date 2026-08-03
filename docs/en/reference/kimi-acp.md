@@ -12,6 +12,49 @@ Once started, the command prints no banner and immediately waits for the ACP cli
 You typically do not need to run `kimi acp` manually — this command is the subprocess entry point for IDEs. For IDE-side configuration, see [Using in IDEs](../guides/ides.md).
 :::
 
+## Socket transport
+
+By default `kimi acp` talks to a single client over stdin/stdout, so every client spawns its own CLI child process. The `--socket` flag pivots the command into a long-lived local server: it listens on a Unix domain socket (a special file used for communication between local processes) on macOS/Linux, or a named pipe (`\\.\pipe\...`) on Windows, and several clients can stay connected to the same process at once. The ACP protocol itself is unchanged — only the byte channel it travels over.
+
+```sh
+kimi acp --socket ~/.kimi-code/acp.sock
+```
+
+To make socket mode the default, set `[acp].socket` in `config.toml`. An explicit `--socket` flag always overrides the config value; with neither, the command falls back to stdio.
+
+```toml
+[acp]
+socket = "/Users/you/.kimi-code/acp.sock"
+```
+
+Once bound, the server prints `acp server listening on <path>` to stderr and stays in the foreground. `Ctrl-C` (SIGINT) or SIGTERM drains in-flight sessions, removes the socket file, and exits cleanly — run the command under launchd, systemd, or `nohup` if you want it permanently in the background.
+
+::: warning Note
+There is no authentication on the socket: any local process that can open it gets full agent access. On macOS/Linux the CLI tightens the socket to owner-only (`0600`, inside a `0700` directory), so keep the socket under your home directory — filesystem permissions are the entire access boundary.
+:::
+
+Clients connect with `net.createConnection` and speak the same newline-delimited JSON-RPC (ndjson — one JSON message per line) as stdio mode:
+
+```ts
+import { createConnection } from 'node:net';
+import { Duplex } from 'node:stream';
+import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
+
+const socket = createConnection('/Users/you/.kimi-code/acp.sock');
+const { readable, writable } = Duplex.toWeb(socket);
+// `client` implements the ACP Client interface (sessionUpdate, requestPermission, ...).
+const conn = new ClientSideConnection(() => client, ndJsonStream(writable, readable));
+await conn.initialize({
+  protocolVersion: PROTOCOL_VERSION,
+  clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+});
+const { sessionId } = await conn.newSession({ cwd: process.cwd(), mcpServers: [] });
+```
+
+Each connection gets its own independent set of sessions. Two clients cannot attach to the same live session — a second client calling `session/load` or `session/resume` on a session another client is actively driving starts a second engine-side copy. Use `session/list` to discover sessions left behind by earlier connections.
+
+The stock editor integrations (Zed, JetBrains, Paseo) only know how to spawn `kimi acp` as a stdio subprocess; socket mode is for custom clients — your own editor glue, a Python library, or other local tooling.
+
 ## Capability Matrix
 
 The table below lists the capabilities declared by the current ACP adapter layer. The `agentCapabilities` field is returned in full in the `initialize` response, so the IDE can adjust its UI accordingly.

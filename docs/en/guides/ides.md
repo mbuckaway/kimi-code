@@ -8,6 +8,8 @@ Before configuring your IDE, make sure Kimi Code CLI is installed and you have c
 
 The ACP adapter is exposed as the `kimi acp` subcommand. The IDE launches it as a child process and communicates over stdin/stdout using JSON-RPC. Each time the IDE creates a session, the CLI reuses its existing authentication state — no need to log in again.
 
+All the integrations on this page spawn `kimi acp` as a stdio subprocess. If you want one shared, always-on agent process instead — for a custom client such as your own editor plugin or a Python library — the command can also listen on a local socket. See [Socket transport](../reference/kimi-acp.md#socket-transport).
+
 ::: tip Path note
 Child processes launched from an IDE GUI on macOS typically do **not** inherit the terminal shell's `PATH`. If `kimi` is not in a system directory like `/usr/local/bin`, use the absolute path in your IDE configuration. Run `which kimi` in a terminal to find the active path.
 :::
