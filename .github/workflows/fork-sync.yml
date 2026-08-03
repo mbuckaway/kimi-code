@@ -10,7 +10,8 @@ name: Fork sync
 
 on:
   schedule:
-    - cron: '23 */6 * * *'
+    # ~every 48 hours at 07:23 UTC (cron has no true 48h field; */2 dom is the standard approximation)
+    - cron: '23 7 */2 * *'
   workflow_dispatch:
 
 permissions:

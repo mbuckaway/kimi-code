@@ -5,9 +5,9 @@
 #
 #   curl -fsSL https://mbuckaway.github.io/kimi-code/install.sh | bash
 #
-# macOS builds are unsigned: on first run, remove the quarantine attribute
-# (xattr -d com.apple.quarantine ~/.kimi-code/bin/kimi) or allow the binary in
-# System Settings → Privacy & Security.
+# macOS builds are unsigned. Downloads via curl (this script) do not get the
+# quarantine attribute, so no extra step is needed; if the zip was fetched
+# through a browser instead, run: xattr -d com.apple.quarantine ~/.kimi-code/bin/kimi
 
 set -euo pipefail
 

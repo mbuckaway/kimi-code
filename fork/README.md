@@ -13,11 +13,13 @@ Track individual changes in [PATCHES.md](PATCHES.md).
   PR-only, no reviews required. Releases are cut from this branch.
 
 Both protections are GitHub rulesets (`pristine-main`, `fork-mainline`) with
-no bypass actors — everything, including automation, lands via PR.
+no bypass actors — everything, including automation, lands via PR. The repo's
+**default branch is `fork/main`** (required so the scheduled `fork-sync.yml`
+runs — GitHub only fires cron workflows from the default branch).
 
 ## Sync automation (`.github/workflows/fork-sync.yml`)
 
-Every 6 hours (and on demand):
+Every ~48 hours (`23 7 */2 * *` — cron has no true 48-hour field) and on demand:
 
 1. `main`: opens a PR from `upstream/main` and auto-merges with `--rebase`
    (always a fast-forward, never conflicts).
@@ -41,9 +43,13 @@ carry upstream workflow-file changes.
   URLs stay clean), creates a GitHub Release, builds unsigned native binaries
   for the 6 targets, uploads zips + `manifest.json`, and refreshes the
   `gh-pages` update channel.
-- `workflow_dispatch` with `bump: major` bumps `MB.x.0` instead of the minor.
-- macOS binaries are **unsigned** (no Apple secrets on the fork): users must
-  remove the quarantine attribute on first run.
+- `workflow_dispatch` with `bump: major` bumps `MB.x.0` instead of the minor;
+  `mode: publish` forces the tag/release half for the current package.json
+  version (re-release escape hatch).
+- macOS binaries are **unsigned** (no Apple secrets on the fork). Binaries
+  fetched with `curl` (the installer, the self-updater) do NOT get the
+  quarantine attribute — the `xattr -d com.apple.quarantine` step is only
+  needed if the zip was downloaded through a browser.
 
 ## Update channel (gh-pages)
 
