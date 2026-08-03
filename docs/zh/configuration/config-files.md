@@ -318,6 +318,14 @@ disabled = ["EnterPlanMode", "ExitPlanMode", "mcp__github__*"]
 
 `max_edge_px` 可被环境变量 `KIMI_IMAGE_MAX_EDGE_PX` 覆盖，`read_byte_budget` 可被 `KIMI_IMAGE_READ_BYTE_BUDGET` 覆盖，优先级均高于配置文件。
 
+## `acp`
+
+`acp` 配置 [`kimi acp`](../reference/kimi-acp.md) 子命令的传输方式。没有 `[acp]` 节时，该命令照旧在标准输入/输出上跑 JSON-RPC。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `socket` | `string` | 未设置 | 改为监听的 Unix domain socket（macOS/Linux）或 Windows 命名管道（`\\.\pipe\...`）路径；`--socket` 标志会覆盖此值。详见 [Socket 传输](../reference/kimi-acp.md#socket-传输) |
+
 <!--
 ## `experimental`
 

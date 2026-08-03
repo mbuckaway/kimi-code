@@ -9,6 +9,7 @@ import {
   KimiConfigSchema,
   formatConfigValidationError,
   getDefaultConfig,
+  type AcpConfig,
   type BackgroundConfig,
   type ExperimentalConfig,
   type HookDefConfig,
@@ -329,6 +330,8 @@ export function transformTomlData(data: Record<string, unknown>): Record<string,
       result[targetKey] = transformPlainObject(value);
     } else if (targetKey === 'mcp' && isPlainObject(value)) {
       result[targetKey] = transformPlainObject(value);
+    } else if (targetKey === 'acp' && isPlainObject(value)) {
+      result[targetKey] = transformPlainObject(value);
     } else if (!isPlainObject(value)) {
       result[targetKey] = value;
     }
@@ -510,6 +513,7 @@ export function configToTomlData(config: KimiConfig): Record<string, unknown> {
   setSection(out, 'secondary_model', config.secondaryModel, secondaryModelToToml);
   setSection(out, 'mcp', config.mcp, mcpToToml);
   setSection(out, 'image', config.image, imageToToml);
+  setSection(out, 'acp', config.acp, acpToToml);
   setSection(out, 'experimental', config.experimental, experimentalToToml);
   setSection(out, 'permission', config.permission, permissionToToml);
   setHooks(out, config.hooks);
@@ -725,6 +729,14 @@ function mcpToToml(mcp: McpConfig, rawMcp: unknown): Record<string, unknown> {
 function imageToToml(image: ImageConfig, rawImage: unknown): Record<string, unknown> {
   const out = cloneRecord(rawImage);
   for (const [key, value] of Object.entries(image)) {
+    setDefined(out, camelToSnake(key), value);
+  }
+  return out;
+}
+
+function acpToToml(acp: AcpConfig, rawAcp: unknown): Record<string, unknown> {
+  const out = cloneRecord(rawAcp);
+  for (const [key, value] of Object.entries(acp)) {
     setDefined(out, camelToSnake(key), value);
   }
   return out;
