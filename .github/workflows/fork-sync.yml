@@ -1,0 +1,122 @@
+name: Fork sync
+
+# Fork-only workflow (mbuckaway/kimi-code). Keeps both protected branches
+# current with upstream via PRs (rulesets forbid direct pushes):
+#   1. main      — pristine mirror; sync PR rebases upstream/main onto it.
+#   2. fork/main — integration mainline; sync PR merges upstream/main into it.
+# Requires the FORK_SYNC_PAT secret (contents + pull_requests + workflows):
+# GITHUB_TOKEN-created PRs do not trigger CI and cannot carry workflow-file
+# changes from upstream.
+
+on:
+  schedule:
+    # ~every 48 hours at 07:23 UTC (cron has no true 48h field; */2 dom is the standard approximation)
+    - cron: '23 7 */2 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+
+jobs:
+  sync-main:
+    name: Sync pristine main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_PAT }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/MoonshotAI/kimi-code.git
+          git fetch upstream main
+
+      - name: Open sync PR and auto-merge
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "main is already up to date"
+            exit 0
+          fi
+          git config user.name "fork-sync[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git branch -f sync/main upstream/main
+          git push --force origin sync/main
+          PR_URL=$(gh pr list --base main --head sync/main --state open --json url --jq '.[0].url')
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr create --base main --head sync/main \
+              --title "sync: upstream/main → main ($(date -u +%Y-%m-%d))" \
+              --body "Automated upstream sync. Rebase-merge keeps main a byte-identical mirror of upstream/main.")
+          fi
+          gh pr merge "$PR_URL" --auto --rebase
+
+  sync-fork-main:
+    name: Merge upstream into fork/main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork/main
+        uses: actions/checkout@v6
+        with:
+          ref: fork/main
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_PAT }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/MoonshotAI/kimi-code.git
+          git fetch upstream main
+
+      - name: Merge upstream/main into a sync branch
+        id: merge
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor upstream/main origin/fork/main; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BR="sync/fork-main-$(date -u +%Y%m%d-%H%M)"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+          git config user.name "fork-sync[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BR"
+          if ! git merge --no-edit upstream/main; then
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          git push origin "$BR"
+
+      - name: Open sync PR and auto-merge
+        if: steps.merge.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true'
+        run: |
+          set -euo pipefail
+          PR_URL=$(gh pr create --base fork/main --head "${{ steps.merge.outputs.branch }}" \
+            --title "sync: upstream/main → fork/main ($(date -u +%Y-%m-%d))" \
+            --body "Automated upstream sync into the fork mainline.")
+          gh pr merge "$PR_URL" --auto --merge
+
+      - name: Notify on merge conflict
+        if: failure() && steps.merge.outputs.conflict == 'true'
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh issue list --state open --search "fork-sync: merge conflict" --json number --jq '.[0].number')
+          if [ -z "$EXISTING" ]; then
+            gh issue create \
+              --title "fork-sync: merge conflict syncing upstream/main → fork/main" \
+              --body "The scheduled sync hit merge conflicts. Resolve manually:
+          
+              git fetch upstream
+              git checkout -b sync/manual fork/main
+              git merge upstream/main   # resolve conflicts
+              git push origin sync/manual
+              gh pr create --base fork/main --head sync/manual
+          
+          This issue auto-recurs while the conflict persists; close it once resolved."
+          fi

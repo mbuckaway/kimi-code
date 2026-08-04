@@ -39,7 +39,7 @@ export const HEADLESS_FORCE_EXIT_GRACE_MS = 2000;
 export const HEADLESS_STDIO_DRAIN_TIMEOUT_MS = 10000;
 
 // Published npm package name; this can differ from the executable command.
-export const NPM_PACKAGE_NAME = '@moonshot-ai/kimi-code';
+export const NPM_PACKAGE_NAME = '@mbuckaway/kimi-code';
 
 // App-owned data paths. SDK/core runtime config is intentionally not routed here.
 export const KIMI_CODE_HOME_ENV = 'KIMI_CODE_HOME';
@@ -69,7 +69,7 @@ export const OAUTH_LOGIN_REQUIRED_CODE = ErrorCodes.AUTH_LOGIN_REQUIRED;
 // usage limit. Derived from the SDK's ErrorCodes so a rename propagates.
 export const PROVIDER_USAGE_LIMIT_CODE = ErrorCodes.PROVIDER_USAGE_LIMIT;
 
-export const FEEDBACK_ISSUE_URL = 'https://github.com/MoonshotAI/kimi-code/issues';
+export const FEEDBACK_ISSUE_URL = 'https://github.com/mbuckaway/kimi-code/issues';
 
 // Sent in the feedback `version` field so the backend can distinguish this
 // TypeScript client from clients that send a bare version.
@@ -79,14 +79,18 @@ export const FEEDBACK_VERSION_PREFIX = 'kimi-code-';
 export const FEEDBACK_TELEMETRY_EVENT = 'feedback_submitted';
 
 // CDN source of truth: all version checks and native install scripts pull from here.
-export const KIMI_CODE_CDN_BASE = 'https://code.kimi.com/kimi-code';
+// Fork: served from this repo's GitHub Pages (fork-release.yml refreshes it).
+export const KIMI_CODE_CDN_BASE = 'https://mbuckaway.github.io/kimi-code';
 export const KIMI_CODE_CDN_LATEST_URL = `${KIMI_CODE_CDN_BASE}/latest`;
 // Rollout manifest consumed by update checks; the plain-text `/latest` above
 // stays unchanged forever — already-shipped clients hard-fail on non-semver
 // bodies, and the CDN install scripts read it for fresh installs.
 export const KIMI_CODE_CDN_LATEST_JSON_URL = `${KIMI_CODE_CDN_BASE}/latest.json`;
 export const KIMI_CODE_TIPS_BANNER_URL = 'https://cdn.kimi.com/kimi-code-tips/tips.json';
-export const KIMI_CODE_PLUGIN_MARKETPLACE_URL = `${KIMI_CODE_CDN_BASE}/plugins/marketplace.json`;
+// Plugin marketplace stays on the upstream CDN: the catalog content is
+// upstream-hosted, and the fork's update channel does not mirror it.
+export const KIMI_CODE_PLUGIN_MARKETPLACE_URL =
+  'https://code.kimi.com/kimi-code/plugins/marketplace.json';
 export const KIMI_CODE_PLUGIN_MARKETPLACE_URL_ENV = 'KIMI_CODE_PLUGIN_MARKETPLACE_URL';
 // Official plugins whose usage bills against the user's plan quota. Installing
 // one of these shows a quota note after the install result.

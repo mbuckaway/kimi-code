@@ -9,7 +9,8 @@ export { CURRENT_VERSION, MIN_PROTOCOL_VERSION, negotiateVersion } from './versi
 export type { AcpVersionSpec } from './version';
 export { TERMINAL_AUTH_METHOD, buildTerminalAuthMethod } from './auth-methods';
 export { AcpServer, runAcpServer, runAcpServerWithStream } from './server';
-export type { SlashCommandsSnapshot } from './server';
+export type { AcpServerRunnerOptions, SlashCommandsSnapshot } from './server';
+export { runAcpServerOnSocket } from './socket';
 export { AcpSession } from './session';
 export {
   acpBlocksToPromptParts,

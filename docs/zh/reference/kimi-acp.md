@@ -12,6 +12,49 @@ kimi acp
 你通常不需要手动跑 `kimi acp`——这个命令是给 IDE 的子进程入口准备的。IDE 端的配置见[在 IDE 中使用](../guides/ides.md)。
 :::
 
+## Socket 传输
+
+默认情况下 `kimi acp` 通过标准输入/输出与单个客户端对话，所以每个客户端都要各自拉起一个 CLI 子进程。`--socket` 标志会把命令切换成一个长驻的本地服务器：在 macOS/Linux 上监听 Unix domain socket（一种用于本地进程间通信的特殊文件），在 Windows 上监听命名管道（`\\.\pipe\...`），多个客户端可以同时连接同一个进程。ACP 协议本身不变——只是承载它的字节通道变了。
+
+```sh
+kimi acp --socket ~/.kimi-code/acp.sock
+```
+
+想把 socket 模式设为默认，可以在 `config.toml` 里设置 `[acp].socket`。显式的 `--socket` 标志始终覆盖配置值；两者都没有时，命令回退到标准输入/输出。
+
+```toml
+[acp]
+socket = "/Users/you/.kimi-code/acp.sock"
+```
+
+绑定成功后，服务器会在标准错误打印 `acp server listening on <path>`，并保持前台运行。`Ctrl-C`（SIGINT）或 SIGTERM 会排空进行中的会话、删除 socket 文件并干净退出——如果想让它常驻后台，可以用 launchd、systemd 或 `nohup` 运行该命令。
+
+::: warning 注意
+socket 上没有身份认证：任何能打开它的本地进程都能获得完整的 agent 访问权。在 macOS/Linux 上，CLI 会把 socket 收紧为仅所有者可访问（`0600`，位于 `0700` 的目录内），所以请把 socket 放在你的 home 目录下——文件系统权限就是全部的访问边界。
+:::
+
+客户端用 `net.createConnection` 连接，说的是与标准输入/输出模式相同的换行分隔 JSON-RPC（ndjson——每行一条 JSON 消息）：
+
+```ts
+import { createConnection } from 'node:net';
+import { Duplex } from 'node:stream';
+import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
+
+const socket = createConnection('/Users/you/.kimi-code/acp.sock');
+const { readable, writable } = Duplex.toWeb(socket);
+// `client` 实现 ACP Client 接口（sessionUpdate、requestPermission 等）。
+const conn = new ClientSideConnection(() => client, ndJsonStream(writable, readable));
+await conn.initialize({
+  protocolVersion: PROTOCOL_VERSION,
+  clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+});
+const { sessionId } = await conn.newSession({ cwd: process.cwd(), mcpServers: [] });
+```
+
+每个连接都有自己独立的一组会话。两个客户端无法接入同一个进行中的会话——第二个客户端对另一个客户端正在驱动的会话调用 `session/load` 或 `session/resume`，会在引擎侧再启动一份副本。可以用 `session/list` 发现之前的连接留下的会话。
+
+现成的编辑器集成（Zed、JetBrains、Paseo）只会把 `kimi acp` 作为 stdio 子进程拉起；socket 模式面向自定义客户端——你自己的编辑器插件、Python 库或其他本地工具。
+
 ## 能力矩阵
 
 下表列出当前 ACP 适配层声明的能力。`agentCapabilities` 字段在 `initialize` 响应里完整返回，IDE 端可据此调整 UI。

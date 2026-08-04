@@ -10,12 +10,33 @@
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const mocks = vi.hoisted(() => ({
+  loadRuntimeConfigSafe: vi.fn(
+    (): { config: { acp?: { socket?: string } }; fileError: Error | undefined } => ({
+      config: {},
+      fileError: undefined,
+    }),
+  ),
+}));
+
 vi.mock('@moonshot-ai/acp-adapter', () => ({
   ACP_BUILTIN_SLASH_COMMANDS: [],
   runAcpServer: vi.fn(async () => undefined),
+  runAcpServerOnSocket: vi.fn(async () => undefined),
 }));
 
-import { runAcpServer } from '@moonshot-ai/acp-adapter';
+vi.mock('@moonshot-ai/kimi-code-sdk', async (importOriginal) => {
+  // Spread the real module: acp.ts needs the real createKimiHarness and
+  // type surface; only the config read is stubbed so tests can control
+  // the `[acp].socket` value without touching the real config.toml.
+  const actual = await importOriginal<typeof import('@moonshot-ai/kimi-code-sdk')>();
+  return {
+    ...actual,
+    loadRuntimeConfigSafe: mocks.loadRuntimeConfigSafe,
+  };
+});
+
+import { runAcpServer, runAcpServerOnSocket } from '@moonshot-ai/acp-adapter';
 
 import { registerAcpCommand } from '#/cli/sub/acp';
 
@@ -31,6 +52,9 @@ describe('kimi acp', () => {
 
   beforeEach(() => {
     vi.mocked(runAcpServer).mockClear();
+    vi.mocked(runAcpServerOnSocket).mockClear();
+    mocks.loadRuntimeConfigSafe.mockClear();
+    mocks.loadRuntimeConfigSafe.mockReturnValue({ config: {}, fileError: undefined });
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
       throw new ExitCalled(code);
     }) as never);
@@ -127,6 +151,75 @@ describe('kimi acp', () => {
     expect(typeof optsArg.terminalAuthLegacyCommand).toBe('string');
     expect((optsArg.terminalAuthLegacyCommand ?? '').length).toBeGreaterThan(0);
     expect(optsArg.terminalAuthLegacyCommand).toBe(process.argv[1]);
+  });
+
+  it('uses the socket transport when --socket is passed', async () => {
+    const program = new Command('kimi').exitOverride();
+    registerAcpCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'kimi', 'acp', '--socket', '/tmp/x.sock']),
+    ).rejects.toThrow(ExitCalled);
+
+    expect(runAcpServer).not.toHaveBeenCalled();
+    expect(runAcpServerOnSocket).toHaveBeenCalledTimes(1);
+    const optsArg = vi.mocked(runAcpServerOnSocket).mock.calls[0]?.[1];
+    expect(optsArg).toEqual(
+      expect.objectContaining({
+        socketPath: '/tmp/x.sock',
+        agentInfo: { name: 'Kimi Code CLI', version: expect.any(String) },
+      }),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith('acp server listening on /tmp/x.sock\n');
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('uses the socket transport when [acp].socket is set in config', async () => {
+    mocks.loadRuntimeConfigSafe.mockReturnValue({
+      config: { acp: { socket: '/tmp/cfg.sock' } },
+      fileError: undefined,
+    });
+    const program = new Command('kimi').exitOverride();
+    registerAcpCommand(program);
+
+    await expect(program.parseAsync(['node', 'kimi', 'acp'])).rejects.toThrow(ExitCalled);
+
+    expect(runAcpServer).not.toHaveBeenCalled();
+    expect(runAcpServerOnSocket).toHaveBeenCalledTimes(1);
+    const optsArg = vi.mocked(runAcpServerOnSocket).mock.calls[0]?.[1];
+    expect(optsArg).toEqual(expect.objectContaining({ socketPath: '/tmp/cfg.sock' }));
+    expect(stderrSpy).toHaveBeenCalledWith('acp server listening on /tmp/cfg.sock\n');
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('prefers the --socket flag over the [acp].socket config value', async () => {
+    mocks.loadRuntimeConfigSafe.mockReturnValue({
+      config: { acp: { socket: '/tmp/cfg.sock' } },
+      fileError: undefined,
+    });
+    const program = new Command('kimi').exitOverride();
+    registerAcpCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'kimi', 'acp', '--socket', '/tmp/flag.sock']),
+    ).rejects.toThrow(ExitCalled);
+
+    expect(runAcpServer).not.toHaveBeenCalled();
+    expect(runAcpServerOnSocket).toHaveBeenCalledTimes(1);
+    const optsArg = vi.mocked(runAcpServerOnSocket).mock.calls[0]?.[1];
+    expect(optsArg).toEqual(expect.objectContaining({ socketPath: '/tmp/flag.sock' }));
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('falls back to stdio when neither --socket nor [acp].socket is set', async () => {
+    const program = new Command('kimi').exitOverride();
+    registerAcpCommand(program);
+
+    await expect(program.parseAsync(['node', 'kimi', 'acp'])).rejects.toThrow(ExitCalled);
+
+    expect(runAcpServerOnSocket).not.toHaveBeenCalled();
+    expect(runAcpServer).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
   it('exits without starting the ACP server when --login is passed', async () => {

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,13 +13,17 @@ import {
   type NativeAssetManifest,
   type NativeAssetSource,
 } from '#/native/native-assets';
+import { createNativeModuleLoad } from '#/native/module-hook';
 import { loadNativePackage } from '#/native/native-require';
 
 function sha256(bytes: Buffer | string): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function fakeManifest(files: Record<string, string>): {
+function fakeManifest(
+  files: Record<string, string>,
+  packageName = 'fake-native',
+): {
   manifest: NativeAssetManifest;
   source: NativeAssetSource;
 } {
@@ -35,8 +40,8 @@ function fakeManifest(files: Record<string, string>): {
     target: 'test-target',
     packages: [
       {
-        name: 'fake-native',
-        root: 'node_modules/fake-native',
+        name: packageName,
+        root: `node_modules/${packageName}`,
         files: assetEntries,
       },
     ],
@@ -121,6 +126,120 @@ describe('native assets', () => {
       });
 
       expect(pkg).toEqual({ value: 'ok' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('native module hook', () => {
+  function moduleNotFound(): Error & { code: string } {
+    const error = new Error("Cannot find module 'fsevents'") as Error & { code: string };
+    error.code = 'MODULE_NOT_FOUND';
+    return error;
+  }
+
+  it('passes fsevents through when normal resolution succeeds', () => {
+    const sentinel = { native: true };
+    const load = createNativeModuleLoad(() => sentinel);
+    expect(load('fsevents', null, false)).toBe(sentinel);
+  });
+
+  it('redirects fsevents to the native package root when resolution fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kimi-module-hook-'));
+    try {
+      const { manifest, source } = fakeManifest(
+        {
+          'node_modules/fsevents/package.json': '{"main":"fsevents.js"}',
+          'node_modules/fsevents/fsevents.js':
+            "module.exports = { value: 'fsevents-from-cache' };\n",
+        },
+        'fsevents',
+      );
+
+      const realRequire = createRequire(import.meta.url);
+      const load = createNativeModuleLoad(
+        (request) => {
+          if (request === 'fsevents') throw moduleNotFound();
+          return realRequire(request);
+        },
+        { cacheBase: dir, manifest, source, version: 'test' },
+      );
+
+      expect(load('fsevents', null, false)).toEqual({ value: 'fsevents-from-cache' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rethrows the original error when fsevents is not in the native assets', () => {
+    const error = moduleNotFound();
+    const load = createNativeModuleLoad(
+      () => {
+        throw error;
+      },
+      {
+        manifest: {
+          version: NATIVE_ASSET_MANIFEST_VERSION,
+          target: 'test-target',
+          packages: [],
+        },
+      },
+    );
+    expect(() => load('fsevents', null, false)).toThrow(error);
+  });
+
+  it('rethrows non-MODULE_NOT_FOUND errors from fsevents resolution', () => {
+    const error = new Error('boom');
+    const load = createNativeModuleLoad(() => {
+      throw error;
+    });
+    expect(() => load('fsevents', null, false)).toThrow(error);
+  });
+
+  it('passes non-fsevents requests through untouched', () => {
+    const error = moduleNotFound();
+    const load = createNativeModuleLoad(
+      (request) => {
+        if (request === 'failing-module') throw error;
+        return `loaded:${request}`;
+      },
+      {
+        manifest: {
+          version: NATIVE_ASSET_MANIFEST_VERSION,
+          target: 'test-target',
+          packages: [],
+        },
+      },
+    );
+    expect(load('some-module', null, false)).toBe('loaded:some-module');
+    expect(() => load('failing-module', null, false)).toThrow(error);
+  });
+
+  it('still redirects pi-tui native helpers to the native package root', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kimi-module-hook-pi-tui-'));
+    try {
+      const { manifest, source } = fakeManifest({}, '@moonshot-ai/pi-tui');
+      const load = createNativeModuleLoad((request) => request, {
+        cacheBase: dir,
+        manifest,
+        source,
+        version: 'test',
+      });
+
+      const helperRelative = 'native/darwin/prebuilds/darwin-arm64/darwin-modifiers.node';
+      const redirected = load(`/sea/${helperRelative}`, null, false);
+      const pkgRoot = join(
+        dir,
+        'native',
+        'test',
+        'test-target',
+        sha256(JSON.stringify(manifest)),
+        'node_modules',
+        '@moonshot-ai',
+        'pi-tui',
+      );
+      expect(redirected).toBe(join(pkgRoot, helperRelative));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

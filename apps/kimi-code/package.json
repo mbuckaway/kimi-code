@@ -1,17 +1,17 @@
 {
-  "name": "@moonshot-ai/kimi-code",
-  "version": "0.31.1",
+  "name": "@mbuckaway/kimi-code",
+  "version": "0.31.1-MB.1.2",
   "description": "The Starting Point for Next-Gen Agents",
   "license": "MIT",
   "author": "Moonshot AI",
-  "homepage": "https://github.com/MoonshotAI/kimi-code/tree/main/apps/kimi-code#readme",
+  "homepage": "https://github.com/mbuckaway/kimi-code/tree/fork/main/apps/kimi-code#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MoonshotAI/kimi-code.git",
+    "url": "git+https://github.com/mbuckaway/kimi-code.git",
     "directory": "apps/kimi-code"
   },
   "bugs": {
-    "url": "https://github.com/MoonshotAI/kimi-code/issues"
+    "url": "https://github.com/mbuckaway/kimi-code/issues"
   },
   "keywords": [
     "kimi",
@@ -79,6 +79,7 @@
   },
   "optionalDependencies": {
     "@mariozechner/clipboard": "^0.3.9",
+    "fsevents": "^2.3.3",
     "node-pty": "^1.1.0"
   },
   "devDependencies": {

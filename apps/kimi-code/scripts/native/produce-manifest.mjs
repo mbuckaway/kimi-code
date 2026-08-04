@@ -22,8 +22,8 @@ if (!inputDir || !tag) {
   process.exit(1);
 }
 
-// Tag 格式 `@moonshot-ai/kimi-code@x.y.z` 或 `vx.y.z` 或 `x.y.z`，都归一化到 x.y.z
-const version = tag.replace(/^@moonshot-ai\/kimi-code@/, '').replace(/^v/, '');
+// Tag 格式 `@mbuckaway/kimi-code@x.y.z-MB.n.m` 或 `vx.y.z` 或 `x.y.z`，都归一化到 semver 本体（保留预发布后缀）
+const version = tag.replace(/^@mbuckaway\/kimi-code@/, '').replace(/^v/, '');
 
 const entries = await readdir(inputDir);
 const sumFiles = entries.filter((f) => /^kimi-code-[a-z0-9-]+\.zip\.sha256$/.test(f));
