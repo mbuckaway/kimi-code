@@ -70,6 +70,9 @@ export const OAUTH_LOGIN_REQUIRED_CODE = ErrorCodes.AUTH_LOGIN_REQUIRED;
 export const PROVIDER_USAGE_LIMIT_CODE = ErrorCodes.PROVIDER_USAGE_LIMIT;
 
 export const FEEDBACK_ISSUE_URL = 'https://github.com/mbuckaway/kimi-code/issues';
+// Sign-up / sign-in page offered to signed-out users so they can create an
+// account and submit feedback through the authenticated channel next time.
+export const KIMI_CODE_SIGNUP_URL = 'https://www.kimi.com/code';
 
 // Sent in the feedback `version` field so the backend can distinguish this
 // TypeScript client from clients that send a bare version.
