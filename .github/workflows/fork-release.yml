@@ -164,10 +164,14 @@ jobs:
             git push origin "${{ steps.v.outputs.tag }}"
           fi
           if ! gh release view "${{ steps.v.outputs.tag }}" >/dev/null 2>&1; then
+            # Create as draft: GitHub now marks releases immutable the moment
+            # they are published, so assets must be attached before publishing.
+            # publish-assets flips the draft to published after the upload.
             gh release create "${{ steps.v.outputs.tag }}" \
               --target fork/main \
               --title "kimi-code ${{ steps.v.outputs.version }} (mbuckaway fork)" \
-              --generate-notes
+              --generate-notes \
+              --draft
           fi
 
   native-artifacts:
@@ -205,6 +209,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.prepare.outputs.tag }}" dist-native-release/* --clobber
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The release is created as a draft (published releases are immutable
+        # and reject asset uploads). Publish it now that the assets are on it.
+        run: gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false --latest
 
       - name: Generate update channel files
         run: node fork/scripts/publish-update-channel.mjs "${{ needs.prepare.outputs.version }}" dist-native-release dist-channel
