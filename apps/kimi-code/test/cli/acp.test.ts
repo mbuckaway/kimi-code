@@ -51,6 +51,7 @@ describe('kimi acp', () => {
   let stderrSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    vi.stubEnv('KIMI_CODE_LEGACY_FLAG', '1');
     vi.mocked(runAcpServer).mockClear();
     vi.mocked(runAcpServerOnSocket).mockClear();
     mocks.loadRuntimeConfigSafe.mockClear();
@@ -64,6 +65,7 @@ describe('kimi acp', () => {
   afterEach(() => {
     exitSpy.mockRestore();
     stderrSpy.mockRestore();
+    vi.unstubAllEnvs();
   });
 
   it('registers an `acp` subcommand on the program', () => {
