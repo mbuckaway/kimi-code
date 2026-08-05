@@ -393,6 +393,7 @@ describe('native module hook', () => {
           version: NATIVE_ASSET_MANIFEST_VERSION,
           target: 'test-target',
           packages: [],
+          runtimeFiles: [],
         },
       },
     );
@@ -419,6 +420,7 @@ describe('native module hook', () => {
           version: NATIVE_ASSET_MANIFEST_VERSION,
           target: 'test-target',
           packages: [],
+          runtimeFiles: [],
         },
       },
     );
