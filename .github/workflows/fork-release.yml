@@ -126,7 +126,9 @@ jobs:
           PR_URL=$(gh pr create --base fork/main --head "$BR" \
             --title "chore: release $V" \
             --body "Automated fork release version bump. Merging triggers the publish half of fork-release.yml.")
-          gh pr merge "$PR_URL" --auto --squash
+          # --auto fails with "Pull request is in clean status" when the PR is
+          # already mergeable (nothing pending to wait for) — merge it directly.
+          gh pr merge "$PR_URL" --auto --squash || gh pr merge "$PR_URL" --squash
 
   prepare:
     name: Tag and create GitHub Release
