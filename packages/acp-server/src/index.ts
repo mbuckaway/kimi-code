@@ -12,6 +12,8 @@ export type { AcpClient } from './acp-client';
 export { AcpSession } from './session';
 export { runAcpServer, runAcpServerWithStream } from './start';
 export type { RunAcpServerOptions, RunningAcpServer } from './start';
+export { runAcpServerOnSocket } from './socket';
+export type { AcpSocketServerOptions } from './socket';
 
 export {
   acpToolCallId,

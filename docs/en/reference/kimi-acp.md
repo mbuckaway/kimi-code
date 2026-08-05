@@ -53,6 +53,8 @@ const { sessionId } = await conn.newSession({ cwd: process.cwd(), mcpServers: []
 
 Each connection gets its own independent set of sessions. Two clients cannot attach to the same live session — a second client calling `session/load` or `session/resume` on a session another client is actively driving starts a second engine-side copy. Use `session/list` to discover sessions left behind by earlier connections.
 
+Socket mode targets the default engine (`agent-core-v2`), the same one `kimi acp` uses for stdio. Each accepted connection boots its own engine instance. Every instance reads and writes the same on-disk session store, so keep a given session live in only one client at a time. The legacy engine (`KIMI_CODE_LEGACY_FLAG=1`) works the same way.
+
 The stock editor integrations (Zed, JetBrains, Paseo) only know how to spawn `kimi acp` as a stdio subprocess; socket mode is for custom clients — your own editor glue, a Python library, or other local tooling.
 
 ## Capability Matrix

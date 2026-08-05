@@ -53,6 +53,8 @@ const { sessionId } = await conn.newSession({ cwd: process.cwd(), mcpServers: []
 
 每个连接都有自己独立的一组会话。两个客户端无法接入同一个进行中的会话——第二个客户端对另一个客户端正在驱动的会话调用 `session/load` 或 `session/resume`，会在引擎侧再启动一份副本。可以用 `session/list` 发现之前的连接留下的会话。
 
+Socket 模式跑在默认引擎（`agent-core-v2`）上，和 `kimi acp` 标准输入/输出模式用的是同一个引擎。每个被接受的连接都会启动自己的引擎实例。所有实例读写的是同一份磁盘会话存储，所以同一个会话在任意时刻只应该在一个客户端里保持活跃。旧引擎（`KIMI_CODE_LEGACY_FLAG=1`）下行为相同。
+
 现成的编辑器集成（Zed、JetBrains、Paseo）只会把 `kimi acp` 作为 stdio 子进程拉起；socket 模式面向自定义客户端——你自己的编辑器插件、Python 库或其他本地工具。
 
 ## 能力矩阵
