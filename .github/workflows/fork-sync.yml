@@ -1,12 +1,19 @@
 name: Fork sync
 
 # Fork-only workflow (mbuckaway/kimi-code). Keeps both protected branches
-# current with upstream via PRs (rulesets forbid direct pushes):
-#   1. main      — pristine mirror; sync PR rebases upstream/main onto it.
+# current with upstream:
+#   1. main      — pristine mirror; direct fast-forward push of upstream/main.
+#                  The pristine-main ruleset carries a repository-admin bypass
+#                  for this push. A PR rebase-merge would rewrite committer
+#                  info and SHAs, so a PR flow can never keep the mirror
+#                  byte-identical.
 #   2. fork/main — integration mainline; sync PR merges upstream/main into it.
-# Requires the FORK_SYNC_PAT secret (contents + pull_requests + workflows):
-# GITHUB_TOKEN-created PRs do not trigger CI and cannot carry workflow-file
-# changes from upstream.
+# Requires the FORK_SYNC_PAT secret (contents + pull_requests + issues +
+# workflows, scoped to this fork): GITHUB_TOKEN-created PRs do not trigger CI
+# and cannot carry workflow-file changes from upstream.
+# GH_REPO pins every gh call to this repository. Without it, gh resolves the
+# parent repo (MoonshotAI/kimi-code) once the `upstream` remote exists, and
+# the fork-scoped PAT has no write access there.
 
 on:
   schedule:
@@ -21,6 +28,7 @@ permissions:
 
 env:
   GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   sync-main:
@@ -39,24 +47,19 @@ jobs:
           git remote add upstream https://github.com/MoonshotAI/kimi-code.git
           git fetch upstream main
 
-      - name: Open sync PR and auto-merge
+      - name: Mirror upstream/main to main
         run: |
-          set -euo pipefail
           if git merge-base --is-ancestor upstream/main origin/main; then
             echo "main is already up to date"
             exit 0
           fi
-          git config user.name "fork-sync[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git branch -f sync/main upstream/main
-          git push --force origin sync/main
-          PR_URL=$(gh pr list --base main --head sync/main --state open --json url --jq '.[0].url')
-          if [ -z "$PR_URL" ]; then
-            PR_URL=$(gh pr create --base main --head sync/main \
-              --title "sync: upstream/main → main ($(date -u +%Y-%m-%d))" \
-              --body "Automated upstream sync. Rebase-merge keeps main a byte-identical mirror of upstream/main.")
+          # Plain (non-force) push: a fast-forward is the healthy case. A
+          # failure means main diverged from upstream again — reset it by
+          # hand with a force push before the next sync.
+          if ! git push origin refs/remotes/upstream/main:refs/heads/main; then
+            echo "::error::main has diverged from upstream/main — reset it manually with a force push"
+            exit 1
           fi
-          gh pr merge "$PR_URL" --auto --rebase
 
   sync-fork-main:
     name: Merge upstream into fork/main
@@ -97,7 +100,7 @@ jobs:
         if: steps.merge.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true'
         run: |
           set -euo pipefail
-          PR_URL=$(gh pr create --base fork/main --head "${{ steps.merge.outputs.branch }}" \
+          PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base fork/main --head "${{ steps.merge.outputs.branch }}" \
             --title "sync: upstream/main → fork/main ($(date -u +%Y-%m-%d))" \
             --body "Automated upstream sync into the fork mainline.")
           gh pr merge "$PR_URL" --auto --merge
@@ -106,9 +109,9 @@ jobs:
         if: failure() && steps.merge.outputs.conflict == 'true'
         run: |
           set -euo pipefail
-          EXISTING=$(gh issue list --state open --search "fork-sync: merge conflict" --json number --jq '.[0].number')
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "fork-sync: merge conflict" --json number --jq '.[0].number')
           if [ -z "$EXISTING" ]; then
-            gh issue create \
+            gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "fork-sync: merge conflict syncing upstream/main → fork/main" \
               --body "The scheduled sync hit merge conflicts. Resolve manually:
           
