@@ -11,7 +11,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { LifecycleScope, type IAgentScopeHandle } from '#/_base/di/scope';
+import { type IAgentScopeHandle } from '#/_base/di/scope';
+import { LifecycleScope } from '#/app/scopes';
 import { IAgentLoopService, type Turn, type TurnResult } from '#/agent/loop/loop';
 import { IAgentPromptService, type PromptHandle } from '#/agent/prompt/prompt';
 import { Error2, ErrorCodes } from '#/errors';
