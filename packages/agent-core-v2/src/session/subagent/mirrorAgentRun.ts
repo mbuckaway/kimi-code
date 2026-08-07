@@ -13,6 +13,11 @@
  * / "...has stopped" through the `ISessionSubagentService` agent-run hook
  * slot and stop event.
  *
+ * Failure-event suppression is opt-in per run and keys on the wire code, not
+ * on the message: a usage-limit-coded failure stays visible even though its
+ * wording matches the rate-limit fallback, because it is final until the
+ * account's quota window resets.
+ *
  * Wire shape note: the signals are still named `subagent.spawned / started /
  * completed / failed` and telemetry still tracks `subagent_created` so existing
  * session recordings and dashboards stay valid.
@@ -177,8 +182,6 @@ export async function mirrorAgentRun(
 
 function shouldSuppressFailure(options: MirrorAgentRunOptions, error: unknown): boolean {
   if (options.suppressRateLimitFailureEvent !== true) return false;
-  // A usage-limit-coded failure is final — it must stay visible, not be
-  // swallowed by the rate-limit suppression its message wording matches.
   if (isProviderUsageLimitError(error)) return false;
   if (isProviderRateLimitError(error)) return true;
   return isAbortError(error) || options.signal.aborted;

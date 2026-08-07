@@ -11,6 +11,12 @@
  * promise. Turn hooks are not used because there is exactly one observer (the
  * caller who requested the run); a hook indirection would only obscure the
  * flow.
+ *
+ * A failed turn is classified before any summary work: a usage-limit-coded
+ * failure is rethrown with its wire code intact — never re-minted as a rate
+ * limit by the message fallback, since requeueing cannot help until the
+ * account's quota window resets — while a rate-limit-coded failure the
+ * fallback cannot recognize is re-minted as an `APIProviderRateLimitError`.
  */
 
 import { APIProviderRateLimitError, isProviderRateLimitError } from '#/kosong/contract/errors';
@@ -168,9 +174,6 @@ function classifyTurnResult(result: TurnResult): void {
       return;
     case 'failed': {
       const error = result.error;
-      // A usage-limit-coded failure must not be reclassified as a rate limit
-      // by the message fallback: requeueing cannot help until the quota
-      // window resets. Throw it through with its wire code intact.
       if (isProviderUsageLimitError(error)) throw error;
       if (isProviderRateLimitError(error)) throw error;
       const payload = toKimiErrorPayload(error);

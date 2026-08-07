@@ -2231,6 +2231,18 @@ describe('classifyKimiQuotaError', () => {
   it('classifies the #2121 managed-subscription 403 usage-limit message as quota-exhausted', () => {
     const error = classifyKimiQuotaError(error403(USAGE_LIMIT_403_MESSAGE));
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
+    // The originating status must survive: reporting 403 exhaustion as a 429
+    // would mislabel it as a rate limit for hosts reading `statusCode`.
+    expect(error?.statusCode).toBe(403);
+    expect(isRetryableGenerateError(error)).toBe(false);
+  });
+
+  it('accepts usage-limit wording on a 429 without any billing wording', () => {
+    // The 429 branch also honors the usage-limit wordings, not just the
+    // billing ones — a subscription limit surfaced as a 429 is exhaustion too.
+    const error = classifyKimiQuotaError(quota429(USAGE_LIMIT_403_MESSAGE));
+    expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
+    expect(error?.statusCode).toBe(429);
     expect(isRetryableGenerateError(error)).toBe(false);
   });
 

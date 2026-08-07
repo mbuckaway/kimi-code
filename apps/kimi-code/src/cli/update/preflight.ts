@@ -6,7 +6,7 @@ import type { TelemetryProperties } from '@moonshot-ai/kimi-telemetry';
 import {
   KIMI_CODE_OFFICIAL_INSTALL_URL,
   NATIVE_INSTALL_COMMAND_UNIX,
-  NATIVE_INSTALL_COMMAND_WIN,
+  NATIVE_UPDATE_INSTRUCTION_WIN,
 } from '#/constant/app';
 import { loadTuiConfig } from '#/tui/config';
 
@@ -81,7 +81,7 @@ export function installCommandFor(
     case 'homebrew':
       return 'brew upgrade kimi-code';
     case 'native':
-      return platform === 'win32' ? NATIVE_INSTALL_COMMAND_WIN : NATIVE_INSTALL_COMMAND_UNIX;
+      return platform === 'win32' ? NATIVE_UPDATE_INSTRUCTION_WIN : NATIVE_INSTALL_COMMAND_UNIX;
     case 'unsupported':
       return `npm install -g ${NPM_PACKAGE_NAME}@${version}`;
   }
@@ -170,11 +170,18 @@ export function renderManualUpdateMessage(
       sourceDesc = 'unsupported package manager or layout.';
       break;
   }
+  // `native` only reaches the manual path on Windows, where the fork ships no
+  // installer script — installCommandFor hands back a download instruction
+  // there, not a command, so it must not be prefixed with "run:".
+  const manualStep =
+    source === 'native'
+      ? `To update manually, ${installCommand}\n`
+      : `To update manually, run: ${installCommand}\n`;
   return (
     `A newer version of ${NPM_PACKAGE_NAME} is available ` +
     `(${currentVersion} -> ${target.version}).\n` +
     `Detected install source: ${sourceDesc}\n` +
-    `To update manually, run: ${installCommand}\n` +
+    manualStep +
     (source === 'homebrew' ? THIRD_PARTY_SOURCE_NOTE : '')
   );
 }

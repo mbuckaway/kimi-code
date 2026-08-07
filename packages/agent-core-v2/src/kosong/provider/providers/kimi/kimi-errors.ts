@@ -21,8 +21,10 @@
  * hoists the body's `error.code`/`error.type` to the top level, while the
  * Anthropic SDK keeps the full body on `.error`
  * (`{type: 'error', error: {type}}`), so candidate codes are collected from
- * `error` → `.error` → `.error.error`. Anything not positively recognized
- * answers `undefined`, keeping the base classification.
+ * `error` → `.error` → `.error.error`. A recognized failure keeps the status
+ * the provider actually sent (429 or 403), so wire details and telemetry
+ * report the real status; anything not positively recognized answers
+ * `undefined`, keeping the base classification.
  */
 
 import {
@@ -41,13 +43,6 @@ const KIMI_QUOTA_EXHAUSTED_MESSAGE_PATTERNS = [
   /account (?:is )?in arrears/,
 ] as const;
 
-// Message fallback for the managed Kimi subscription's usage limit, which the
-// backend returns as a 403 (not a 429) — observed in
-// https://github.com/MoonshotAI/kimi-code/issues/2121: "You've reached your
-// usage limit for this billing cycle. Your quota will be refreshed in the
-// next cycle. ...". A 403 is otherwise an auth/permission failure, so only
-// these usage-limit-specific wordings promote it to quota-exhausted; the
-// billing wordings above stay 429-only.
 const KIMI_USAGE_LIMIT_MESSAGE_PATTERNS = [
   /reached your usage limit/,
   /usage limit for this billing cycle/,
@@ -106,5 +101,6 @@ export function classifyKimiQuotaError(error: unknown): APIProviderQuotaExhauste
     requestId,
     parseRetryAfterMs(headers),
     parseTraceId(headers),
+    status,
   );
 }

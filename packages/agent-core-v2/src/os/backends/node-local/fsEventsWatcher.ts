@@ -16,7 +16,10 @@
  * not-yet-existing path) is served by streaming the nearest existing ancestor
  * directory and keeping only events for the target itself, matching chokidar.
  * Event paths are rewritten from the kernel-reported real path back to the
- * caller-given root (macOS `/var` vs `/private/var`). Note: an active
+ * caller-given root (macOS `/var` vs `/private/var`). The per-path state is a
+ * bounded set that evicts the oldest path once the cap is reached, so a
+ * long-lived watch cannot grow without limit, and the lazily required native
+ * module is shape-checked before it is used. Note: an active
  * `fsevents` watch keeps the Node process alive (the native handle cannot be
  * unref'd). Used by `hostFsWatchService` on macOS; chokidar remains the
  * backend elsewhere.
@@ -82,9 +85,47 @@ export function mapFsEventsFlags(flags: number, constants: FseventsConstants): F
   return { type: 'skip' };
 }
 
-export function resolveRenameEvent(exists: boolean, isDir: boolean): FsEventsEventName {
-  if (!exists) return 'unlink';
+export function resolveRenameEvent(isDir: boolean): FsEventsEventName {
   return isDir ? 'addDir' : 'add';
+}
+
+export const FS_EVENTS_KNOWN_PATH_LIMIT = 2048;
+
+export interface KnownPathSet {
+  readonly size: number;
+  has(path: string): boolean;
+  remember(path: string): void;
+  forget(path: string): boolean;
+}
+
+export function createKnownPathSet(limit: number = FS_EVENTS_KNOWN_PATH_LIMIT): KnownPathSet {
+  const paths = new Set<string>();
+  return {
+    get size(): number {
+      return paths.size;
+    },
+    has: (path) => paths.has(path),
+    remember: (path) => {
+      paths.delete(path);
+      paths.add(path);
+      while (paths.size > limit) {
+        const oldest = paths.values().next().value;
+        if (oldest === undefined) return;
+        paths.delete(oldest);
+      }
+    },
+    forget: (path) => paths.delete(path),
+  };
+}
+
+export function isFseventsModule(value: unknown): value is FseventsModule {
+  if (typeof value !== 'object' || value === null) return false;
+  if (!('watch' in value) || !('constants' in value)) return false;
+  return (
+    typeof value.watch === 'function' &&
+    typeof value.constants === 'object' &&
+    value.constants !== null
+  );
 }
 
 let fseventsLoaded = false;
@@ -95,12 +136,130 @@ export function loadFsevents(): FseventsModule | undefined {
     fseventsLoaded = true;
     try {
       const nodeRequire = createRequire(import.meta.url);
-      fseventsCache = nodeRequire('fsevents') as FseventsModule;
+      const loaded: unknown = nodeRequire('fsevents');
+      fseventsCache = isFseventsModule(loaded) ? loaded : undefined;
     } catch {
       fseventsCache = undefined;
     }
   }
   return fseventsCache;
+}
+
+interface FsEventsWatchTarget {
+  readonly fileOnly: boolean;
+  readonly watchBase: string;
+  readonly watchRoot: string;
+}
+
+interface FsEventsReconciler {
+  readonly constants: FseventsConstants;
+  readonly known: KnownPathSet;
+  readonly startedAt: number;
+  readonly onEvent: (eventName: FsEventsEventName, absPath: string) => void;
+  readonly onError: (error: unknown) => void;
+}
+
+function resolveWatchTarget(path: string): FsEventsWatchTarget {
+  const targetStat = lstatSync(path, { throwIfNoEntry: false });
+  const fileOnly = targetStat?.isDirectory() !== true;
+  let watchBase = fileOnly ? dirname(path) : path;
+  for (;;) {
+    try {
+      return { fileOnly, watchBase, watchRoot: realpathSync(watchBase) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = dirname(watchBase);
+      if (parent === watchBase) throw error;
+      watchBase = parent;
+    }
+  }
+}
+
+function emitCreated(reconciler: FsEventsReconciler, eventPath: string, isDir: boolean): void {
+  if (reconciler.known.has(eventPath)) {
+    reconciler.onEvent('change', eventPath);
+    return;
+  }
+  const stat = lstatSync(eventPath, { throwIfNoEntry: false });
+  if (stat === undefined) return;
+  if (stat.mtimeMs <= reconciler.startedAt) return;
+  reconciler.known.remember(eventPath);
+  reconciler.onEvent(isDir ? 'addDir' : 'add', eventPath);
+}
+
+function emitRemoved(reconciler: FsEventsReconciler, eventPath: string, isDir: boolean): void {
+  reconciler.known.forget(eventPath);
+  reconciler.onEvent(isDir ? 'unlinkDir' : 'unlink', eventPath);
+}
+
+function emitChange(reconciler: FsEventsReconciler, eventPath: string): void {
+  if (reconciler.known.has(eventPath)) {
+    reconciler.onEvent('change', eventPath);
+    return;
+  }
+  const stat = lstatSync(eventPath, { throwIfNoEntry: false });
+  if (stat === undefined) return;
+  if (stat.mtimeMs <= reconciler.startedAt) return;
+  reconciler.onEvent('change', eventPath);
+}
+
+function emitRenamed(reconciler: FsEventsReconciler, eventPath: string): void {
+  const stat = lstatSync(eventPath, { throwIfNoEntry: false });
+  if (stat === undefined) {
+    if (reconciler.known.forget(eventPath)) reconciler.onEvent('unlink', eventPath);
+    return;
+  }
+  if (reconciler.known.has(eventPath)) {
+    reconciler.onEvent('change', eventPath);
+    return;
+  }
+  reconciler.known.remember(eventPath);
+  reconciler.onEvent(resolveRenameEvent(stat.isDirectory()), eventPath);
+}
+
+function emitTransient(reconciler: FsEventsReconciler, eventPath: string, flags: number): void {
+  const stat = lstatSync(eventPath, { throwIfNoEntry: false });
+  if (stat === undefined) {
+    if (reconciler.known.has(eventPath)) {
+      emitRemoved(reconciler, eventPath, (flags & reconciler.constants.ItemIsDir) !== 0);
+    }
+    return;
+  }
+  emitCreated(reconciler, eventPath, stat.isDirectory());
+}
+
+function reconcile(reconciler: FsEventsReconciler, eventPath: string, flags: number): void {
+  const action = mapFsEventsFlags(flags, reconciler.constants);
+  switch (action.type) {
+    case 'event':
+      if (action.eventName === 'add' || action.eventName === 'addDir') {
+        emitCreated(reconciler, eventPath, action.eventName === 'addDir');
+      } else if (action.eventName === 'change') {
+        emitChange(reconciler, eventPath);
+      } else {
+        emitRemoved(reconciler, eventPath, action.eventName === 'unlinkDir');
+      }
+      return;
+    case 'rename':
+      emitRenamed(reconciler, eventPath);
+      return;
+    case 'dataLoss':
+      reconciler.onError(new Error(`fsevents reported a data-loss event for: ${eventPath}`));
+      return;
+    case 'skip':
+      if (
+        (flags & reconciler.constants.ItemCreated) !== 0 &&
+        (flags & reconciler.constants.ItemRemoved) !== 0
+      ) {
+        emitTransient(reconciler, eventPath, flags);
+      }
+      return;
+    default: {
+      const exhaustive: never = action;
+      void exhaustive;
+      return;
+    }
+  }
 }
 
 export function createFsEventsWatcher(
@@ -110,63 +269,15 @@ export function createFsEventsWatcher(
   onEvent: (eventName: FsEventsEventName, absPath: string) => void,
   onError: (error: unknown) => void,
 ): FsEventsWatcher {
-  const { constants } = fseventsModule;
-  const startedAt = performance.timeOrigin + performance.now();
-  const known = new Set<string>();
+  const reconciler: FsEventsReconciler = {
+    constants: fseventsModule.constants,
+    known: createKnownPathSet(),
+    startedAt: performance.timeOrigin + performance.now(),
+    onEvent,
+    onError,
+  };
+  const { fileOnly, watchBase, watchRoot } = resolveWatchTarget(path);
   let closed = false;
-
-  const targetStat = lstatSync(path, { throwIfNoEntry: false });
-  const fileOnly = targetStat?.isDirectory() !== true;
-  let watchBase = fileOnly ? dirname(path) : path;
-  let watchRoot: string;
-  for (;;) {
-    try {
-      watchRoot = realpathSync(watchBase);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      const parent = dirname(watchBase);
-      if (parent === watchBase) throw error;
-      watchBase = parent;
-    }
-  }
-
-  const emitCreated = (eventPath: string, isDir: boolean): void => {
-    if (known.has(eventPath)) {
-      onEvent('change', eventPath);
-      return;
-    }
-    const stat = lstatSync(eventPath, { throwIfNoEntry: false });
-    if (stat === undefined) return;
-    if (stat.mtimeMs <= startedAt) return;
-    known.add(eventPath);
-    onEvent(isDir ? 'addDir' : 'add', eventPath);
-  };
-
-  const emitRemoved = (eventPath: string, isDir: boolean): void => {
-    known.delete(eventPath);
-    onEvent(isDir ? 'unlinkDir' : 'unlink', eventPath);
-  };
-
-  const emitChange = (eventPath: string): void => {
-    if (known.has(eventPath)) {
-      onEvent('change', eventPath);
-      return;
-    }
-    const stat = lstatSync(eventPath, { throwIfNoEntry: false });
-    if (stat === undefined) return;
-    if (stat.mtimeMs <= startedAt) return;
-    onEvent('change', eventPath);
-  };
-
-  const emitTransient = (eventPath: string, flags: number): void => {
-    const stat = lstatSync(eventPath, { throwIfNoEntry: false });
-    if (stat === undefined) {
-      if (known.has(eventPath)) emitRemoved(eventPath, (flags & constants.ItemIsDir) !== 0);
-      return;
-    }
-    emitCreated(eventPath, stat.isDirectory());
-  };
 
   const stop = fseventsModule.watch(watchRoot, (rawPath, flags) => {
     if (closed) return;
@@ -177,40 +288,7 @@ export function createFsEventsWatcher(
     try {
       if (options?.ignored?.(eventPath) === true) return;
       if (!fileOnly && options?.recursive === false && dirname(eventPath) !== path) return;
-      const action = mapFsEventsFlags(flags, constants);
-      switch (action.type) {
-        case 'event':
-          if (action.eventName === 'add' || action.eventName === 'addDir') {
-            emitCreated(eventPath, action.eventName === 'addDir');
-          } else if (action.eventName === 'change') {
-            emitChange(eventPath);
-          } else {
-            emitRemoved(eventPath, action.eventName === 'unlinkDir');
-          }
-          return;
-        case 'rename': {
-          const stat = lstatSync(eventPath, { throwIfNoEntry: false });
-          if (stat === undefined) {
-            if (known.delete(eventPath)) onEvent('unlink', eventPath);
-            return;
-          }
-          if (known.has(eventPath)) {
-            onEvent('change', eventPath);
-            return;
-          }
-          known.add(eventPath);
-          onEvent(resolveRenameEvent(true, stat.isDirectory()), eventPath);
-          return;
-        }
-        case 'dataLoss':
-          onError(new Error(`fsevents reported a data-loss event for: ${eventPath}`));
-          return;
-        case 'skip':
-          if ((flags & constants.ItemCreated) !== 0 && (flags & constants.ItemRemoved) !== 0) {
-            emitTransient(eventPath, flags);
-          }
-          return;
-      }
+      reconcile(reconciler, eventPath, flags);
     } catch (error) {
       onError(error);
     }

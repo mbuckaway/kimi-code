@@ -163,6 +163,22 @@ describe('translateProviderError — classification', () => {
     expect(translated.details).toMatchObject({ statusCode: 429, requestId: 'req-usage' });
   });
 
+  it('reports the provider status the quota-exhausted error was built from', () => {
+    // The managed subscription's usage limit arrives as a 403; reporting a
+    // hardcoded 429 would misattribute it in the wire details and telemetry.
+    const error = new APIProviderQuotaExhaustedError(
+      "You've reached your usage limit for this billing cycle.",
+      'req-usage-403',
+      null,
+      null,
+      403,
+    );
+    expect(error.statusCode).toBe(403);
+    const translated = translateProviderError(error);
+    expect(translated.code).toBe('provider.usage_limit');
+    expect(translated.details).toMatchObject({ statusCode: 403, requestId: 'req-usage-403' });
+  });
+
   it('maps unknown errors and non-errors to internal', () => {
     expect(translateProviderError(new Error('boom')).code).toBe('internal');
     expect(translateProviderError('boom').code).toBe('internal');

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
-import { createConnection, type Socket } from 'node:net';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { createConnection, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Duplex } from 'node:stream';
@@ -19,9 +19,30 @@ import {
   type WriteTextFileRequest,
   type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { log } from '../src/log';
 import { runAcpServerOnSocket } from '../src/socket';
+
+/**
+ * Every `net.Server` the socket transport creates, newest last. The transport
+ * keeps the server private, so a test that needs to emit a post-listen
+ * `'error'` on it (the event Node re-throws when nothing is listening) reaches
+ * it through this recorder.
+ */
+const { createdServers } = vi.hoisted(() => ({ createdServers: [] as Server[] }));
+
+vi.mock('node:net', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:net')>();
+  return {
+    ...actual,
+    createServer: (...args: Parameters<typeof actual.createServer>): Server => {
+      const server = actual.createServer(...args);
+      createdServers.push(server);
+      return server;
+    },
+  };
+});
 
 /** Minimal Client that throws on every callback so a stray reverse-RPC fails the test loudly. */
 class StubClient implements Client {
@@ -83,10 +104,37 @@ async function openClient(
   return { socket, client };
 }
 
+/** The `net.Server` the transport under test created most recently. */
+function lastCreatedServer(): Server {
+  const server = createdServers.at(-1);
+  if (server === undefined) {
+    throw new Error('runAcpServerOnSocket did not create a net.Server');
+  }
+  return server;
+}
+
+/**
+ * Resolves `'closed'` when the server drops the connection, `'open'` when it
+ * is still alive after the grace period — a bounded wait so a server that
+ * wrongly keeps the socket fails fast instead of hitting the test timeout.
+ */
+async function settleWithin(socket: Socket, ms: number): Promise<'closed' | 'open'> {
+  socket.on('error', () => undefined);
+  return Promise.race([
+    once(socket, 'close').then(() => 'closed' as const),
+    new Promise<'open'>((resolve) => {
+      setTimeout(() => {
+        resolve('open');
+      }, ms);
+    }),
+  ]);
+}
+
 describe('runAcpServerOnSocket', () => {
   let homeDir: string | undefined;
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     if (homeDir !== undefined) {
       await rm(homeDir, { recursive: true, force: true });
       homeDir = undefined;
@@ -138,7 +186,7 @@ describe('runAcpServerOnSocket', () => {
   );
 
   it(
-    'stops accepting, destroys live connections, and unlinks the socket file on SIGINT',
+    'stops accepting and destroys live connections on SIGINT',
     async () => {
       const dir = await makeHomeDir('acp-socket-sigint-');
       const signals = new EventEmitter();
@@ -161,10 +209,26 @@ describe('runAcpServerOnSocket', () => {
       await expect(once(late, 'connect')).rejects.toThrow(/ENOENT|ECONNREFUSED/);
       late.destroy();
       probe.destroy();
+    },
+    30_000,
+  );
 
-      if (process.platform !== 'win32') {
-        expect(existsSync(socketPath)).toBe(false);
-      }
+  it.skipIf(process.platform === 'win32')(
+    'removes the socket file from disk on SIGINT',
+    async () => {
+      const dir = await makeHomeDir('acp-socket-unlink-');
+      const signals = new EventEmitter();
+      const socketPath = makeSocketPath();
+      const run = runAcpServerOnSocket({ homeDir: dir, disableAuth: true, socketPath, signals });
+
+      const probe = await connectWhenReady(socketPath);
+      expect(existsSync(socketPath)).toBe(true);
+      probe.destroy();
+
+      signals.emit('SIGINT');
+      await run;
+
+      expect(existsSync(socketPath)).toBe(false);
     },
     30_000,
   );
@@ -238,6 +302,141 @@ describe('runAcpServerOnSocket', () => {
 
       signals.emit('SIGINT');
       await run;
+    },
+    30_000,
+  );
+
+  it(
+    'logs a post-listen server error instead of letting it take the process down',
+    async () => {
+      const dir = await makeHomeDir('acp-socket-server-error-');
+      const signals = new EventEmitter();
+      const socketPath = makeSocketPath();
+      const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => undefined);
+      const run = runAcpServerOnSocket({ homeDir: dir, disableAuth: true, socketPath, signals });
+
+      const client = await openClient(socketPath);
+      const server = lastCreatedServer();
+
+      // Without a permanent listener Node re-throws the event, so a single
+      // post-listen failure would kill the shared server and every client
+      // still connected to it.
+      expect(() => server.emit('error', new Error('post-listen accept failure'))).not.toThrow();
+      expect(errorSpy).toHaveBeenCalledWith('acp: socket server error', {
+        socketPath,
+        error: 'post-listen accept failure',
+      });
+
+      // The connection opened before the error is still served.
+      const init = await client.client.initialize({ protocolVersion: 1, clientCapabilities: {} });
+      expect(init.protocolVersion).toBe(1);
+
+      client.socket.end();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      signals.emit('SIGINT');
+      await run;
+    },
+    30_000,
+  );
+
+  it(
+    'refuses connections past maxConnections and keeps the accepted client serving',
+    async () => {
+      const dir = await makeHomeDir('acp-socket-cap-');
+      const signals = new EventEmitter();
+      const socketPath = makeSocketPath();
+      const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+      const run = runAcpServerOnSocket({
+        homeDir: dir,
+        disableAuth: true,
+        socketPath,
+        signals,
+        maxConnections: 1,
+      });
+
+      const accepted = await openClient(socketPath);
+      const refused = createConnection(socketPath);
+      const outcome = await settleWithin(refused, 500);
+
+      expect(outcome).toBe('closed');
+      expect(warnSpy).toHaveBeenCalledWith('acp: socket connection limit reached, refusing client', {
+        socketPath,
+        maxConnections: 1,
+      });
+
+      // The client under the cap is unaffected by the refusal.
+      const init = await accepted.client.initialize({ protocolVersion: 1, clientCapabilities: {} });
+      expect(init.protocolVersion).toBe(1);
+
+      refused.destroy();
+      accepted.socket.end();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      signals.emit('SIGINT');
+      await run;
+    },
+    30_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects when clearing a stale socket path fails with anything but ENOENT',
+    async () => {
+      const dir = await makeHomeDir('acp-socket-unlink-fail-');
+      const socketPath = makeSocketPath();
+      // A directory at the socket path makes the startup unlink fail with
+      // EPERM/EISDIR — the class of error that must NOT be swallowed the way
+      // "nothing stale here" (ENOENT) is.
+      await mkdir(socketPath);
+      const signals = new EventEmitter();
+
+      try {
+        await expect(
+          runAcpServerOnSocket({ homeDir: dir, disableAuth: true, socketPath, signals }),
+        ).rejects.toThrow(/EPERM|EISDIR/);
+
+        // The failure happened before any wiring: no signal handlers left
+        // behind, nothing listening on the path.
+        expect(signals.listenerCount('SIGINT')).toBe(0);
+        expect(signals.listenerCount('SIGTERM')).toBe(0);
+      } finally {
+        await rm(socketPath, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  it(
+    'warns that a Windows named pipe carries no filesystem access boundary',
+    async () => {
+      const dir = await makeHomeDir('acp-socket-win32-');
+      const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+      const signals = new EventEmitter();
+      const socketPath = makeSocketPath();
+      const realPlatform = process.platform;
+
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      let run: Promise<void>;
+      try {
+        // The platform check (and the warning) happen before the first await,
+        // so the real platform can go back immediately — everything after
+        // this point runs on the host's own filesystem semantics.
+        run = runAcpServerOnSocket({ homeDir: dir, disableAuth: true, socketPath, signals });
+      } finally {
+        Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
+      }
+
+      expect(warnSpy).toHaveBeenCalledWith('acp: named pipe has no filesystem access boundary', {
+        socketPath,
+      });
+
+      try {
+        const probe = await connectWhenReady(socketPath);
+        probe.destroy();
+        signals.emit('SIGINT');
+        await run;
+      } finally {
+        // The win32 branch skips the POSIX unlink, so clean up by hand.
+        await rm(socketPath, { force: true });
+      }
     },
     30_000,
   );

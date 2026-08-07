@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { stat, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { KimiHarness } from '@moonshot-ai/kimi-code-sdk';
+import { log } from '@moonshot-ai/kimi-code-sdk';
 
 import { runAcpServer } from '../src/server';
 import { runAcpServerOnSocket } from '../src/socket';
@@ -175,7 +176,11 @@ async function connectWhenReady(socketPath: string): Promise<Socket> {
 }
 
 describe('runAcpServerOnSocket graceful shutdown', () => {
-  it('calls harness.close() exactly once on SIGINT, stops accepting, and unlinks the socket', async () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('calls harness.close() exactly once on SIGINT and stops accepting', async () => {
     const { harness, closeCalls } = makeCloseCounterHarness();
     const signals = new EventEmitter();
     const socketPath = makeSocketPath();
@@ -196,13 +201,29 @@ describe('runAcpServerOnSocket graceful shutdown', () => {
 
     // The listener is gone: a fresh connect must be refused.
     const late = createConnection(socketPath);
-    await expect(once(late, 'connect')).rejects.toThrow();
+    await expect(once(late, 'connect')).rejects.toThrow(/ENOENT|ECONNREFUSED/);
     late.destroy();
-
-    if (process.platform !== 'win32') {
-      expect(existsSync(socketPath)).toBe(false);
-    }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'removes the socket file from disk on SIGINT',
+    async () => {
+      const { harness } = makeCloseCounterHarness();
+      const signals = new EventEmitter();
+      const socketPath = makeSocketPath();
+
+      const run = runAcpServerOnSocket(harness, { socketPath, signals });
+
+      const probe = await connectWhenReady(socketPath);
+      expect(existsSync(socketPath)).toBe(true);
+      probe.destroy();
+
+      signals.emit('SIGINT');
+      await run;
+
+      expect(existsSync(socketPath)).toBe(false);
+    },
+  );
 
   it('stays idempotent when SIGTERM and SIGINT both fire', async () => {
     const { harness, closeCalls } = makeCloseCounterHarness();
@@ -265,4 +286,96 @@ describe('runAcpServerOnSocket graceful shutdown', () => {
       await run;
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects when clearing a stale socket path fails with anything but ENOENT',
+    async () => {
+      const socketPath = makeSocketPath();
+      // A directory at the socket path makes the startup unlink fail with
+      // EPERM/EISDIR — the class of error that must NOT be swallowed the way
+      // "nothing stale here" (ENOENT) is.
+      await mkdir(socketPath);
+      const { harness, closeCalls } = makeCloseCounterHarness();
+      const signals = new EventEmitter();
+
+      try {
+        await expect(runAcpServerOnSocket(harness, { socketPath, signals })).rejects.toThrow(
+          /EPERM|EISDIR/,
+        );
+
+        // The failure happened before any wiring: no harness ownership taken,
+        // no signal handlers left behind.
+        expect(closeCalls()).toBe(0);
+        expect(signals.listenerCount('SIGINT')).toBe(0);
+        expect(signals.listenerCount('SIGTERM')).toBe(0);
+      } finally {
+        await rm(socketPath, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('waits for in-flight connection drivers before closing the shared harness', async () => {
+    const order: string[] = [];
+    const harness = {
+      close: async (): Promise<void> => {
+        order.push('harness-close');
+      },
+    } as unknown as KimiHarness;
+    // The per-connection driver announces its own settlement; the harness is
+    // shared, so it must not be torn down while a driver is still running.
+    vi.spyOn(log, 'info').mockImplementation((message: string) => {
+      if (message === 'acp: socket client disconnected') order.push('driver-settled');
+    });
+    vi.spyOn(log, 'error').mockImplementation((message: string) => {
+      if (message === 'acp: socket client connection failed') order.push('driver-settled');
+    });
+    const signals = new EventEmitter();
+    const socketPath = makeSocketPath();
+
+    const run = runAcpServerOnSocket(harness, { socketPath, signals });
+
+    // Left connected on purpose: the drain has to destroy it and then wait
+    // for that connection's run to finish.
+    const probe = await connectWhenReady(socketPath);
+    probe.on('error', () => undefined);
+
+    signals.emit('SIGINT');
+    await run;
+
+    expect(order).toEqual(['driver-settled', 'harness-close']);
+    probe.destroy();
+  });
+
+  it('warns that a Windows named pipe carries no filesystem access boundary', async () => {
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+    const { harness } = makeCloseCounterHarness();
+    const signals = new EventEmitter();
+    const socketPath = makeSocketPath();
+    const realPlatform = process.platform;
+
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    let run: Promise<void>;
+    try {
+      // The platform check (and the warning) happen before the first await,
+      // so the real platform can go back immediately — everything after this
+      // point runs on the host's own filesystem semantics.
+      run = runAcpServerOnSocket(harness, { socketPath, signals });
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
+    }
+
+    expect(warnSpy).toHaveBeenCalledWith('acp: named pipe has no filesystem access boundary', {
+      socketPath,
+    });
+
+    try {
+      const probe = await connectWhenReady(socketPath);
+      probe.destroy();
+      signals.emit('SIGINT');
+      await run;
+    } finally {
+      // The win32 branch skips the POSIX unlink, so clean up by hand.
+      await rm(socketPath, { force: true });
+    }
+  });
 });

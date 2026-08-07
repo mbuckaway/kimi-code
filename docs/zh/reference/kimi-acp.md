@@ -29,8 +29,12 @@ socket = "/Users/you/.kimi-code/acp.sock"
 
 绑定成功后，服务器会在标准错误打印 `acp server listening on <path>`，并保持前台运行。`Ctrl-C`（SIGINT）或 SIGTERM 会排空进行中的会话、删除 socket 文件并干净退出——如果想让它常驻后台，可以用 launchd、systemd 或 `nohup` 运行该命令。
 
+由于每个被接受的连接都会启动一个完整的 agent 实例，服务器把并发客户端数上限设为 64。超出上限的连接会被立即关闭，并在标准错误记录 `acp: socket connection limit reached, refusing client`。
+
 ::: warning 注意
 socket 上没有身份认证：任何能打开它的本地进程都能获得完整的 agent 访问权。在 macOS/Linux 上，CLI 会把 socket 收紧为仅所有者可访问（`0600`，位于 `0700` 的目录内），所以请把 socket 放在你的 home 目录下——文件系统权限就是全部的访问边界。
+
+Windows 上没有对应的边界。命名管道位于内核对象命名空间而非文件系统，`0600`/`0700` 的收紧手段在这里不适用，管道以默认权限创建——机器上的任何账户都能连上它。服务器启动时会在标准错误打印一条警告说明这一点。在 Windows 上，只有当机器是你自己独占且可信时才适合用 socket 模式；否则请继续用标准输入/输出模式，该通道由拉起它的客户端继承，其他进程无法访问。
 :::
 
 客户端用 `net.createConnection` 连接，说的是与标准输入/输出模式相同的换行分隔 JSON-RPC（ndjson——每行一条 JSON 消息）：

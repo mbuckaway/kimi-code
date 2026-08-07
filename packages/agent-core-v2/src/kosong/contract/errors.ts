@@ -161,8 +161,9 @@ export class APIProviderQuotaExhaustedError extends APIStatusError {
     requestId?: string | null,
     retryAfterMs?: number | null,
     traceId?: string | null,
+    statusCode = 429,
   ) {
-    super(429, message, requestId, retryAfterMs, traceId, PROVIDER_USAGE_LIMIT_ERROR_CODE);
+    super(statusCode, message, requestId, retryAfterMs, traceId, PROVIDER_USAGE_LIMIT_ERROR_CODE);
     this.name = 'APIProviderQuotaExhaustedError';
   }
 }
