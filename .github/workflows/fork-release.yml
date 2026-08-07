@@ -83,13 +83,33 @@ jobs:
           git fetch origin main
           git fetch origin --tags --force
 
+      # main and fork/main are synced by two independent fork-sync jobs, so the
+      # mirror can advance to a new upstream release while the fork mainline is
+      # still stuck on a merge conflict. Releasing in that window stamps the new
+      # upstream base onto code that does not contain it, so refuse instead.
+      - name: Verify fork/main contains the upstream mirror
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            BASE=$(git show origin/main:apps/kimi-code/package.json \
+              | grep -m1 '"version"' | sed -E 's/.*"version": *"([^"]+)".*/\1/' | cut -d- -f1)
+            echo "::error::fork/main does not contain origin/main (upstream base $BASE)." \
+              "Land the upstream sync into fork/main before cutting a release;" \
+              "releasing now would label this build with an upstream base it does not carry."
+            git log --oneline HEAD..origin/main | head -20
+            exit 1
+          fi
+
       - name: Compute next version
         id: v
         run: |
           set -euo pipefail
           BASE=$(git show origin/main:apps/kimi-code/package.json \
             | grep -m1 '"version"' | sed -E 's/.*"version": *"([^"]+)".*/\1/' | cut -d- -f1)
-          LAST=$(git tag -l "v$BASE-MB.*" | sed "s/^v$BASE-MB\.//" | sort -t. -k1,1n -k2,2n | tail -1)
+          # The MB counter is continuous across upstream bases: the fork keeps
+          # carrying its own changes when upstream moves, so the count must not
+          # restart at 1.0 and imply the fork patches were dropped.
+          LAST=$(git tag -l 'v*-MB.*' | sed -E 's/^v.*-MB\.//' | sort -t. -k1,1n -k2,2n | tail -1)
           BUMP="${{ github.event.inputs.bump }}"
           [ -z "$BUMP" ] && BUMP=minor
           if [ -z "$LAST" ]; then

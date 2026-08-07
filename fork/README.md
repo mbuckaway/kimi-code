@@ -35,9 +35,16 @@ carry upstream workflow-file changes.
 
 - Version format: **`<upstream-base>-MB.<x>.<y>`** (e.g. `0.31.1-MB.1.0`).
   Dots, not hyphens, inside the prerelease — the updater compares versions
-  with `semver.gt`, and `MB-10` would sort before `MB-2` lexically. The MB
-  counter resets automatically when the upstream base version (read from
-  `main`'s `apps/kimi-code/package.json`) moves.
+  with `semver.gt`, and `MB-10` would sort before `MB-2` lexically. The
+  upstream base is read from `main`'s `apps/kimi-code/package.json`; the MB
+  counter is **continuous across bases** (`0.33.0-MB.1.3` → `0.34.0-MB.1.4`)
+  because the fork keeps carrying its own changes when upstream moves — a
+  reset would imply the fork patches were dropped.
+- The release refuses to run unless `fork/main` contains `main`. The two
+  branches are synced by independent `fork-sync` jobs, so the mirror can
+  advance to a new upstream release while the fork mainline is still stuck on
+  a merge conflict; releasing in that window would stamp an upstream base onto
+  code that does not contain it. Resolve the sync first, then release.
 - Every push to `fork/main` opens a `chore: release <version>` PR and
   auto-merges it; the merge tags `v<version>` (no slashes, so release asset
   URLs stay clean), creates a GitHub Release, builds unsigned native binaries
