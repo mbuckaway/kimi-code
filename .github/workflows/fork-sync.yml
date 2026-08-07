@@ -101,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base fork/main --head "${{ steps.merge.outputs.branch }}" \
-            --title "sync: upstream/main → fork/main ($(date -u +%Y-%m-%d))" \
+            --title "chore: sync upstream/main → fork/main ($(date -u +%Y-%m-%d))" \
             --body "Automated upstream sync into the fork mainline.")
           # --auto fails with "Pull request is in clean status" when the PR is
           # already mergeable (nothing pending to wait for) — merge it directly.

@@ -29,8 +29,12 @@ socket = "/Users/you/.kimi-code/acp.sock"
 
 Once bound, the server prints `acp server listening on <path>` to stderr and stays in the foreground. `Ctrl-C` (SIGINT) or SIGTERM drains in-flight sessions, removes the socket file, and exits cleanly — run the command under launchd, systemd, or `nohup` if you want it permanently in the background.
 
+Because every accepted connection starts a full agent instance, the server caps concurrent clients at 64. Connections beyond the cap are closed immediately and logged to stderr as `acp: socket connection limit reached, refusing client`.
+
 ::: warning Note
 There is no authentication on the socket: any local process that can open it gets full agent access. On macOS/Linux the CLI tightens the socket to owner-only (`0600`, inside a `0700` directory), so keep the socket under your home directory — filesystem permissions are the entire access boundary.
+
+On Windows there is no equivalent boundary. A named pipe lives in the kernel object namespace rather than the filesystem, so the `0600`/`0700` hardening does not apply and the pipe is created with the default permissions — any account on the machine can connect to it. The server prints a warning to stderr at startup to say so. Treat socket mode on Windows as safe only on a single-user machine you trust; otherwise stay on stdio mode, where the channel is inherited by the spawning client and reachable by nothing else.
 :::
 
 Clients connect with `net.createConnection` and speak the same newline-delimited JSON-RPC (ndjson — one JSON message per line) as stdio mode:

@@ -99,11 +99,15 @@ export const KIMI_CODE_PLUGIN_MARKETPLACE_URL_ENV = 'KIMI_CODE_PLUGIN_MARKETPLAC
 // one of these shows a quota note after the install result.
 export const QUOTA_CONSUMING_PLUGIN_IDS: readonly string[] = ['kimi-datasource'];
 export const KIMI_CODE_INSTALL_SH_URL = `${KIMI_CODE_CDN_BASE}/install.sh`;
-export const KIMI_CODE_INSTALL_PS1_URL = `${KIMI_CODE_CDN_BASE}/install.ps1`;
+// Fork: the update channel publishes install.sh only (see
+// fork/scripts/publish-update-channel.mjs) — there is no install.ps1. Windows
+// native builds are shipped as release zips, so that page is the Windows path.
+export const KIMI_CODE_RELEASES_LATEST_URL = 'https://github.com/mbuckaway/kimi-code/releases/latest';
 // Official download page, referenced by prompt copy that steers users away
 // from third-party install sources.
 export const KIMI_CODE_OFFICIAL_INSTALL_URL = 'https://www.kimi.com/code';
 
-// Native install commands, split by platform. Use these for prompt copy and spawn calls only; do not assemble the strings elsewhere.
+// Native update guidance, split by platform. Use these for prompt copy and spawn calls only; do not assemble the strings elsewhere.
 export const NATIVE_INSTALL_COMMAND_UNIX = `curl -fsSL ${KIMI_CODE_INSTALL_SH_URL} | bash`;
-export const NATIVE_INSTALL_COMMAND_WIN = `irm ${KIMI_CODE_INSTALL_PS1_URL} | iex`;
+// Not a runnable command: Windows has no fork installer script to pipe.
+export const NATIVE_UPDATE_INSTRUCTION_WIN = `download the latest win32 build from ${KIMI_CODE_RELEASES_LATEST_URL}`;

@@ -26,8 +26,23 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import { log } from './log';
 import { runAcpServerWithStream, type RunAcpServerOptions, type RunningAcpServer } from './start';
 
+/**
+ * Default ceiling on concurrent socket clients. Every accepted connection
+ * boots its own `agent-core-v2` core, so an unbounded accept loop lets any
+ * local process exhaust memory and file descriptors. 64 sits far above the
+ * handful of editors this transport exists for while still bounding the
+ * blast radius.
+ */
+const DEFAULT_MAX_SOCKET_CONNECTIONS = 64;
+
 export interface AcpSocketServerOptions extends Omit<RunAcpServerOptions, 'input' | 'output'> {
   readonly socketPath: string;
+  /**
+   * Upper bound on concurrent client connections. Connections past the cap
+   * are refused immediately instead of booting another core. Defaults to
+   * 64.
+   */
+  readonly maxConnections?: number;
   /** @internal test seam, same shape as acp-adapter's */
   readonly signals?: Pick<NodeJS.EventEmitter, 'once' | 'off'>;
 }
@@ -48,7 +63,8 @@ export interface AcpSocketServerOptions extends Omit<RunAcpServerOptions, 'input
  * corrupt the wire.
  */
 export async function runAcpServerOnSocket(opts: AcpSocketServerOptions): Promise<void> {
-  const { socketPath, signals: signalsOpt, ...serverOpts } = opts;
+  const { socketPath, maxConnections: maxConnectionsOpt, signals: signalsOpt, ...serverOpts } = opts;
+  const maxConnections = maxConnectionsOpt ?? DEFAULT_MAX_SOCKET_CONNECTIONS;
   // Windows named pipes live in a dedicated kernel namespace, not the
   // filesystem — mkdir/unlink/chmod are meaningless (and fail) there, and
   // the caller passes a `\\.\pipe\...` path.
@@ -66,12 +82,30 @@ export async function runAcpServerOnSocket(opts: AcpSocketServerOptions): Promis
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+  } else {
+    // The 0700 directory + 0600 socket below are the entire access boundary
+    // on POSIX, and a named pipe has no equivalent: it is created with the
+    // default DACL, so any account on the machine can open this
+    // unauthenticated agent RPC endpoint. Warn rather than let the POSIX
+    // guarantees be assumed to hold here.
+    log.warn('acp: named pipe has no filesystem access boundary', { socketPath });
   }
 
   const liveSockets = new Set<Socket>();
   const driverPromises = new Set<Promise<void>>();
 
   const server = createServer((socket) => {
+    if (liveSockets.size >= maxConnections) {
+      // Refuse before any per-connection work: accepting here would boot
+      // another full core, which is exactly how an unbounded accept loop
+      // turns into a local resource-exhaustion vector.
+      log.warn('acp: socket connection limit reached, refusing client', {
+        socketPath,
+        maxConnections,
+      });
+      socket.destroy();
+      return;
+    }
     liveSockets.add(socket);
     const driver = (async (): Promise<void> => {
       let running: RunningAcpServer | undefined;
@@ -103,13 +137,19 @@ export async function runAcpServerOnSocket(opts: AcpSocketServerOptions): Promis
     void driver.finally(() => driverPromises.delete(driver));
   });
 
+  const onServerError = (error: Error): void => {
+    log.error('acp: socket server error', { socketPath, error: error.message });
+  };
+
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(socketPath, () => {
-      // Detach so a post-listen 'error' doesn't hit a settled promise and,
-      // more importantly, doesn't escape as an unhandled 'error' event on
-      // the server.
+      // Swap the startup rejector for a permanent handler: a post-listen
+      // 'error' must not hit a settled promise, and with NO 'error' listener
+      // left Node re-throws the event — which would take down the shared
+      // server and every client on it.
       server.off('error', reject);
+      server.on('error', onServerError);
       resolve();
     });
   });

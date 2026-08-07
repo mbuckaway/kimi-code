@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 
 import { getNativePackageRoot, type NativeAssetOptions } from './native-assets';
 
@@ -22,6 +22,24 @@ let installed = false;
 // Path shape: native/<darwin|win32>/prebuilds/<arch>/<file>.node — note the
 // two path segments after "prebuilds", so ".+" (not "[^/]+") is required.
 const PI_TUI_NATIVE_PATTERN = /native[\\/](?:win32|darwin)[\\/]prebuilds[\\/].+\.node$/;
+
+// The redirect tail is regex-matched out of the caller's own absolute path, so
+// it is untrusted input and may contain "..". Resolve it against the cached
+// package root and refuse the redirect when the result lands outside that root
+// (same containment rule as resolveAssetPath in native-assets.ts).
+function resolveInsidePackageRoot(pkgRoot: string, tail: string): string | null {
+  const path = resolve(pkgRoot, ...tail.split(/[\\/]/));
+  const fromRoot = relative(pkgRoot, path);
+  if (
+    fromRoot === '..' ||
+    fromRoot.startsWith('../') ||
+    fromRoot.startsWith('..\\') ||
+    isAbsolute(fromRoot)
+  ) {
+    return null;
+  }
+  return path;
+}
 
 function isModuleNotFound(error: unknown): boolean {
   return (
@@ -50,8 +68,10 @@ export function createNativeModuleLoad(
       if (pkgRoot !== null) {
         const match = request.match(PI_TUI_NATIVE_PATTERN);
         if (match !== null) {
-          const redirected = join(pkgRoot, match[0]);
-          return originalLoad.call(this, redirected, parent, isMain);
+          const redirected = resolveInsidePackageRoot(pkgRoot, match[0]);
+          if (redirected !== null) {
+            return originalLoad.call(this, redirected, parent, isMain);
+          }
         }
       }
     }

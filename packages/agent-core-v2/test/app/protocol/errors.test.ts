@@ -171,11 +171,14 @@ describe('translateProviderError', () => {
         new APIProviderQuotaExhaustedError(
           "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.",
           'req-usage',
+          null,
+          null,
+          403,
         ),
       );
       expect(translated.code).toBe('provider.usage_limit');
       expect(translated.message).toContain('usage limit');
-      expect(translated.details).toMatchObject({ requestId: 'req-usage' });
+      expect(translated.details).toMatchObject({ statusCode: 403, requestId: 'req-usage' });
     });
   });
 });

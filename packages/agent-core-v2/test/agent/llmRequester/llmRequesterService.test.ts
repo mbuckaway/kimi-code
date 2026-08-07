@@ -766,7 +766,10 @@ describe('AgentLLMRequesterService trace id', () => {
     });
     const { service, telemetryRecords } = createService(requester, passthroughProjector);
     const request = service.start();
-    await expect(request.result).rejects.toThrow();
+    await expect(request.result).rejects.toMatchObject({
+      code: ErrorCodes.PROVIDER_RATE_LIMIT,
+      message: 'too many requests',
+    });
 
     expect(telemetryRecords).toContainEqual({
       event: 'api_error',

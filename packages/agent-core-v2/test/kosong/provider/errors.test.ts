@@ -170,6 +170,18 @@ describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
     const error = classifyKimiQuotaError(moonshotError403(USAGE_LIMIT_403_MESSAGE));
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(error)).toBe(false);
+    // The reported status is the provider's own 403, not a hardcoded 429.
+    expect(error?.statusCode).toBe(403);
+    expect(error?.details).toMatchObject({ statusCode: 403 });
+  });
+
+  it('accepts a 429 carrying only usage-limit wording and keeps its 429 status', () => {
+    // No structured quota code and no billing wording: the usage-limit
+    // wording alone promotes the 429 out of the retryable rate-limit class.
+    const error = classifyKimiQuotaError(moonshotQuota429(USAGE_LIMIT_403_MESSAGE));
+    expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
+    expect(isRetryableGenerateError(error)).toBe(false);
+    expect(error?.statusCode).toBe(429);
   });
 
   it.each([

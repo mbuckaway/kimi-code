@@ -691,6 +691,16 @@ describe('APIProviderQuotaExhaustedError', () => {
     expect(err.requestId).toBe('req-quota');
     expect(err.retryAfterMs).toBe(12_500);
   });
+
+  it('carries the originating status when the provider signalled exhaustion on a non-429', () => {
+    // The managed Kimi subscription returns its usage limit as a 403, so the
+    // error must not misreport itself as a 429 to hosts and telemetry.
+    const err = new APIProviderQuotaExhaustedError('usage limit', 'req-403', null, null, 403);
+    expect(err.statusCode).toBe(403);
+    expect(err.name).toBe('APIProviderQuotaExhaustedError');
+    expect(isRetryableGenerateError(err)).toBe(false);
+    expect(isProviderRateLimitError(err)).toBe(false);
+  });
 });
 
 describe('normalizeAPIStatusError: 429 stays vendor-neutral', () => {

@@ -13,6 +13,9 @@
  * DOMException and can never be misclassified as a retryable provider
  * failure. The guard throws rather than returns, by design.
  *
+ * `provider.usage_limit` is deliberately kept out of `retryable`: unlike a
+ * rate limit, requeueing cannot help until the account's quota window resets.
+ *
  * Side-effect module: importing registers the error domain.
  */
 
@@ -74,8 +77,6 @@ export const ProtocolErrors = {
       public: true,
       action: 'Retry after the provider recovers from overload.',
     },
-    // Deliberately NOT in `retryable`: requeueing cannot help until the
-    // account's quota window resets.
     'provider.usage_limit': {
       title: 'Usage limit reached',
       retryable: false,

@@ -456,4 +456,22 @@ describe('native module hook', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('does not redirect a pi-tui native path that escapes the package root', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kimi-module-hook-escape-'));
+    try {
+      const { manifest, source } = fakeManifest({}, '@moonshot-ai/pi-tui');
+      const load = createNativeModuleLoad((request) => request, {
+        cacheBase: dir,
+        manifest,
+        source,
+        version: 'test',
+      });
+
+      const traversal = '/sea/native/darwin/prebuilds/../../../../../../etc/evil.node';
+      expect(load(traversal, null, false)).toBe(traversal);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

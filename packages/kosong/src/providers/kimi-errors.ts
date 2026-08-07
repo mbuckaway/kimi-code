@@ -111,5 +111,6 @@ export function classifyKimiQuotaError(
     requestId,
     parseRetryAfterMs(headers),
     parseTraceId(headers),
+    status,
   );
 }

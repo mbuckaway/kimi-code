@@ -518,7 +518,7 @@ describe('runUpdatePreflight', () => {
     }
   });
 
-  it('native on win32: prints manual powershell command, does not spawn', async () => {
+  it('native on win32: points at the release download, never at install.ps1', async () => {
     mocks.readUpdateCache.mockResolvedValue(cacheWith('0.5.0'));
     mocks.refreshUpdateCache.mockResolvedValue(cacheWith('0.5.0'));
     mocks.detectInstallSource.mockResolvedValue('native');
@@ -527,7 +527,13 @@ describe('runUpdatePreflight', () => {
     try {
       const { stdout, options } = captureOutput();
       await expect(runUpdatePreflight('0.4.0', options)).resolves.toBe('continue');
-      expect(stdout.join('')).toContain('irm https://mbuckaway.github.io/kimi-code/install.ps1 | iex');
+      // The fork's update channel publishes install.sh only, so a Windows
+      // native install has no installer command to run.
+      expect(stdout.join('')).toContain(
+        'To update manually, download the latest win32 build from ' +
+          'https://github.com/mbuckaway/kimi-code/releases/latest',
+      );
+      expect(stdout.join('')).not.toContain('install.ps1');
       expect(promptForInstallChoice).not.toHaveBeenCalled();
       expect(mocks.spawn).not.toHaveBeenCalled();
     } finally {

@@ -133,6 +133,12 @@ export class APIProviderRateLimitError extends APIStatusError {
  * balance" vs "Your account ... is suspended due to insufficient balance,
  * please recharge your account ..."); OpenAI uses `insufficient_quota` as
  * both `error.type` and `error.code`.
+ *
+ * `statusCode` defaults to 429 because that is the status the vast majority
+ * of providers use, but it is overridable: the managed Kimi subscription
+ * reports its usage limit as a 403 (see `classifyKimiQuotaError`), and hosts
+ * that read `statusCode` must see the status the provider actually returned
+ * rather than a fabricated 429.
  */
 export class APIProviderQuotaExhaustedError extends APIStatusError {
   constructor(
@@ -140,8 +146,9 @@ export class APIProviderQuotaExhaustedError extends APIStatusError {
     requestId?: string | null,
     retryAfterMs?: number | null,
     traceId?: string | null,
+    statusCode = 429,
   ) {
-    super(429, message, requestId, retryAfterMs, traceId);
+    super(statusCode, message, requestId, retryAfterMs, traceId);
     this.name = 'APIProviderQuotaExhaustedError';
   }
 }

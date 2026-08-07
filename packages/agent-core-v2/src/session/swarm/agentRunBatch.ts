@@ -5,6 +5,11 @@
  * loop for swarm agent runs; drives each attempt through a
  * `AgentRunBatchLauncher` and surfaces requeues via `suspended`. Pure scheduling
  * logic — owns no scoped state.
+ *
+ * Only a retryable rate limit enters the requeue loop: a usage-limit-coded
+ * failure is recorded as a plain failure even though its wording can match the
+ * rate-limit fallback, because requeueing cannot help until the account's
+ * quota window resets.
  */
 
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
@@ -323,9 +328,6 @@ export class AgentRunBatch<T> {
         usage: completion.usage,
       };
     } catch (error) {
-      // A usage-limit-coded failure must not enter the rate-limit requeue
-      // loop: its message can still match the rate-limit wording fallback,
-      // but requeueing cannot help until the quota window resets.
       if (!isProviderUsageLimitError(error) && isProviderRateLimitError(error)) {
         return {
           type: 'rate_limited',

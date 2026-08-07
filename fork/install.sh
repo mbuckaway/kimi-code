@@ -8,6 +8,17 @@
 # macOS builds are unsigned. Downloads via curl (this script) do not get the
 # quarantine attribute, so no extra step is needed; if the zip was fetched
 # through a browser instead, run: xattr -d com.apple.quarantine ~/.kimi-code/bin/kimi
+#
+# Trust model (read this before piping it to bash): this script, the version
+# pointer, and the expected SHA-256 all come from the SAME GitHub Pages origin,
+# and that origin is refreshed by the same workflow that publishes the release
+# zips. So the checksum below only proves the zip arrived intact and was not
+# swapped out on its own — it is NOT independent verification. Anyone who can
+# publish to the gh-pages channel can serve a malicious zip together with a
+# matching sum, and fork builds carry no code signature (there are no signing
+# secrets on the fork, by design). For a stronger guarantee, download the asset
+# from the GitHub release for the tag you want and check it against the sums
+# attached to that release instead of running this script unattended.
 
 set -euo pipefail
 

@@ -6,8 +6,9 @@
  * `fs.watch` per tree. Precise watches use the native `fsevents` module on
  * macOS (one FSEventStream per tree, O(1) file descriptors — see
  * `fsEventsWatcher`), elsewhere `chokidar` (one `fs.watch` handle per file,
- * which would exhaust descriptors on large macOS workspaces). Each handle
- * owns and disposes its watcher. Bound at App scope.
+ * which would exhaust descriptors on large macOS workspaces). Reports the
+ * macOS `fsevents` fallback once through `log`. Each handle owns and disposes
+ * its watcher. Bound at App scope.
  */
 
 import { watch as fsWatch } from 'node:fs';
@@ -19,6 +20,7 @@ import type { IDisposable } from '#/_base/di/lifecycle';
 import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { onUnexpectedError } from '#/_base/errors/unexpectedError';
+import { ILogService } from '#/_base/log/log';
 
 import {
   createFsEventsWatcher,
@@ -47,17 +49,9 @@ export function resolveBackend(platform: NodeJS.Platform, hasFsevents: boolean):
   return 'chokidar';
 }
 
-let warnedMissingFsevents = false;
-
-function warnMissingFseventsOnce(): void {
-  if (warnedMissingFsevents) return;
-  warnedMissingFsevents = true;
-  // eslint-disable-next-line no-console -- deliberate user-facing warning; no logger exists at this layer
-  console.warn(
-    'hostFsWatch: fsevents unavailable on macOS, falling back to chokidar ' +
-      '(one fs.watch handle per file — large workspaces may exhaust file descriptors)',
-  );
-}
+const MISSING_FSEVENTS_WARNING =
+  'hostFsWatch: fsevents unavailable on macOS, falling back to chokidar ' +
+  '(one fs.watch handle per file — large workspaces may exhaust file descriptors)';
 
 interface NativeFsWatcher {
   close(): void;
@@ -66,6 +60,7 @@ interface NativeFsWatcher {
 
 interface HostFsWatchRuntime {
   readonly platform: NodeJS.Platform;
+  loadFsevents(): FseventsModule | undefined;
   watchNative(
     root: string,
     listener: (eventType: string, filename: string | null) => void,
@@ -75,6 +70,7 @@ interface HostFsWatchRuntime {
 
 const NODE_HOST_FS_WATCH_RUNTIME: HostFsWatchRuntime = {
   platform: process.platform,
+  loadFsevents,
   watchNative: (root, listener) =>
     fsWatch(root, { persistent: false, recursive: true }, listener),
   scheduleRetry: (callback, delayMs) => {
@@ -130,7 +126,6 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
   constructor(
     path: string,
     options: HostFsWatchOptions | undefined,
-    backend: HostFsWatchBackend = 'chokidar',
     fseventsModule?: FseventsModule,
   ) {
     this.ready = this.readiness.promise;
@@ -140,7 +135,7 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
       const mapped = mapChokidarEvent(eventName, absPath);
       if (mapped !== undefined) this.emitter.fire(mapped);
     };
-    if (backend === 'fsevents' && fseventsModule !== undefined) {
+    if (fseventsModule !== undefined) {
       this.watcher = createFsEventsWatcher(
         fseventsModule,
         path,
@@ -282,16 +277,29 @@ class SignalWatchHandle implements IHostFsWatchHandle {
 export class HostFsWatchService implements IHostFsWatchService {
   declare readonly _serviceBrand: undefined;
 
-  constructor(private readonly runtime: HostFsWatchRuntime = NODE_HOST_FS_WATCH_RUNTIME) {}
+  private warnedMissingFsevents = false;
+
+  constructor(
+    @ILogService private readonly log?: ILogService,
+    private readonly runtime: HostFsWatchRuntime = NODE_HOST_FS_WATCH_RUNTIME,
+  ) {}
 
   watch(path: string, options?: HostFsWatchOptions): IHostFsWatchHandle {
     if (useNativeRecursive(options, this.runtime.platform)) {
       return new SignalWatchHandle(path, options, this.runtime);
     }
-    const fseventsModule = loadFsevents();
-    const backend = resolveBackend(this.runtime.platform, fseventsModule !== undefined);
-    if (backend === 'chokidar' && this.runtime.platform === 'darwin') warnMissingFseventsOnce();
-    return new HostFsWatchHandle(path, options, backend, fseventsModule);
+    const fseventsModule = this.runtime.loadFsevents();
+    if (resolveBackend(this.runtime.platform, fseventsModule !== undefined) === 'chokidar') {
+      if (this.runtime.platform === 'darwin') this.warnMissingFseventsOnce();
+      return new HostFsWatchHandle(path, options);
+    }
+    return new HostFsWatchHandle(path, options, fseventsModule);
+  }
+
+  private warnMissingFseventsOnce(): void {
+    if (this.warnedMissingFsevents) return;
+    this.warnedMissingFsevents = true;
+    this.log?.warn(MISSING_FSEVENTS_WARNING);
   }
 }
 

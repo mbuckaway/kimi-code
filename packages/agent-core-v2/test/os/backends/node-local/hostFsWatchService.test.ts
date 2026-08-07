@@ -1,15 +1,18 @@
 /**
  * Scenario: precise host watches and coarse native signal watches.
  * Responsibilities: event delivery, filtering, recovery, disposal, the
- * macOS descriptor bound, backend selection, and the `fsevents` flag
- * mapping. Wiring: real temporary files for integration, an injected
- * native-watch boundary with a manual retry scheduler for recovery, and a
- * stubbed `fsevents` module for the fsevents unit tests.
+ * macOS descriptor bound, backend selection, the once-per-service warning
+ * about a missing `fsevents` module, the bounded known-path set, the
+ * `fsevents` module shape guard, and the `fsevents` flag mapping. Wiring:
+ * real temporary files for integration, an injected native-watch boundary
+ * with a manual retry scheduler for recovery, an injected `fsevents` loader
+ * plus a recording `ILogService` for the fallback warning, and a stubbed
+ * `fsevents` module for the fsevents unit tests.
  * Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
  * test/os/backends/node-local/hostFsWatchService.test.ts`.
  */
 
-import { readdirSync } from 'node:fs';
+import { readdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,11 +23,15 @@ import {
   resetUnexpectedErrorHandler,
   setUnexpectedErrorHandler,
 } from '#/_base/errors/unexpectedError';
+import type { ILogService } from '#/_base/log/log';
 import {
   createFsEventsWatcher,
+  createKnownPathSet,
+  isFseventsModule,
   loadFsevents,
   mapFsEventsFlags,
   resolveRenameEvent,
+  FS_EVENTS_KNOWN_PATH_LIMIT,
   type FseventsConstants,
   type FseventsModule,
   type FsEventsEventName,
@@ -35,6 +42,8 @@ import type {
   IHostFsWatchHandle,
   IHostFsWatchService,
 } from '#/os/interface/hostFsWatch';
+
+import { stubLog } from '../../../_base/log/stubs';
 
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -60,7 +69,31 @@ const FLAGS: FseventsConstants = {
   ItemIsDir: 0x00020000,
 };
 
-type HostFsWatchRuntime = NonNullable<ConstructorParameters<typeof HostFsWatchService>[0]>;
+type HostFsWatchRuntime = NonNullable<ConstructorParameters<typeof HostFsWatchService>[1]>;
+
+function makeFakeFsevents(): {
+  module: FseventsModule;
+  fire: (path: string, flags: number) => void;
+} {
+  let handler: ((path: string, flags: number, id: string) => void) | undefined;
+  const module: FseventsModule = {
+    watch: (_path, h) => {
+      handler = h;
+      return () => Promise.resolve();
+    },
+    constants: FLAGS,
+  };
+  return { module, fire: (p, f) => handler?.(p, f, '0') };
+}
+
+function recordingLog(warnings: string[]): ILogService {
+  return {
+    ...stubLog(),
+    warn: (message: string) => {
+      warnings.push(message);
+    },
+  };
+}
 
 class TestNativeWatcher {
   private errorListener: ((error: NodeJS.ErrnoException) => void) | undefined;
@@ -103,6 +136,7 @@ function signalRig(options?: { readonly synchronousFailures?: number }): {
   let synchronousFailures = options?.synchronousFailures ?? 0;
   const runtime: HostFsWatchRuntime = {
     platform: 'darwin',
+    loadFsevents: () => undefined,
     watchNative: (_root, listener) => {
       if (synchronousFailures > 0) {
         synchronousFailures -= 1;
@@ -138,7 +172,7 @@ function signalRig(options?: { readonly synchronousFailures?: number }): {
     },
   };
   return {
-    service: new HostFsWatchService(runtime),
+    service: new HostFsWatchService(stubLog(), runtime),
     attempts,
     retries,
     attempt: (index) => requiredAt(attempts, index),
@@ -398,6 +432,56 @@ describe('resolveBackend', () => {
   });
 });
 
+describe('missing fsevents warning', () => {
+  let root: string;
+  const handles: IHostFsWatchHandle[] = [];
+
+  beforeEach(() => {
+    setUnexpectedErrorHandler(() => undefined);
+  });
+
+  afterEach(async () => {
+    for (const openHandle of handles.splice(0)) openHandle.dispose();
+    if (root) await rm(root, { recursive: true, force: true });
+    root = '';
+    resetUnexpectedErrorHandler();
+  });
+
+  function darwinRuntime(fsevents: FseventsModule | undefined): HostFsWatchRuntime {
+    return {
+      platform: 'darwin',
+      loadFsevents: () => fsevents,
+      watchNative: () => {
+        throw new Error('native recursive watch is not expected here');
+      },
+      scheduleRetry: () => ({ dispose: () => undefined }),
+    };
+  }
+
+  it('warns once about the chokidar fallback across repeated watches', async () => {
+    root = await mkdtemp(join(tmpdir(), 'hostfswatch-warn-'));
+    const warnings: string[] = [];
+    const service = new HostFsWatchService(recordingLog(warnings), darwinRuntime(undefined));
+
+    handles.push(service.watch(root), service.watch(root));
+
+    expect(warnings).toEqual([expect.stringContaining('fsevents unavailable on macOS')]);
+  });
+
+  it('does not warn when fsevents is available on darwin', async () => {
+    root = await mkdtemp(join(tmpdir(), 'hostfswatch-warn-'));
+    const warnings: string[] = [];
+    const service = new HostFsWatchService(
+      recordingLog(warnings),
+      darwinRuntime(makeFakeFsevents().module),
+    );
+
+    handles.push(service.watch(root));
+
+    expect(warnings).toEqual([]);
+  });
+});
+
 describe('mapFsEventsFlags', () => {
   it('maps ItemCreated to add / addDir by kind flag', () => {
     expect(mapFsEventsFlags(FLAGS.ItemCreated | FLAGS.ItemIsFile, FLAGS)).toEqual({
@@ -453,13 +537,45 @@ describe('mapFsEventsFlags', () => {
 });
 
 describe('resolveRenameEvent', () => {
-  it('maps an existing path to add / addDir', () => {
-    expect(resolveRenameEvent(true, false)).toBe('add');
-    expect(resolveRenameEvent(true, true)).toBe('addDir');
+  it('maps a rename target to add / addDir by kind', () => {
+    expect(resolveRenameEvent(false)).toBe('add');
+    expect(resolveRenameEvent(true)).toBe('addDir');
+  });
+});
+
+describe('isFseventsModule', () => {
+  it('accepts a module exposing watch and constants', () => {
+    expect(isFseventsModule({ watch: () => () => Promise.resolve(), constants: FLAGS })).toBe(true);
   });
 
-  it('maps a missing path to unlink', () => {
-    expect(resolveRenameEvent(false, false)).toBe('unlink');
+  it('rejects values that do not match the fsevents shape', () => {
+    expect(isFseventsModule(undefined)).toBe(false);
+    expect(isFseventsModule(null)).toBe(false);
+    expect(isFseventsModule('fsevents')).toBe(false);
+    expect(isFseventsModule({})).toBe(false);
+    expect(isFseventsModule({ watch: () => undefined })).toBe(false);
+    expect(isFseventsModule({ watch: 'nope', constants: FLAGS })).toBe(false);
+    expect(isFseventsModule({ watch: () => undefined, constants: null })).toBe(false);
+  });
+});
+
+describe('createKnownPathSet', () => {
+  it('evicts the oldest path once the limit is exceeded', () => {
+    const known = createKnownPathSet(3);
+
+    for (const path of ['a', 'b', 'c', 'd', 'e']) known.remember(path);
+
+    expect(known.size).toBe(3);
+    expect([known.has('a'), known.has('b')]).toEqual([false, false]);
+    expect([known.has('c'), known.has('d'), known.has('e')]).toEqual([true, true, true]);
+  });
+
+  it('reports whether a forgotten path was known', () => {
+    const known = createKnownPathSet(2);
+    known.remember('a');
+
+    expect([known.forget('a'), known.forget('a')]).toEqual([true, false]);
+    expect(known.size).toBe(0);
   });
 });
 
@@ -469,21 +585,6 @@ describe('createFsEventsWatcher', () => {
   afterEach(async () => {
     if (root) await rm(root, { recursive: true, force: true });
   });
-
-  function makeFakeFsevents(): {
-    module: FseventsModule;
-    fire: (path: string, flags: number) => void;
-  } {
-    let handler: ((path: string, flags: number, id: string) => void) | undefined;
-    const module: FseventsModule = {
-      watch: (_path, h) => {
-        handler = h;
-        return () => Promise.resolve();
-      },
-      constants: FLAGS,
-    };
-    return { module, fire: (p, f) => handler?.(p, f, '0') };
-  }
 
   it('drops non-recursive events outside the watched root', async () => {
     root = await mkdtemp(join(tmpdir(), 'fsevents-unit-'));
@@ -602,6 +703,42 @@ describe('createFsEventsWatcher', () => {
       ['unlink', file],
     ]);
   });
+
+  it(
+    'bounds the known-path set, reporting an evicted path as a new add',
+    async () => {
+      root = await mkdtemp(join(tmpdir(), 'fsevents-unit-'));
+      const { module, fire } = makeFakeFsevents();
+      const events: Array<[FsEventsEventName, string]> = [];
+      createFsEventsWatcher(
+        module,
+        root,
+        undefined,
+        (eventName, absPath) => events.push([eventName, absPath]),
+        () => undefined,
+      );
+
+      await wait(10);
+      const files: string[] = [];
+      for (let i = 0; i <= FS_EVENTS_KNOWN_PATH_LIMIT; i += 1) {
+        const file = join(root, `f${i}.txt`);
+        writeFileSync(file, 'x');
+        files.push(file);
+        fire(file, FLAGS.ItemCreated | FLAGS.ItemIsFile);
+      }
+      const evicted = requiredAt(files, 0);
+      const retained = requiredAt(files, files.length - 1);
+      fire(evicted, FLAGS.ItemCreated | FLAGS.ItemIsFile);
+      fire(retained, FLAGS.ItemCreated | FLAGS.ItemIsFile);
+
+      expect(events.filter(([, p]) => p === evicted).map(([name]) => name)).toEqual(['add', 'add']);
+      expect(events.filter(([, p]) => p === retained).map(([name]) => name)).toEqual([
+        'add',
+        'change',
+      ]);
+    },
+    30000,
+  );
 
   it('reports data-loss flags through onError', async () => {
     root = await mkdtemp(join(tmpdir(), 'fsevents-unit-'));
