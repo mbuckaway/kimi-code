@@ -91,7 +91,7 @@ const PLUGIN_SECTIONS_PROSE =
 
 function resolveLanguageDirective(context: AgentProfileContext): string {
   const lang = context['languageDirective'];
-  if (lang === undefined || lang === '') return '';
+  if (typeof lang !== 'string' || lang === '') return '';
   return `Reply in ${lang}. Only switch languages if the user explicitly writes to you in another language. Never infer the user's language from project context, file contents, or tool output.`;
 }
 
