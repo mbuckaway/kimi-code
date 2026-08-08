@@ -68,6 +68,9 @@ reserved_context_size = 50000
 max_running_tasks = 4
 keep_alive_on_exit = false
 
+[language]
+reply_language = "en"
+
 [services.moonshot_search]
 base_url = "https://api.kimi.com/coding/v1/search"
 api_key = ""
@@ -116,6 +119,7 @@ timeout = 5
 | `permission` | `table` | — | 初始权限规则 → [`permission`](#permission) |
 | `hooks` | `array<table>` | — | 生命周期 hook，详见 [Hooks](../customization/hooks.md) |
 | `identity` | `table` | — | 自定义 Agent 身份 → [`identity`](#identity) |
+| `language` | `table` | — | 模型回复语言 → [`language`](#language) |
 
 以下各节对 `providers`、`models`、`thinking`、`loop_control`、`background`、`image`、`services`、`permission` 等嵌套表逐一展开。
 
@@ -352,6 +356,25 @@ disabled = ["EnterPlanMode", "ExitPlanMode", "mcp__github__*"]
 | `read_byte_budget` | `integer` | `262144`（256 KB） | 模型自行读取的图片（`ReadMediaFile` 默认读取）的单图字节预算。会话中模型反复截图、读图时，累计请求体大小由它控制；细节可通过 `region` 参数按原图坐标全保真回读（`region` 与 `full_resolution` 不受此预算限制） |
 
 `max_edge_px` 可被环境变量 `KIMI_IMAGE_MAX_EDGE_PX` 覆盖，`read_byte_budget` 可被 `KIMI_IMAGE_READ_BYTE_BUDGET` 覆盖，优先级均高于配置文件。
+
+## `language`
+
+设置模型回复使用的语言，避免回复漂移到你从未要求的语言。不设置时回复默认使用英语。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `reply_language` | `string` | `en` | Agent 回复使用的语言代码（例如 `en`、`zh`、`fr`、`ja`）；设为 `auto` 或留空会禁用该指令，让模型跟随用户的消息判断语言 |
+
+```toml
+[language]
+reply_language = "en"     # 可选 — 默认值为 "en"
+```
+
+`reply_language` 可以通过 `KIMI_CODE_REPLY_LANGUAGE` 环境变量覆盖，优先级高于 `config.toml`，且不会被写回配置文件——适合不便写配置文件的容器和 CI 场景。
+
+设置语言代码后，系统提示词会指示模型用该语言回复，并且仅当用户明确使用其他语言书写时才切换。即使模型可能从工具输出或项目上下文错误推断语言，回复也能保持稳定。
+
+本节由默认的 `agent-core-v2` 引擎读取。设置 `KIMI_CODE_LEGACY_FLAG=1` 后，旧版 `kimi` / `kimi -p` 路径会忽略此配置；`kimi web` 始终使用 `agent-core-v2`。
 
 ## `acp`
 

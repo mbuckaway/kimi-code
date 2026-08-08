@@ -15,6 +15,7 @@ mark the row `merged-upstream` (keep the row as history).
 | ACP socket transport | `feat/acp-socket-transport` | `kimi acp --socket` — Unix-socket / named-pipe transport alongside stdio, in `acp-adapter`; the `acp-server` port landed with the 0.33.0 sync | — | — | local |
 | fork infrastructure | `fork/infra` | Fork identity (npm name, update CDN → gh-pages), fork-sync / fork-release workflows, this tracking doc | — | — | not-submitting |
 | security review hardening | `review/fork-security-audit` | typescript-review pass over the fork delta: fs-watch logging + bounded path set, ACP socket error handler / connection cap / Windows boundary warning, provider quota status plumbing, module-hook path normalization, dependency CVE refresh | — | — | local |
+| language system-prompt fix | `fix/language-system-prompt` | Remove misleading "even after long stretches of English tool output" from system.md (both engines); add `[language]` config section with `reply_language` defaulting to `"en"`; inject `language_directive` template variable into every system prompt. See `fork/LANGUAGE-BUG.md` | — | [#1998](https://github.com/MoonshotAI/kimi-code/issues/1998) | local |
 
 Changesets under `.changeset/` deliberately name the upstream package
 `@moonshot-ai/kimi-code`, not the fork's `@mbuckaway/kimi-code`, so a change can
