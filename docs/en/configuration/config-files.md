@@ -68,6 +68,9 @@ reserved_context_size = 50000
 max_running_tasks = 4
 keep_alive_on_exit = false
 
+[language]
+reply_language = "en"
+
 [services.moonshot_search]
 base_url = "https://api.kimi.com/coding/v1/search"
 api_key = ""
@@ -116,6 +119,7 @@ Fields in the config file fall into two categories: **top-level scalars** that d
 | `permission` | `table` | — | Initial permission rules → [`permission`](#permission) |
 | `hooks` | `array<table>` | — | Lifecycle hooks; see [Hooks](../customization/hooks.md) |
 | `identity` | `table` | — | Custom agent identity → [`identity`](#identity) |
+| `language` | `table` | — | Model reply language → [`language`](#language) |
 
 The following sections cover each of the nested tables in turn: `providers`, `models`, `thinking`, `loop_control`, `background`, `tools`, `image`, `services`, and `permission`.
 
@@ -352,6 +356,25 @@ Like the `tools` / `disallowedTools` fields of an agent file, this section shape
 | `read_byte_budget` | `integer` | `262144` (256 KB) | Per-image byte budget for images the model reads for itself (`ReadMediaFile` default reads). It bounds the accumulated request-body size when the model keeps screenshotting and reading images; fine detail stays reachable through the `region` parameter, which reads a crop back at full fidelity (`region` and `full_resolution` are not subject to this budget) |
 
 `max_edge_px` can be overridden by the `KIMI_IMAGE_MAX_EDGE_PX` environment variable and `read_byte_budget` by `KIMI_IMAGE_READ_BYTE_BUDGET`; both take higher priority than `config.toml`.
+
+## `language`
+
+Sets the language the model replies in, so replies do not drift to a language you never asked for. Leave it unset and replies default to English.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `reply_language` | `string` | `en` | Language code (for example `en`, `zh`, `fr`, `ja`) the agent replies in; `auto` or an empty value disables the directive and lets the model follow the user's messages |
+
+```toml
+[language]
+reply_language = "en"     # optional — "en" is the default
+```
+
+`reply_language` can be overridden by the `KIMI_CODE_REPLY_LANGUAGE` environment variable, which takes higher priority than `config.toml` and is never written back to it — convenient for containers and CI.
+
+When a language code is set, the system prompt instructs the model to reply in that language and only switch when the user explicitly writes in another one. This keeps replies stable even when the model would otherwise infer a language from tool output or project context.
+
+This section is read by the default `agent-core-v2` engine. It is ignored by the legacy `kimi` / `kimi -p` path selected with `KIMI_CODE_LEGACY_FLAG=1`; `kimi web` always uses `agent-core-v2`.
 
 ## `acp`
 
