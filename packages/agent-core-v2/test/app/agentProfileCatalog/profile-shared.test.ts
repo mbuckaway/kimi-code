@@ -121,6 +121,31 @@ describe('systemPromptVars', () => {
     expect(vars['product_name']).toBe('Kimi Desktop');
     expect(vars['reply_style_guide']).toBe('GUI_STYLE');
   });
+
+  it('maps a non-empty languageDirective to a language_directive key', () => {
+    const vars = systemPromptVars(
+      { languageDirective: 'en' },
+      { skillActive: true },
+    );
+
+    expect(vars['language_directive']).toContain('Reply in en.');
+    expect(vars['language_directive']).toContain('Only switch languages');
+  });
+
+  it('emits an empty string for an undefined languageDirective', () => {
+    const vars = systemPromptVars({}, { skillActive: true });
+
+    expect(vars['language_directive']).toBe('');
+  });
+
+  it('emits an empty string for an empty languageDirective', () => {
+    const vars = systemPromptVars(
+      { languageDirective: '' },
+      { skillActive: true },
+    );
+
+    expect(vars['language_directive']).toBe('');
+  });
 });
 
 describe('renderPromptTemplateResult', () => {
@@ -297,6 +322,24 @@ describe('renderSystemPromptResult', () => {
     expect(overridden).toContain('You are Kimi Desktop,');
     expect(overridden).toContain('GUI_STYLE');
     expect(overridden).not.toContain('Kimi Code CLI');
+  });
+
+  it('renders the language directive when languageDirective is set', () => {
+    const prompt = renderSystemPromptResult(
+      '',
+      { languageDirective: 'en' },
+      { skillActive: true },
+    ).text;
+
+    expect(prompt).toContain('Reply in en.');
+    expect(prompt).toContain('Only switch languages');
+  });
+
+  it('omits the language directive when languageDirective is empty', () => {
+    const prompt = renderSystemPromptResult('', {}, { skillActive: true }).text;
+
+    expect(prompt).not.toContain('Reply in');
+    expect(prompt).not.toContain('Only switch languages');
   });
 
   it('returns disclosure metadata for the builtin now section', () => {

@@ -111,6 +111,7 @@ import { DEFAULT_AGENT_PROFILE_NAME } from '#/app/agentProfileCatalog/agentProfi
 import { IBuiltinAgentProfileLoader } from '#/app/agentProfileCatalog/builtinAgentProfileLoader';
 import { ErrorCodes, Error2 } from "#/errors";
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
+import { IAgentLanguage } from '#/app/agentLanguage/agentLanguage';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import type { LoopControl } from '#/agent/loop/configSection';
@@ -265,6 +266,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IAgentStateService private readonly states: IAgentStateService,
     @IPluginService private readonly plugins: IPluginService,
     @IAgentIdentity private readonly identity: IAgentIdentity,
+    @IAgentLanguage private readonly agentLanguage: IAgentLanguage,
     @IAgentAgentsMdReminderService private readonly agentsMdReminder: IAgentAgentsMdReminderService,
   ) {
     super();
@@ -954,6 +956,8 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const pluginSections = await this.resolvePluginSections();
     const now = this.clock.now();
     const timeZone = this.clock.timeZone();
+    const lang = this.agentLanguage.current();
+    const languageDirective = lang !== 'auto' && lang.length > 0 ? lang : undefined;
     return {
       ...base,
       cwd: this.sessionContext.cwd,
@@ -967,6 +971,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       skillActive: this.isToolActiveForProfile(profile, 'Skill'),
       productName: (await this.identity.resolved()).displayName,
       replyStyleGuide: this.bootstrap.args.replyStyleGuide,
+      languageDirective,
     };
   }
 

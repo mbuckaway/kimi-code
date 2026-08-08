@@ -8,7 +8,7 @@
 # commented "# field: type" lines describe the remaining schema fields.
 # Values resolve as: default -> config.toml -> env overlay -> memory.
 
-# Index (25 sections · 3 overlay(s))
+# Index (26 sections · 3 overlay(s))
 #   background               src/agent/task/configSection.ts
 #   builtinProductSkills     src/app/skillCatalog/configSection.ts
 #   cron                     src/app/cron/configSection.ts
@@ -20,6 +20,7 @@
 #   hooks                    src/agent/externalHooks/configSection.ts
 #   identity                 src/app/agentIdentity/configSection.ts
 #   image                    src/agent/media/configSection.ts
+#   language                 src/app/agentLanguage/configSection.ts
 #   loopControl              src/agent/loop/configSection.ts
 #   mcp                      src/app/mcpConfig/configSection.ts
 #   mergeAllAvailableSkills  src/app/skillCatalog/configSection.ts
@@ -175,6 +176,18 @@ extra_skill_dirs = []
 [image]
 # max_edge_px: integer
 # read_byte_budget: integer
+
+# ##########################################################################
+# language
+#   owner: src/app/agentLanguage/configSection.ts
+#   scope: core
+#   hooks: stripEnv
+#   env:
+#     reply_language <- KIMI_CODE_REPLY_LANGUAGE (custom parse)
+# ##########################################################################
+
+[language]
+reply_language = "en"
 
 # ##########################################################################
 # loopControl (config.toml: loop_control)
