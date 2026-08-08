@@ -96,16 +96,12 @@ jobs:
           fi
           git push origin "$BR"
 
-      - name: Open sync PR and auto-merge
+      - name: Open sync PR
         if: steps.merge.outputs.skip != 'true' && steps.merge.outputs.conflict != 'true'
         run: |
-          set -euo pipefail
-          PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base fork/main --head "${{ steps.merge.outputs.branch }}" \
+          gh pr create --repo "$GITHUB_REPOSITORY" --base fork/main --head "${{ steps.merge.outputs.branch }}" \
             --title "chore: sync upstream/main → fork/main ($(date -u +%Y-%m-%d))" \
-            --body "Automated upstream sync into the fork mainline.")
-          # --auto fails with "Pull request is in clean status" when the PR is
-          # already mergeable (nothing pending to wait for) — merge it directly.
-          gh pr merge "$PR_URL" --auto --merge || gh pr merge "$PR_URL" --merge
+            --body "Automated upstream sync into the fork mainline. Review and merge manually with AI assistance."
 
       - name: Notify on merge conflict
         if: failure() && steps.merge.outputs.conflict == 'true'
