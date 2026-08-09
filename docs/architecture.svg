@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1900 870" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d97706"/>
+    </marker>
+    <marker id="arrViolet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c3aed"/>
+    </marker>
+    <style>
+      .title { font-size: 15px; font-weight: 700; }
+      .body  { font-size: 12.5px; fill: #334155; }
+      .label { font-size: 11px; fill: #475569; paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+      .legend-text { font-size: 11.5px; fill: #475569; }
+      .header-title { font-size: 26px; font-weight: 700; fill: #0f172a; }
+      .header-sub { font-size: 14px; fill: #475569; }
+      .box { fill: #ffffff; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <!-- Header -->
+  <text class="header-title" x="40" y="45">Kimi Code — Architecture</text>
+  <text class="header-sub" x="40" y="72">kimi-code v0.34.0-MB.1.8 (fork/main) · CLI + in-process server + browser web UI · see docs/architecture.md</text>
+
+  <!-- ============ Process boundary ============ -->
+  <rect x="40" y="90" width="1420" height="470" rx="12" fill="#f8fafc" fill-opacity="0.75" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="8 5"/>
+  <text x="56" y="112" font-size="13" font-weight="700" fill="#475569">kimi-code monorepo — ONE Node.js process (apps/kimi-code · packages/*)</text>
+
+  <!-- Row 1: TUI -->
+  <g>
+    <rect class="box" x="60" y="135" width="470" height="185" rx="8" stroke="#0ea5e9"/>
+    <text class="title" x="76" y="159" fill="#0369a1">Terminal UI — pi-tui</text>
+    <text class="body" x="76" y="183">In-repo TUI library (packages/pi-tui), differential rendering</text>
+    <text class="body" x="76" y="202">KimiTUI: Box · Markdown · Input · SelectList · Editor · Image</text>
+    <text class="body" x="76" y="221">Slash commands · autocomplete · kitty-graphics images</text>
+    <text class="body" x="76" y="240">Print mode: kimi -p / --output-format stream-json</text>
+    <text class="body" x="76" y="259">Prefs: ~/.kimi-code/tui.toml (theme, notifications)</text>
+  </g>
+
+  <!-- Row 1: Engines -->
+  <g>
+    <rect class="box" x="560" y="135" width="450" height="185" rx="8" stroke="#7c3aed"/>
+    <text class="title" x="576" y="159" fill="#5b21b6">Agent engines</text>
+    <text class="body" x="576" y="183">v2 — agent-core-v2 (default)</text>
+    <text class="body" x="586" y="202">DI × Scope: App → Workspace → Session → Agent</text>
+    <text class="body" x="586" y="221">Service/Fiber units · features seam (plan mode)</text>
+    <text class="body" x="586" y="240">Agent loop: LLM requester + tool executor</text>
+    <text class="body" x="586" y="259">Permissions (allow/ask/deny/yolo) · hooks · events</text>
+    <text class="body" x="576" y="282">v1 — agent-core (legacy, KIMI_CODE_LEGACY_FLAG=1)</text>
+    <text class="body" x="586" y="301">Flat DI + kosong LLM abstraction</text>
+  </g>
+
+  <!-- Row 1: kap-server -->
+  <g>
+    <rect class="box" x="1040" y="135" width="400" height="185" rx="8" stroke="#d97706"/>
+    <text class="title" x="1056" y="159" fill="#92400e">kap-server — Fastify 5 (in-process)</text>
+    <text class="body" x="1056" y="183">REST /api/v1: sessions · prompts · approvals</text>
+    <text class="body" x="1056" y="202">questions · tasks · terminals · fs · skills · mcp</text>
+    <text class="body" x="1056" y="221">WS /api/v1/ws: event.* · agent frames · transcript ops</text>
+    <text class="body" x="1056" y="240">Envelope {code, msg, data, request_id} (HTTP 200)</text>
+    <text class="body" x="1056" y="259">Bearer token auth (&lt;home&gt;/server.token)</text>
+    <text class="body" x="1056" y="278">Debug RPC /api/v1/debug/* (--debug-endpoints)</text>
+    <text class="body" x="1056" y="301">Host 127.0.0.1 · port 58627 (kimi web)</text>
+  </g>
+
+  <!-- Row 2: Other surfaces -->
+  <g>
+    <rect class="box" x="60" y="355" width="470" height="120" rx="8" stroke="#64748b"/>
+    <text class="title" x="76" y="379" fill="#334155">Other surfaces (same engines)</text>
+    <text class="body" x="76" y="403">kimi -p print mode · --output-format stream-json</text>
+    <text class="body" x="76" y="422">ACP host — packages/acp-server / acp-adapter</text>
+    <text class="body" x="76" y="441">apps/vis · apps/kimi-inspect (debug tooling)</text>
+  </g>
+
+  <!-- Row 2: LLM providers (external) -->
+  <g>
+    <rect class="box" x="560" y="355" width="450" height="120" rx="8" stroke="#16a34a" stroke-dasharray="6 4" fill="#f0fdf4"/>
+    <text class="title" x="576" y="379" fill="#15803d">LLM providers (external APIs)</text>
+    <text class="body" x="576" y="403">kosong provider layer: Kimi · Anthropic · OpenAI · Google GenAI</text>
+    <text class="body" x="576" y="422">OAuth device flow (packages/oauth) · model catalog</text>
+    <text class="body" x="576" y="441">Requests flow through the agent loop → IAgentLLMRequesterService</text>
+  </g>
+
+  <!-- Row 2: Web assets -->
+  <g>
+    <rect class="box" x="1040" y="355" width="400" height="120" rx="8" stroke="#059669"/>
+    <text class="title" x="1056" y="379" fill="#065f46">Web assets — apps/kimi-code/dist-web</text>
+    <text class="body" x="1056" y="403">Prebuilt Vue SPA bundle, committed in repo</text>
+    <text class="body" x="1056" y="422">Served at / and /* with SPA fallback (auth-exempt)</text>
+    <text class="body" x="1056" y="441">Guard: scripts/check-web-assets.mjs</text>
+  </g>
+
+  <!-- In-process arrows -->
+  <line x1="530" y1="200" x2="560" y2="200" stroke="#64748b" stroke-width="1.5" marker-start="url(#arrGray)" marker-end="url(#arrGray)"/>
+  <line x1="1010" y1="200" x2="1040" y2="200" stroke="#64748b" stroke-width="1.5" marker-start="url(#arrGray)" marker-end="url(#arrGray)"/>
+  <line x1="785" y1="320" x2="785" y2="355" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrGray)"/>
+  <text class="label" x="791" y="342" text-anchor="middle">LLM calls (kosong)</text>
+  <line x1="1240" y1="320" x2="1240" y2="355" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrGray)"/>
+  <text class="label" x="1246" y="342" text-anchor="middle">serves</text>
+
+  <!-- ============ Below the process ============ -->
+  <!-- Storage -->
+  <g>
+    <rect class="box" x="60" y="600" width="470" height="150" rx="8" stroke="#475569"/>
+    <text class="title" x="76" y="624" fill="#1e293b">~/.kimi-code — KIMI_CODE_HOME</text>
+    <text class="body" x="76" y="648">config.toml · tui.toml · server.token (0600)</text>
+    <text class="body" x="76" y="667">server/instances/*.json (multi-instance registry)</text>
+    <text class="body" x="76" y="686">Sessions: metadata + wire records + blobs</text>
+    <text class="body" x="76" y="705">search-index (MiniDb) · bin/rg (cached ripgrep)</text>
+  </g>
+
+  <!-- Tools & integrations -->
+  <g>
+    <rect class="box" x="560" y="600" width="880" height="150" rx="8" stroke="#0891b2"/>
+    <text class="title" x="576" y="624" fill="#155e75">Tools &amp; integrations</text>
+    <text class="body" x="576" y="648">Filesystem tools: bash · glob · grep (rg subprocess) · read · write · edit</text>
+    <text class="body" x="576" y="667">MCP clients: stdio / HTTP / SSE / remote + OAuth</text>
+    <text class="body" x="576" y="686">Skills: built-in · ~/.agents/skills · &lt;project&gt;/.agents/skills</text>
+    <text class="body" x="576" y="705">Plugins: plugins/marketplace.json · GitHub resolver</text>
+    <text class="body" x="576" y="724">PTY terminals (node-pty) · images (jimp + webp wasm) · web search / fetch-url</text>
+  </g>
+
+  <!-- Process → below arrows -->
+  <line x1="300" y1="560" x2="300" y2="600" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrGray)"/>
+  <text class="label" x="306" y="584" text-anchor="middle">reads/writes</text>
+  <line x1="900" y1="560" x2="900" y2="600" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrGray)"/>
+  <text class="label" x="906" y="584" text-anchor="middle">tool exec / policies</text>
+
+  <!-- ============ Right column: the web UI ============ -->
+  <!-- Browser -->
+  <g>
+    <rect class="box" x="1540" y="135" width="340" height="210" rx="8" stroke="#e11d48"/>
+    <text class="title" x="1556" y="159" fill="#9f1239">Browser — web UI (Vue 3 SPA)</text>
+    <text class="body" x="1556" y="183">Source: kimi-code-web repo (@mbuckaway/kimi-web)</text>
+    <text class="body" x="1556" y="202">REST + WS /api/v1 — same-origin, bearer token</text>
+    <text class="body" x="1556" y="221">Event pipeline: ws.ts → agentEventProjector</text>
+    <text class="body" x="1556" y="240">→ eventReducer → useKimiWebClient → components</text>
+    <text class="body" x="1556" y="259">Auth: #token= · localStorage (7-day TTL)</text>
+    <text class="body" x="1556" y="278">Same-origin default; CORS via origin allowlist</text>
+  </g>
+
+  <!-- kimi-code-web repo -->
+  <g>
+    <rect class="box" x="1540" y="380" width="340" height="150" rx="8" stroke="#4f46e5"/>
+    <text class="title" x="1556" y="404" fill="#3730a3">kimi-code-web repo — web source</text>
+    <text class="body" x="1556" y="428">pnpm build → dist/ (static SPA, ~22 MB)</text>
+    <text class="body" x="1556" y="447">Heavy deps: markstream-vue · shiki · mermaid</text>
+    <text class="body" x="1556" y="466">monaco · katex</text>
+    <text class="body" x="1556" y="485">Upstream equivalent: private code-app repo</text>
+  </g>
+
+  <!-- Network arrow: kap-server → browser -->
+  <line x1="1440" y1="200" x2="1540" y2="200" stroke="#16a34a" stroke-width="2" marker-end="url(#arrGreen)"/>
+  <text class="label" x="1500" y="164" text-anchor="middle">REST</text>
+  <text class="label" x="1500" y="180" text-anchor="middle">WS</text>
+
+  <!-- Serving arrow: web assets → browser -->
+  <line x1="1440" y1="415" x2="1540" y2="330" stroke="#d97706" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text class="label" x="1498" y="350" text-anchor="middle">serves /</text>
+
+  <!-- Sync arrow: web repo → dist-web -->
+  <line x1="1540" y1="455" x2="1440" y2="455" stroke="#7c3aed" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrViolet)"/>
+  <text class="label" x="1436" y="490" text-anchor="end">dist/ → dist-web</text>
+  <text class="label" x="1436" y="508" text-anchor="end">stage-web-assets.mjs / sync:web</text>
+
+  <!-- ============ Legend ============ -->
+  <line x1="60" y1="803" x2="84" y2="803" stroke="#94a3b8" stroke-width="2" stroke-dasharray="8 5"/>
+  <rect x="60" y="795" width="24" height="16" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="8 5"/>
+  <text class="legend-text" x="92" y="807">process boundary (kimi-code monorepo)</text>
+
+  <line x1="480" y1="803" x2="510" y2="803" stroke="#64748b" stroke-width="2" marker-end="url(#arrGray)"/>
+  <text class="legend-text" x="518" y="807">in-process data flow</text>
+
+  <line x1="760" y1="803" x2="790" y2="803" stroke="#16a34a" stroke-width="2" marker-end="url(#arrGreen)"/>
+  <text class="legend-text" x="798" y="807">network (REST + WS)</text>
+
+  <line x1="1030" y1="803" x2="1060" y2="803" stroke="#d97706" stroke-width="2" marker-end="url(#arrAmber)"/>
+  <text class="legend-text" x="1068" y="807">served static assets</text>
+
+  <line x1="1330" y1="803" x2="1360" y2="803" stroke="#7c3aed" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrViolet)"/>
+  <text class="legend-text" x="1355" y="807">build artifact / sync</text>
+
+  <text class="legend-text" x="40" y="850">One process, two surfaces: the terminal (pi-tui) and the browser (web UI) both drive the same in-process agent engines; the browser does so over the local server's /api/v1 REST + WebSocket API.</text>
+</svg>
