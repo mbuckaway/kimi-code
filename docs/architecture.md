@@ -6,7 +6,7 @@ The map: there are two executable surfaces â€” a terminal UI and a browser UI â€
 
 ## 1. The two repositories
 
-**`kimi-code`** (this repo) is a pnpm/TypeScript monorepo and a public fork of [MoonshotAI/kimi-code](https://github.com/MoonshotAI/kimi-code). The fork relationship is described in [`fork/README.md`](../fork/README.md):
+**`kimi-code`** (this repo) is a pnpm/TypeScript monorepo and a public fork of [MoonshotAI/kimi-code](https://github.com/MoonshotAI/kimi-code). The fork relationship is described in the fork guide ([fork/README.md](https://github.com/mbuckaway/kimi-code/blob/fork/main/fork/README.md)):
 
 - `main` is a pristine mirror of `upstream/main` (protected, rebase-only).
 - `fork/main` is the fork mainline: upstream plus all fork changes; releases are cut from it.
