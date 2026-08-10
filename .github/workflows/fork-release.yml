@@ -74,6 +74,7 @@ jobs:
       GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
     outputs:
       version: ${{ steps.v.outputs.version }}
+      self_publish: ${{ steps.bump.outputs.self_publish }}
     steps:
       - name: Checkout fork/main
         uses: actions/checkout@v6
@@ -132,6 +133,7 @@ jobs:
           echo "Next fork version: $BASE-MB.$NEXT (base $BASE, bump $BUMP, last ${LAST:-none})"
 
       - name: Commit version bump, open PR, auto-merge
+        id: bump
         run: |
           set -euo pipefail
           V="${{ steps.v.outputs.version }}"
@@ -141,9 +143,12 @@ jobs:
           if [ "$CURRENT" != "$V" ] && ver_ge "${CURRENT##*-MB.}" "${V##*-MB.}"; then
             # CURRENT is already at or past the computed next version (e.g. the
             # bump landed inside a feature PR). Never open a version PR that
-            # would downgrade it — publish the current version directly.
-            echo "package.json already at or past $V (current $CURRENT) — dispatching publish for the current version."
-            gh workflow run fork-release.yml --ref fork/main -f mode=publish -f bump=minor
+            # would downgrade it — publish the current version directly in this
+            # run (prepare reads it from package.json), same as if this push had
+            # been the merged bump. (No workflow_dispatch: FORK_SYNC_PAT cannot
+            # create dispatch events — HTTP 403.)
+            echo "package.json already at or past $V (current $CURRENT) — publishing the current version."
+            echo "self_publish=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$CURRENT" = "$V" ]; then
@@ -166,8 +171,12 @@ jobs:
 
   prepare:
     name: Tag and create GitHub Release
-    needs: route
-    if: needs.route.outputs.mode == 'publish'
+    needs: [route, version]
+    # Runs on the normal publish route (a merged `chore: release` push) or when
+    # the version job self-publishes because fork/main's package.json is
+    # already at/past the computed next version (skipped version jobs expose
+    # empty outputs, so the OR is safe on both paths).
+    if: needs.route.outputs.mode == 'publish' || needs.version.outputs.self_publish == 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
