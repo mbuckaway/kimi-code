@@ -51,11 +51,15 @@ jobs:
       - name: Inspect trigger
         id: route
         run: |
+          # Match the merged version-bump message via jq on the event payload —
+          # unquoted bash interpolation of head_commit.message breaks on
+          # multiline / backtick commit bodies (exit 2 conditional binary
+          # operator expected).
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.mode }}" = "publish" ]; then
             echo "mode=publish" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=version" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event.head_commit.message }}" == chore:\ release\ * ]]; then
+          elif jq -r '.head_commit.message // ""' "$GITHUB_EVENT_PATH" | grep -q '^chore: release '; then
             echo "mode=publish" >> "$GITHUB_OUTPUT"
           else
             echo "mode=version" >> "$GITHUB_OUTPUT"
@@ -132,6 +136,16 @@ jobs:
           set -euo pipefail
           V="${{ steps.v.outputs.version }}"
           CURRENT=$(grep -m1 '"version"' apps/kimi-code/package.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+          # Dotted numeric compare of the -MB.<x>.<y> counters (a >= b).
+          ver_ge() { [ "$(printf '%s\n%s' "$2" "$1" | sort -t. -k1,1n -k2,2n | head -1)" = "$2" ]; }
+          if [ "$CURRENT" != "$V" ] && ver_ge "${CURRENT##*-MB.}" "${V##*-MB.}"; then
+            # CURRENT is already at or past the computed next version (e.g. the
+            # bump landed inside a feature PR). Never open a version PR that
+            # would downgrade it — publish the current version directly.
+            echo "package.json already at or past $V (current $CURRENT) — dispatching publish for the current version."
+            gh workflow run fork-release.yml --ref fork/main -f mode=publish -f bump=minor
+            exit 0
+          fi
           if [ "$CURRENT" = "$V" ]; then
             echo "package.json already at $V — nothing to release. Dispatch with mode=publish to re-tag the current version."
             exit 0
