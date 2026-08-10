@@ -94,6 +94,14 @@ describe('isAllowedHost (extra)', () => {
   it('matches an exact entry', () => {
     expect(isAllowedHost('foo', { extra: ['foo'] })).toBe(true);
   });
+
+  it('matches an exact entry case-insensitively', () => {
+    expect(isAllowedHost('rvw-m2tmgxjtxkm', { extra: ['RVW-M2TMGXJTXKM'] })).toBe(true);
+  });
+
+  it('matches a wildcard entry case-insensitively', () => {
+    expect(isAllowedHost('a.example.com', { extra: ['.EXAMPLE.COM'] })).toBe(true);
+  });
 });
 
 describe('isAllowedHost (disable)', () => {
