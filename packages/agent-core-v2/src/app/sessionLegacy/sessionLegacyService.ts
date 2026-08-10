@@ -29,6 +29,7 @@ import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentSwarmService } from '#/agent/swarm/swarm';
+import { IAgentSupermoonService } from '#/agent/supermoon/supermoon';
 import {
   getLiveSessionById,
   resumeSessionById,
@@ -131,6 +132,13 @@ export class SessionLegacyService implements ISessionLegacyService {
         else swarm.exit();
       }
     }
+    if (agentConfig.supermoon_mode !== undefined) {
+      const supermoon = agent.accessor.get(IAgentSupermoonService);
+      if (supermoon.isActive !== agentConfig.supermoon_mode) {
+        if (agentConfig.supermoon_mode) supermoon.enter('manual');
+        else supermoon.exit();
+      }
+    }
     if (agentConfig.goal_objective !== undefined) {
       await agent.accessor
         .get(IAgentGoalService)
@@ -174,6 +182,7 @@ export class SessionLegacyService implements ISessionLegacyService {
     const permission = agent.accessor.get(IAgentPermissionModeService);
     const plan = agent.accessor.get(IAgentPlanService);
     const swarm = agent.accessor.get(IAgentSwarmService);
+    const supermoon = agent.accessor.get(IAgentSupermoonService);
 
     const model = profile.getModel();
     const capabilities = profile.getModelCapabilities();
@@ -196,6 +205,7 @@ export class SessionLegacyService implements ISessionLegacyService {
       permission: permission.mode,
       plan_mode: planData !== null,
       swarm_mode: swarm.isActive,
+      supermoon_mode: supermoon.isActive,
       context_tokens: tokens,
       max_context_tokens: maxTokens > 0 ? maxTokens : undefined,
       context_usage: maxTokens > 0 ? Math.min(1, tokens / maxTokens) : 0,

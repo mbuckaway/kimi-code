@@ -205,6 +205,7 @@ function makeSession(overrides: Record<string, unknown> = {}) {
     setPermission: vi.fn(async () => {}),
     setPlanMode: vi.fn(async () => {}),
     setSwarmMode: vi.fn(async () => {}),
+    setSupermoonMode: vi.fn(async () => {}),
     onEvent: vi.fn(() => vi.fn()),
     listMcpServers: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
@@ -4158,6 +4159,92 @@ command = "vim"
     expect(countOccurrences(transcript, 'Swarm activated')).toBe(1);
     expect(countOccurrences(transcript, 'Swarm ended')).toBe(1);
     expect(transcript).not.toContain('Swarm deactivated');
+  });
+
+  it('syncs supermoon mode from status events without rendering markers', async () => {
+    const { driver } = await makeDriver();
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        supermoonMode: true,
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.supermoonMode).toBe(true);
+    expect(stripSgr(renderTranscript(driver))).not.toContain('Supermoon activated');
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        supermoonMode: false,
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.supermoonMode).toBe(false);
+    const transcript = stripSgr(renderTranscript(driver));
+    expect(transcript).not.toContain('Supermoon activated');
+    expect(transcript).not.toContain('Supermoon deactivated');
+    expect(transcript).not.toContain('Supermoon ended');
+  });
+
+  it('renders an ended marker and restores the pinned effort when a one-shot /supermoon task exits', async () => {
+    const { driver, session } = await makeDriver(undefined);
+    driver.state.appState.permissionMode = 'auto';
+    driver.state.appState.model = 'k2';
+    driver.state.appState.thinkingEffort = 'low';
+    driver.state.appState.availableModels = {
+      k2: {
+        provider: 'managed:kimi-code',
+        model: 'k2',
+        maxContextSize: 262144,
+        supportEfforts: ['low', 'high', 'max'],
+      },
+    };
+
+    driver.handleUserInput('/supermoon Ship feature X');
+
+    await vi.waitFor(() => {
+      expect(session.setSupermoonMode).toHaveBeenCalledWith(true, 'task');
+    });
+    await vi.waitFor(() => {
+      expect(session.setThinking).toHaveBeenCalledWith('max');
+    });
+    expect(driver.state.supermoonModeEntry).toBe('task');
+    expect(driver.state.supermoonPreviousEffort).toBe('low');
+    await vi.waitFor(() => {
+      expect(countOccurrences(stripSgr(renderTranscript(driver)), 'Supermoon activated')).toBe(1);
+    });
+    let transcript = stripSgr(renderTranscript(driver));
+    expect(countOccurrences(transcript, 'Supermoon activated')).toBe(1);
+    expect(transcript).not.toContain('Supermoon ended');
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        supermoonMode: false,
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.supermoonMode).toBe(false);
+    expect(driver.state.supermoonModeEntry).toBeUndefined();
+    expect(driver.state.supermoonPreviousEffort).toBeUndefined();
+    await vi.waitFor(() => {
+      expect(session.setThinking).toHaveBeenCalledWith('low');
+    });
+    transcript = stripSgr(renderTranscript(driver));
+    expect(countOccurrences(transcript, 'Supermoon activated')).toBe(1);
+    expect(countOccurrences(transcript, 'Supermoon ended')).toBe(1);
+    expect(transcript).not.toContain('Supermoon deactivated');
   });
 
   it('queues Ctrl-S input instead of steering while /init is running', async () => {

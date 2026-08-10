@@ -233,6 +233,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     planMode: input.cliOptions.plan,
     inputMode: 'prompt',
     swarmMode: false,
+    supermoonMode: false,
     thinkingEffort: 'off',
     contextUsage: 0,
     contextTokens: 0,
@@ -1866,6 +1867,9 @@ export class KimiTUI {
       permissionMode: status.permission,
       planMode: status.planMode,
       swarmMode: status.swarmMode ?? false,
+      // SessionStatus lands `supermoonMode` in parallel with the engine work;
+      // reach it structurally so resume works before that lands.
+      supermoonMode: (status as { supermoonMode?: boolean }).supermoonMode ?? false,
       contextTokens: status.contextTokens,
       maxContextTokens: status.maxContextTokens,
       contextUsage: status.contextUsage,
@@ -1932,6 +1936,8 @@ export class KimiTUI {
     this.questionController.cancelAll(reason);
     this.session = undefined;
     this.state.swarmModeEntry = undefined;
+    this.state.supermoonModeEntry = undefined;
+    this.state.supermoonPreviousEffort = undefined;
     this.harness.setTelemetryContext({ sessionId: null });
     this.setAppState({ goal: null });
     return previous;
@@ -1988,6 +1994,8 @@ export class KimiTUI {
     this.streamingUI.discardPending();
     this.state.queuedMessages = [];
     this.state.swarmModeEntry = undefined;
+    this.state.supermoonModeEntry = undefined;
+    this.state.supermoonPreviousEffort = undefined;
     this.streamingUI.resetToolCallState();
     this.streamingUI.resetToolUi();
     this.sessionEventHandler.resetRuntimeState();

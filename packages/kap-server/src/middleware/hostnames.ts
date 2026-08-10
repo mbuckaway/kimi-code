@@ -139,12 +139,13 @@ export function isAllowedHost(host: string | undefined, opts: HostCheckOptions):
   }
   if (opts.extra !== undefined) {
     for (const entry of opts.extra) {
-      if (entry.startsWith('.')) {
-        const base = entry.slice(1);
-        if (h === base || h.endsWith(entry)) {
+      const e = entry.toLowerCase();
+      if (e.startsWith('.')) {
+        const base = e.slice(1);
+        if (h === base || h.endsWith(e)) {
           return true;
         }
-      } else if (h === entry) {
+      } else if (h === e) {
         return true;
       }
     }

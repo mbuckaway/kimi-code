@@ -19,6 +19,7 @@ import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting'
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentSupermoonService } from '#/agent/supermoon/supermoon';
 import { IAgentSwarmService } from '#/agent/swarm/swarm';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IModelCatalog } from '#/kosong/model/catalog';
@@ -129,6 +130,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentPermissionModeService, { mode: 'manual' }],
         [IAgentPlanService, { status: () => Promise.resolve(null) }],
         [IAgentSwarmService, { isActive: false }],
+        [IAgentSupermoonService, { isActive: false }],
         [
           IAgentActivityView,
           { state: () => ({ lifecycle: 'ready', background: [] }) },
@@ -161,6 +163,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
       busy: false,
       model: 'removed-model',
       thinking_level: 'high',
+      supermoon_mode: false,
     });
     expect(status.max_context_tokens).toBeUndefined();
   });
@@ -188,6 +191,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentPermissionModeService, { mode: 'manual' }],
         [IAgentPlanService, { status: () => Promise.resolve(null) }],
         [IAgentSwarmService, { isActive: false }],
+        [IAgentSupermoonService, { isActive: false }],
         // Unbound: assembleStatus resolves the default model's context cap,
         // which asks the model service first — no default model here.
         [IModelService, { getDefaultModel: () => undefined }],
@@ -251,6 +255,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentPermissionModeService, { mode: 'manual' }],
         [IAgentPlanService, { status: () => Promise.resolve(null) }],
         [IAgentSwarmService, { isActive: false }],
+        [IAgentSupermoonService, { isActive: false }],
         [IModelService, { getDefaultModel: () => 'default-model' }],
         [
           IModelCatalog,
@@ -334,6 +339,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentPermissionModeService, { mode: 'manual' }],
         [IAgentPlanService, { status: () => Promise.resolve(null) }],
         [IAgentSwarmService, { isActive: false }],
+        [IAgentSupermoonService, { isActive: false }],
         [
           IAgentActivityView,
           { state: () => ({ lifecycle: 'ready', background: [] }) },
@@ -407,5 +413,193 @@ describe('Session legacy status (best-effort runtime state)', () => {
     });
 
     expect(broadcastPermissionMode).toHaveBeenCalledWith('yolo');
+  });
+
+  it('reports supermoon_mode from the agent supermoon service in status', async () => {
+    const profile = {
+      _serviceBrand: undefined,
+      data: () => ({
+        cwd: '/workspace',
+        modelAlias: 'gpt-5',
+        modelCapabilities: UNKNOWN_CAPABILITY,
+        thinkingLevel: 'medium',
+        systemPrompt: '',
+      }),
+      getModel: () => 'gpt-5',
+      getModelCapabilities: () => UNKNOWN_CAPABILITY,
+      getEffectiveThinkingLevel: () => 'medium',
+    } as unknown as IAgentProfileService;
+    const agent: IAgentScopeHandle = {
+      id: 'main',
+      kind: LifecycleScope.Agent,
+      accessor: accessor([
+        [IAgentProfileService, profile],
+        [IAgentTokenCountingService, { get: () => ({ size: 0, measured: 0, estimated: 0 }), statusSize: () => 0 }],
+        [IAgentPermissionModeService, { mode: 'manual' }],
+        [IAgentPlanService, { status: () => Promise.resolve(null) }],
+        [IAgentSwarmService, { isActive: false }],
+        [IAgentSupermoonService, { isActive: true }],
+        [
+          IAgentActivityView,
+          { state: () => ({ lifecycle: 'ready', background: [] }) },
+        ],
+      ]),
+      dispose: () => {},
+    };
+    const agents = {
+      create: () => Promise.resolve(agent),
+      whenReady: () => Promise.resolve(agent),
+      list: () => [agent],
+    } as unknown as IAgentLifecycleService;
+    const session: ISessionScopeHandle = {
+      id: 'session-test',
+      kind: LifecycleScope.Session,
+      accessor: accessor([
+        [IAgentLifecycleService, agents],
+        [ISessionCronService, { _serviceBrand: undefined }],
+      ]),
+      dispose: () => {},
+    };
+    stubSessionChain(ix, session);
+    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
+
+    const status = await ix.get(ISessionLegacyService).status('session-test');
+
+    expect(status.supermoon_mode).toBe(true);
+  });
+
+  it('enters supermoon mode from a supermoon_mode: true agent_config patch', async () => {
+    const enter = vi.fn();
+    const exit = vi.fn();
+    const agent: IAgentScopeHandle = {
+      id: 'main',
+      kind: LifecycleScope.Agent,
+      accessor: accessor([
+        [IAgentProfileService, { _serviceBrand: undefined }],
+        [IAgentSupermoonService, { isActive: false, enter, exit }],
+        [IAgentLifecycleService, { broadcastPermissionMode: vi.fn() }],
+      ]),
+      dispose: () => {},
+    };
+    const agents = {
+      create: () => Promise.resolve(agent),
+      whenReady: () => Promise.resolve(agent),
+      list: () => [agent],
+    } as unknown as IAgentLifecycleService;
+    const session: ISessionScopeHandle = {
+      id: 'session-test',
+      kind: LifecycleScope.Session,
+      accessor: accessor([
+        [IAgentLifecycleService, agents],
+        [
+          ISessionMetadata,
+          {
+            read: () =>
+              Promise.resolve({ id: 'session-test', createdAt: 0, updatedAt: 0, archived: false }),
+          },
+        ],
+        [ISessionContext, { workspaceId: 'ws-test', cwd: '/workspace' }],
+      ]),
+      dispose: () => {},
+    };
+    stubSessionChain(ix, session);
+    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
+
+    await ix.get(ISessionLegacyService).updateProfile('session-test', {
+      agent_config: { supermoon_mode: true },
+    });
+
+    expect(enter).toHaveBeenCalledWith('manual');
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('exits supermoon mode from a supermoon_mode: false agent_config patch', async () => {
+    const enter = vi.fn();
+    const exit = vi.fn();
+    const agent: IAgentScopeHandle = {
+      id: 'main',
+      kind: LifecycleScope.Agent,
+      accessor: accessor([
+        [IAgentProfileService, { _serviceBrand: undefined }],
+        [IAgentSupermoonService, { isActive: true, enter, exit }],
+        [IAgentLifecycleService, { broadcastPermissionMode: vi.fn() }],
+      ]),
+      dispose: () => {},
+    };
+    const agents = {
+      create: () => Promise.resolve(agent),
+      whenReady: () => Promise.resolve(agent),
+      list: () => [agent],
+    } as unknown as IAgentLifecycleService;
+    const session: ISessionScopeHandle = {
+      id: 'session-test',
+      kind: LifecycleScope.Session,
+      accessor: accessor([
+        [IAgentLifecycleService, agents],
+        [
+          ISessionMetadata,
+          {
+            read: () =>
+              Promise.resolve({ id: 'session-test', createdAt: 0, updatedAt: 0, archived: false }),
+          },
+        ],
+        [ISessionContext, { workspaceId: 'ws-test', cwd: '/workspace' }],
+      ]),
+      dispose: () => {},
+    };
+    stubSessionChain(ix, session);
+    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
+
+    await ix.get(ISessionLegacyService).updateProfile('session-test', {
+      agent_config: { supermoon_mode: false },
+    });
+
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(enter).not.toHaveBeenCalled();
+  });
+
+  it('leaves supermoon mode untouched when the patch matches the current state', async () => {
+    const enter = vi.fn();
+    const exit = vi.fn();
+    const agent: IAgentScopeHandle = {
+      id: 'main',
+      kind: LifecycleScope.Agent,
+      accessor: accessor([
+        [IAgentProfileService, { _serviceBrand: undefined }],
+        [IAgentSupermoonService, { isActive: true, enter, exit }],
+        [IAgentLifecycleService, { broadcastPermissionMode: vi.fn() }],
+      ]),
+      dispose: () => {},
+    };
+    const agents = {
+      create: () => Promise.resolve(agent),
+      whenReady: () => Promise.resolve(agent),
+      list: () => [agent],
+    } as unknown as IAgentLifecycleService;
+    const session: ISessionScopeHandle = {
+      id: 'session-test',
+      kind: LifecycleScope.Session,
+      accessor: accessor([
+        [IAgentLifecycleService, agents],
+        [
+          ISessionMetadata,
+          {
+            read: () =>
+              Promise.resolve({ id: 'session-test', createdAt: 0, updatedAt: 0, archived: false }),
+          },
+        ],
+        [ISessionContext, { workspaceId: 'ws-test', cwd: '/workspace' }],
+      ]),
+      dispose: () => {},
+    };
+    stubSessionChain(ix, session);
+    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
+
+    await ix.get(ISessionLegacyService).updateProfile('session-test', {
+      agent_config: { supermoon_mode: true },
+    });
+
+    expect(enter).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
   });
 });

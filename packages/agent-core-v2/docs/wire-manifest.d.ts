@@ -21,7 +21,7 @@
 // owning model offloads inline media to blob storage), cross-reducers
 // (foreign models that also reduce this record on dispatch and replay).
 
-// Index (48 record types)
+// Index (50 record types)
 //   config.update                      profile               persisted  src/agent/profile/profileOps.ts
 //   context.append_loop_event          contextMemory         persisted  src/agent/contextMemory/contextOps.ts
 //   context.append_message             contextMemory         persisted  src/agent/contextMemory/contextOps.ts
@@ -53,6 +53,8 @@
 //   plan.revision                      plan                  persisted  src/features/plan/planOps.ts
 //   profile.bind                       profile               persisted  src/agent/profile/profileOps.ts
 //   skill.activate                     skill                 transient  src/agent/skill/skillOps.ts
+//   supermoon_mode.enter               supermoon             persisted  src/agent/supermoon/supermoonOps.ts
+//   supermoon_mode.exit                supermoon             persisted  src/agent/supermoon/supermoonOps.ts
 //   swarm_mode.enter                   swarm                 persisted  src/agent/swarm/swarmOps.ts
 //   swarm_mode.exit                    swarm                 persisted  src/agent/swarm/swarmOps.ts
 //   task.started                       task                  persisted  src/agent/task/taskOps.ts
@@ -491,6 +493,24 @@ interface SkillActivatePayload {
 }
 
 /**
+ * model: supermoon · persisted · toEvent
+ * owner: src/agent/supermoon/supermoonOps.ts
+ */
+interface SupermoonModeEnterPayload {
+  _name: 'supermoon_mode.enter';
+  /** SupermoonModeTrigger */
+  trigger: 'manual' | 'task';
+}
+
+/**
+ * model: supermoon · persisted · toEvent · cross-reducers: contextMemory
+ * owner: src/agent/supermoon/supermoonOps.ts
+ */
+interface SupermoonModeExitPayload {
+  _name: 'supermoon_mode.exit';
+}
+
+/**
  * model: swarm · persisted · toEvent
  * owner: src/agent/swarm/swarmOps.ts
  */
@@ -748,6 +768,8 @@ interface WirePayloadMap {
   "plan.revision": PlanRevisionPayload;
   "profile.bind": ProfileBindPayload;
   "skill.activate": SkillActivatePayload;
+  "supermoon_mode.enter": SupermoonModeEnterPayload;
+  "supermoon_mode.exit": SupermoonModeExitPayload;
   "swarm_mode.enter": SwarmModeEnterPayload;
   "swarm_mode.exit": SwarmModeExitPayload;
   "task.started": TaskStartedPayload;

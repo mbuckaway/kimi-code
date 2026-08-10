@@ -28,6 +28,7 @@ const appState: AppState = {
   planMode: false,
   inputMode: 'prompt',
   swarmMode: false,
+  supermoonMode: false,
   theme: 'dark',
   editorCommand: null,
   notifications: { enabled: true, condition: 'unfocused' },

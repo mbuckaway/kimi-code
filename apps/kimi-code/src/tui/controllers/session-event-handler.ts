@@ -1,4 +1,5 @@
 import type { Component, Focusable } from '@moonshot-ai/pi-tui';
+import { log } from '@moonshot-ai/kimi-code-sdk';
 import type {
   AgentStatusUpdatedEvent,
   AssistantDeltaEvent,
@@ -19,6 +20,7 @@ import type {
   SkillActivatedEvent,
   PluginCommandActivatedEvent,
   ThinkingDeltaEvent,
+  ThinkingEffort,
   ToolCallDeltaEvent,
   ToolCallStartedEvent,
   ToolProgressEvent,
@@ -39,6 +41,10 @@ import {
   SwarmModeMarkerComponent,
   type SwarmModeMarkerState,
 } from '../components/messages/swarm-markers';
+import {
+  SupermoonModeMarkerComponent,
+  type SupermoonModeMarkerState,
+} from '../components/messages/supermoon-markers';
 import {
   OAUTH_LOGIN_REQUIRED_CODE,
   OAUTH_LOGIN_REQUIRED_STARTUP_NOTICE,
@@ -655,12 +661,17 @@ export class SessionEventHandler {
       event.swarmMode === false &&
       this.host.state.appState.swarmMode &&
       this.host.state.swarmModeEntry === 'task';
+    const shouldRenderSupermoonEnded =
+      event.supermoonMode === false &&
+      this.host.state.appState.supermoonMode &&
+      this.host.state.supermoonModeEntry === 'task';
     const patch: Partial<AppState> = {};
     if (event.contextUsage !== undefined) patch.contextUsage = event.contextUsage;
     if (event.contextTokens !== undefined) patch.contextTokens = event.contextTokens;
     if (event.maxContextTokens !== undefined) patch.maxContextTokens = event.maxContextTokens;
     if (event.planMode !== undefined) patch.planMode = event.planMode;
     if (event.swarmMode !== undefined) patch.swarmMode = event.swarmMode;
+    if (event.supermoonMode !== undefined) patch.supermoonMode = event.supermoonMode;
     if (event.permission !== undefined) {
       patch.permissionMode = event.permission;
     }
@@ -673,11 +684,43 @@ export class SessionEventHandler {
         this.renderSwarmModeMarker('ended');
       }
     }
+    if (event.supermoonMode === false) {
+      this.host.state.supermoonModeEntry = undefined;
+      const previous = this.host.state.supermoonPreviousEffort;
+      if (previous !== undefined) {
+        this.host.state.supermoonPreviousEffort = undefined;
+        void this.restoreSupermoonEffort(previous);
+      }
+      if (shouldRenderSupermoonEnded) {
+        this.renderSupermoonModeMarker('ended');
+      }
+    }
+  }
+
+  /**
+   * Restore the thinking effort pinned while supermoon mode was on. Fired by
+   * the engine's one-shot auto-exit (status update with supermoonMode false);
+   * best-effort — a failure only leaves a log trail, never an error toast
+   * during a turn.
+   */
+  private async restoreSupermoonEffort(effort: ThinkingEffort): Promise<void> {
+    try {
+      await this.host.requireSession().setThinking(effort);
+    } catch (error) {
+      log.warn('failed to restore thinking effort after supermoon mode', { error: String(error) });
+    }
   }
 
   private renderSwarmModeMarker(state: SwarmModeMarkerState): void {
     this.host.state.transcriptContainer.addChild(
       new SwarmModeMarkerComponent(state),
+    );
+    this.host.state.ui.requestRender();
+  }
+
+  private renderSupermoonModeMarker(state: SupermoonModeMarkerState): void {
+    this.host.state.transcriptContainer.addChild(
+      new SupermoonModeMarkerComponent(state),
     );
     this.host.state.ui.requestRender();
   }

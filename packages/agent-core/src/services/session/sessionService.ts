@@ -486,6 +486,7 @@ export class SessionService extends Disposable implements ISessionService {
       permission: permission.mode,
       plan_mode: plan !== null,
       swarm_mode: agentState?.swarmMode ?? false,
+      supermoon_mode: false,
       context_tokens: contextTokens,
       max_context_tokens: maxContextTokens,
       context_usage: contextUsage,
