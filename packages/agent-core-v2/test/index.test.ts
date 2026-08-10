@@ -77,6 +77,8 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'plan.revision',
   'interruptionReminder.recorded',
   'turn.ended',
+  'supermoon_mode.enter',
+  'supermoon_mode.exit',
 ]);
 
 describe('v1 wire vocabulary', () => {

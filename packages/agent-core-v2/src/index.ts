@@ -320,6 +320,8 @@ export * from '#/agent/tools/agent-swarm/agent-swarm';
 import '#/agent/tools/agent-swarm/agentSwarmTool';
 export * from '#/agent/swarm/swarm';
 export * from '#/agent/swarm/swarmService';
+export * from '#/agent/supermoon/supermoon';
+export * from '#/agent/supermoon/supermoonService';
 export * from '#/agent/usage/usage';
 export * from '#/agent/usage/usageService';
 export * from '#/agent/toolDedupe/toolDedupe';

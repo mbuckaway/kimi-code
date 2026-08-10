@@ -32,6 +32,7 @@ const baseState: AppState = {
   planMode: false,
   inputMode: 'prompt',
   swarmMode: false,
+  supermoonMode: false,
   theme: 'dark',
   editorCommand: null,
   notifications: { enabled: true, condition: 'unfocused' },
@@ -130,6 +131,29 @@ describe('FooterComponent status_line items', () => {
     const footer = new FooterComponent(state);
 
     expect(plain(footer.render(120)[0]!).trim()).toBe('');
+  });
+
+  it('renders the supermoon chip when supermoon mode is active', () => {
+    const footer = new FooterComponent({ ...baseState, supermoonMode: true });
+
+    const line1 = plain(footer.render(120)[0]!);
+    expect(line1).toContain('supermoon');
+  });
+
+  it('renders the supermoon chip next to the swarm chip', () => {
+    const footer = new FooterComponent({ ...baseState, swarmMode: true, supermoonMode: true });
+
+    const line1 = plain(footer.render(120)[0]!);
+    const swarmAt = line1.indexOf('swarm');
+    const supermoonAt = line1.indexOf('supermoon');
+    expect(swarmAt).toBeGreaterThanOrEqual(0);
+    expect(supermoonAt).toBeGreaterThan(swarmAt);
+  });
+
+  it('hides the supermoon chip when supermoon mode is off', () => {
+    const footer = new FooterComponent(baseState);
+
+    expect(plain(footer.render(120)[0]!)).not.toContain('supermoon');
   });
 });
 

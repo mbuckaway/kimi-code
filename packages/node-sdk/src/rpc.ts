@@ -120,6 +120,36 @@ export type SetSessionSwarmModeRpcInput =
   | (SessionIdRpcInput & { readonly enabled: true; readonly trigger: SwarmModeTrigger })
   | (SessionIdRpcInput & { readonly enabled: false });
 
+/**
+ * Trigger for entering Supermoon mode. Unlike `SwarmModeTrigger`, there is no
+ * `tool` trigger: Supermoon is entered manually or one-shot via the
+ * task-triggered `supermoon()` prompt.
+ */
+export type SupermoonModeTrigger = 'manual' | 'task';
+
+export type SetSessionSupermoonModeRpcInput =
+  | (SessionIdRpcInput & { readonly enabled: true; readonly trigger: SupermoonModeTrigger })
+  | (SessionIdRpcInput & { readonly enabled: false });
+
+/**
+ * Structural view of the supermoon RPC methods on the engine client. The
+ * engine's `CoreAPI` does not declare `enterSupermoon` / `exitSupermoon` yet
+ * (only `enterSwarm` / `exitSwarm`), so the base client reaches them
+ * structurally — the same feature-detection approach `capabilityRpc` uses in
+ * `session.ts`. Drop this cast once the engine declares the methods.
+ */
+interface SupermoonRpcSurface {
+  enterSupermoon(payload: {
+    readonly sessionId: string;
+    readonly agentId: string;
+    readonly trigger: SupermoonModeTrigger;
+  }): Promise<void> | void;
+  exitSupermoon(payload: {
+    readonly sessionId: string;
+    readonly agentId: string;
+  }): Promise<void> | void;
+}
+
 export interface ActivateSkillRpcInput extends SessionIdRpcInput {
   readonly name: string;
   readonly args?: string | undefined;
@@ -544,6 +574,36 @@ export abstract class SDKRpcClientBase {
   private async exitSwarmMode(input: SessionIdRpcInput): Promise<void> {
     const rpc = await this.getRpc();
     return rpc.exitSwarm({
+      sessionId: input.sessionId,
+      agentId: this.interactiveAgentId,
+    });
+  }
+
+  async setSupermoonMode(input: SetSessionSupermoonModeRpcInput): Promise<void> {
+    if (input.enabled) return this.enterSupermoonMode(input);
+    return this.exitSupermoonMode(input);
+  }
+
+  /** One-shot Supermoon: enter with the `task` trigger, prompt, auto-exit on turn end. */
+  async supermoon(input: SessionPromptRpcInput): Promise<void> {
+    await this.enterSupermoonMode({ sessionId: input.sessionId, trigger: 'task' });
+    return this.prompt(input);
+  }
+
+  private async enterSupermoonMode(
+    input: SessionIdRpcInput & { readonly trigger: SupermoonModeTrigger },
+  ): Promise<void> {
+    const rpc = (await this.getRpc()) as unknown as SupermoonRpcSurface;
+    return rpc.enterSupermoon({
+      sessionId: input.sessionId,
+      agentId: this.interactiveAgentId,
+      trigger: input.trigger,
+    });
+  }
+
+  private async exitSupermoonMode(input: SessionIdRpcInput): Promise<void> {
+    const rpc = (await this.getRpc()) as unknown as SupermoonRpcSurface;
+    return rpc.exitSupermoon({
       sessionId: input.sessionId,
       agentId: this.interactiveAgentId,
     });

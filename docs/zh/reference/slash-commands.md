@@ -51,6 +51,8 @@
 | `/plan clear` | — | 清除当前 plan 方案 | 否 |
 | `/swarm on\|off` | — | 开启或关闭 swarm mode，但不发送提示词。 | 是 |
 | `/swarm <task>` | — | 先开启 swarm mode，再把 `<task>` 作为普通提示词发送。如果该轮次正常完成，swarm mode 会自动关闭。若当前是 `manual` 权限模式，启动前会提示是否切换到 `auto` 或 `yolo`。 | 否 |
+| `/supermoon on\|off` | — | 开启或关闭 Supermoon 模式，但不发送提示词。开启后，代理会对每个实质性任务主动进行多智能体编排，并把思考强度锁定到支持的最高档位。参见 [Supermoon 模式](../guides/supermoon-mode.md) | 是 |
+| `/supermoon <task>` | — | 先开启 Supermoon 模式，再把 `<task>` 作为普通提示词发送；该轮次正常完成后自动关闭模式。 | 否 |
 | `/goal [...]` | — | 开始或管理目标模式 | 见下文 |
 
 ::: warning 注意

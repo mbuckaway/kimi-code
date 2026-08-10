@@ -52,6 +52,9 @@ export interface ColorPalette {
   warning: string;
   /** Error: error messages, failed tool output. */
   error: string;
+  /** Supermoon mode chip in the footer. Its own hue, distinct from
+   *  swarm's accent, plan's primary, and the warning mode badges. */
+  supermoon: string;
 
   // ── Diff (all consumed by components/media/diff-preview.ts) ──
   /** Added lines. */
@@ -94,6 +97,7 @@ export const darkColors: ColorPalette = {
   success: '#4EC87E',
   warning: '#E8A838',
   error: '#E85454',
+  supermoon: '#FF8AC2',
 
   diffAdded: '#4EC87E',
   diffRemoved: '#E85454',
@@ -121,6 +125,7 @@ export const lightColors: ColorPalette = {
   success: '#0E7A38',
   warning: '#92660A',
   error: '#B91C1C',
+  supermoon: '#A03070',
 
   diffAdded: '#0E7A38',
   diffRemoved: '#B91C1C',

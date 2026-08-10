@@ -63,6 +63,7 @@ import {
   handleTitleCommand,
 } from './session';
 import { handleSwarmCommand } from './swarm';
+import { handleSupermoonCommand } from './supermoon';
 import { handleUndoCommand } from './undo';
 import { handleWebCommand } from './web';
 
@@ -90,6 +91,7 @@ export {
   showSettingsSelector,
 } from './config';
 export { handleSwarmCommand } from './swarm';
+export { handleSupermoonCommand } from './supermoon';
 export { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
 export { handlePluginsCommand } from './plugins';
 export { handleReloadCommand, handleReloadTuiCommand } from './reload';
@@ -343,6 +345,7 @@ const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set
   'init',
   'plan',
   'swarm',
+  'supermoon',
   'undo',
   'web',
 ]);
@@ -481,6 +484,9 @@ async function handleBuiltInSlashCommand(
       return;
     case 'swarm':
       await handleSwarmCommand(host, args);
+      return;
+    case 'supermoon':
+      await handleSupermoonCommand(host, args);
       return;
     case 'compact':
       await handleCompactCommand(host, args);
