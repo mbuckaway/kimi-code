@@ -53,13 +53,14 @@ jobs:
             echo "main is already up to date"
             exit 0
           fi
-          # Plain (non-force) push: a fast-forward is the healthy case. A
-          # failure means main diverged from upstream again — reset it by
-          # hand with a force push before the next sync.
-          if ! git push origin refs/remotes/upstream/main:refs/heads/main; then
-            echo "::error::main has diverged from upstream/main — reset it manually with a force push"
-            exit 1
-          fi
+          # Fast-forward push: the healthy case. main is a pristine mirror of
+          # upstream/main by definition, so if the plain push is rejected the
+          # mirror has diverged (pollution) — self-heal with a force-with-lease
+          # reset instead of failing closed. The pristine-main ruleset carries a
+          # repository-admin bypass for this push (see header). Never force
+          # fork/main — that ruleset has no bypass.
+          git push origin refs/remotes/upstream/main:refs/heads/main \
+            || git push --force-with-lease origin refs/remotes/upstream/main:refs/heads/main
 
   sync-fork-main:
     name: Merge upstream into fork/main
@@ -103,21 +104,29 @@ jobs:
             --title "chore: sync upstream/main → fork/main ($(date -u +%Y-%m-%d))" \
             --body "Automated upstream sync into the fork mainline. Review and merge manually with AI assistance."
 
+      - name: Close resolved conflict issue
+        if: steps.merge.outputs.conflict != 'true'
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "fork-sync: merge conflict" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --comment "Resolved — a conflict-free sync ran on $(date -u +%Y-%m-%d)."
+          fi
+
       - name: Notify on merge conflict
         if: failure() && steps.merge.outputs.conflict == 'true'
         run: |
           set -euo pipefail
+          CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
+          BODY=$(printf 'The sync hit merge conflicts on %s:\n%s\n\nResolve manually:\n  git fetch upstream\n  git checkout -b sync/manual fork/main\n  git merge upstream/main   # resolve conflicts\n  git push origin sync/manual\n  gh pr create --base fork/main --head sync/manual\n\nThis issue stays open while the conflict persists; a conflict-free sync closes it.' "$(date -u +%Y-%m-%d)" "$CONFLICTS")
           EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "fork-sync: merge conflict" --json number --jq '.[0].number')
           if [ -z "$EXISTING" ]; then
             gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "fork-sync: merge conflict syncing upstream/main → fork/main" \
-              --body "The scheduled sync hit merge conflicts. Resolve manually:
-          
-              git fetch upstream
-              git checkout -b sync/manual fork/main
-              git merge upstream/main   # resolve conflicts
-              git push origin sync/manual
-              gh pr create --base fork/main --head sync/manual
-          
-          This issue auto-recurs while the conflict persists; close it once resolved."
+              --body "$BODY"
+          else
+            # A previous conflict issue is still open — do not mask a new
+            # conflict under it; append the current state so it stays tracked.
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
           fi
