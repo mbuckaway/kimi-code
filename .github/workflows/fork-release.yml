@@ -70,7 +70,10 @@ jobs:
   version:
     name: Open release version PR
     needs: route
-    if: needs.route.outputs.mode == 'version'
+    # Always runs (never skipped): a skipped job hides the outputs of ALL
+    # needed jobs from prepare's `if`, which silently skips the publish half
+    # on the mode=publish and chore:release paths (observed: no v0.34.0-MB.1.12
+    # tag despite PR #39's merged bump). The version work is gated per-step.
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
@@ -90,6 +93,7 @@ jobs:
           git fetch origin --tags --force
 
       - name: Compute next version
+        if: needs.route.outputs.mode == 'version'
         id: v
         run: |
           set -euo pipefail
@@ -121,6 +125,7 @@ jobs:
           echo "Next fork version: $BASE-MB.$NEXT (base $BASE, bump $BUMP, last ${LAST:-none})"
 
       - name: Commit version bump, open PR, auto-merge
+        if: needs.route.outputs.mode == 'version'
         id: bump
         run: |
           set -euo pipefail
