@@ -2,9 +2,11 @@ name: Fork release
 
 # Fork-only release pipeline (mbuckaway/kimi-code). Two modes on push to
 # fork/main:
-#   - version: an ordinary push computes the next <upstream-base>-MB.<x>.<y>
-#     version, opens a version-bump PR ("chore: release …") and auto-merges
-#     it (rulesets forbid direct pushes to fork/main).
+#   - version: an ordinary push computes the next <base>-MB.<x>.<y> version
+#     (base read from the fork's OWN apps/kimi-code/package.json — releases
+#     never depend on the upstream mirror), opens a version-bump PR
+#     ("chore: release …") and auto-merges it (rulesets forbid direct pushes
+#     to fork/main).
 #   - publish: the merged version-bump commit triggers tagging
 #     (v<version>, no slashes so release asset URLs stay clean), a GitHub
 #     Release, unsigned native builds, and a refresh of the gh-pages update
@@ -83,34 +85,20 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.FORK_SYNC_PAT }}
 
-      - name: Fetch main and tags
+      - name: Fetch tags
         run: |
-          git fetch origin main
           git fetch origin --tags --force
-
-      # main and fork/main are synced by two independent fork-sync jobs, so the
-      # mirror can advance to a new upstream release while the fork mainline is
-      # still stuck on a merge conflict. Releasing in that window stamps the new
-      # upstream base onto code that does not contain it, so refuse instead.
-      - name: Verify fork/main contains the upstream mirror
-        run: |
-          set -euo pipefail
-          if ! git merge-base --is-ancestor origin/main HEAD; then
-            BASE=$(git show origin/main:apps/kimi-code/package.json \
-              | grep -m1 '"version"' | sed -E 's/.*"version": *"([^"]+)".*/\1/' | cut -d- -f1)
-            echo "::error::fork/main does not contain origin/main (upstream base $BASE)." \
-              "Land the upstream sync into fork/main before cutting a release;" \
-              "releasing now would label this build with an upstream base it does not carry."
-            git log --oneline HEAD..origin/main | head -20
-            exit 1
-          fi
 
       - name: Compute next version
         id: v
         run: |
           set -euo pipefail
-          BASE=$(git show origin/main:apps/kimi-code/package.json \
-            | grep -m1 '"version"' | sed -E 's/.*"version": *"([^"]+)".*/\1/' | cut -d- -f1)
+          # The base is the fork's OWN package.json version — the label the fork
+          # is shipping. Releasing never depends on the upstream mirror; when the
+          # fork later syncs upstream, the sync's conflict resolution bumps this
+          # version and the label follows.
+          BASE=$(grep -m1 '"version"' apps/kimi-code/package.json \
+            | sed -E 's/.*"version": *"([^"]+)".*/\1/' | cut -d- -f1)
           # The MB counter is continuous across upstream bases: the fork keeps
           # carrying its own changes when upstream moves, so the count must not
           # restart at 1.0 and imply the fork patches were dropped.
