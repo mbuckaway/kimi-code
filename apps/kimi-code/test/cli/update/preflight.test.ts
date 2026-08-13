@@ -600,7 +600,7 @@ describe('runUpdatePreflight', () => {
     expect(mocks.resolveCommandPath).toHaveBeenCalledWith('npm');
     expect(mocks.spawn).toHaveBeenCalledWith(
       '/usr/local/bin/npm',
-      ['install', '-g', '@moonshot-ai/kimi-code@0.5.0'],
+      ['install', '-g', '@mbuckaway/kimi-code@0.5.0'],
       { stdio: 'inherit' },
     );
   });

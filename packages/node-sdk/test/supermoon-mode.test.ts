@@ -98,32 +98,11 @@ describe('Supermoon mode (SDKRpcClientBase)', () => {
       sessionId: 'session-1',
       agentId: 'main',
       input,
-      disabledTools: undefined,
     });
     // One-shot semantics: the enter dispatch strictly precedes the prompt.
     expect(client.rpcEnterSupermoon.mock.invocationCallOrder[0] ?? -1).toBeLessThan(
       client.rpcPrompt.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     );
-  });
-
-  it('supermoon_forwardsDisabledToolsToThePromptDispatch', async () => {
-    await client.supermoon({
-      sessionId: 'session-1',
-      input: [{ type: 'text', text: 'refactor the module' }],
-      disabledTools: ['edit'],
-    });
-
-    expect(client.rpcEnterSupermoon).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      agentId: 'main',
-      trigger: 'task',
-    });
-    expect(client.rpcPrompt).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      agentId: 'main',
-      input: [{ type: 'text', text: 'refactor the module' }],
-      disabledTools: ['edit'],
-    });
   });
 
   it('supermoon_rejectsAnUnknownTriggerAtCompileTime', () => {
