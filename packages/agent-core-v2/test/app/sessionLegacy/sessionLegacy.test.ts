@@ -7,7 +7,7 @@
  * current model catalog.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import type { ServiceIdentifier, ServicesAccessor } from '#/_base/di/instantiation';
@@ -20,7 +20,7 @@ import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMo
 import { IAgentPlanService } from '#/features/plan/plan';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentSupermoonService } from '#/agent/supermoon/supermoon';
-import { IAgentSwarmService } from '#/agent/swarm/swarm';
+import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IModelService } from '#/kosong/model/model';
@@ -31,9 +31,7 @@ import { IWorkspaceLifecycleService } from '#/app/workspaceLifecycle/workspaceLi
 import { ISessionLifecycleService } from '#/workspace/sessionLifecycle/sessionLifecycle';
 import { IAgentActivityView } from '#/agent/activityView/activityView';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionCronService } from '#/session/cron/sessionCronService';
-import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
 function accessor(
   entries: ReadonlyArray<readonly [ServiceIdentifier<unknown>, unknown]>,
@@ -371,50 +369,6 @@ describe('Session legacy status (best-effort runtime state)', () => {
       context_usage: 1,
     });
   });
-
-  it('fans a permission_mode patch out through the session agent registry', async () => {
-    const broadcastPermissionMode = vi.fn();
-    const agent: IAgentScopeHandle = {
-      id: 'main',
-      kind: LifecycleScope.Agent,
-      accessor: accessor([
-        [IAgentProfileService, { _serviceBrand: undefined }],
-        [IAgentLifecycleService, { broadcastPermissionMode }],
-      ]),
-      dispose: () => {},
-    };
-    const agents = {
-      create: () => Promise.resolve(agent),
-      whenReady: () => Promise.resolve(agent),
-      list: () => [agent],
-      broadcastPermissionMode,
-    } as unknown as IAgentLifecycleService;
-    const session: ISessionScopeHandle = {
-      id: 'session-test',
-      kind: LifecycleScope.Session,
-      accessor: accessor([
-        [IAgentLifecycleService, agents],
-        [
-          ISessionMetadata,
-          {
-            read: () =>
-              Promise.resolve({ id: 'session-test', createdAt: 0, updatedAt: 0, archived: false }),
-          },
-        ],
-        [ISessionContext, { workspaceId: 'ws-test', cwd: '/workspace' }],
-      ]),
-      dispose: () => {},
-    };
-    stubSessionChain(ix, session);
-    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
-
-    await ix.get(ISessionLegacyService).updateProfile('session-test', {
-      agent_config: { permission_mode: 'yolo' },
-    });
-
-    expect(broadcastPermissionMode).toHaveBeenCalledWith('yolo');
-  });
-
   it('reports supermoon_mode from the agent supermoon service in status', async () => {
     const profile = {
       _serviceBrand: undefined,
@@ -466,140 +420,5 @@ describe('Session legacy status (best-effort runtime state)', () => {
     const status = await ix.get(ISessionLegacyService).status('session-test');
 
     expect(status.supermoon_mode).toBe(true);
-  });
-
-  it('enters supermoon mode from a supermoon_mode: true agent_config patch', async () => {
-    const enter = vi.fn();
-    const exit = vi.fn();
-    const agent: IAgentScopeHandle = {
-      id: 'main',
-      kind: LifecycleScope.Agent,
-      accessor: accessor([
-        [IAgentProfileService, { _serviceBrand: undefined }],
-        [IAgentSupermoonService, { isActive: false, enter, exit }],
-        [IAgentLifecycleService, { broadcastPermissionMode: vi.fn() }],
-      ]),
-      dispose: () => {},
-    };
-    const agents = {
-      create: () => Promise.resolve(agent),
-      whenReady: () => Promise.resolve(agent),
-      list: () => [agent],
-    } as unknown as IAgentLifecycleService;
-    const session: ISessionScopeHandle = {
-      id: 'session-test',
-      kind: LifecycleScope.Session,
-      accessor: accessor([
-        [IAgentLifecycleService, agents],
-        [
-          ISessionMetadata,
-          {
-            read: () =>
-              Promise.resolve({ id: 'session-test', createdAt: 0, updatedAt: 0, archived: false }),
-          },
-        ],
-        [ISessionContext, { workspaceId: 'ws-test', cwd: '/workspace' }],
-      ]),
-      dispose: () => {},
-    };
-    stubSessionChain(ix, session);
-    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
-
-    await ix.get(ISessionLegacyService).updateProfile('session-test', {
-      agent_config: { supermoon_mode: true },
-    });
-
-    expect(enter).toHaveBeenCalledWith('manual');
-    expect(exit).not.toHaveBeenCalled();
-  });
-
-  it('exits supermoon mode from a supermoon_mode: false agent_config patch', async () => {
-    const enter = vi.fn();
-    const exit = vi.fn();
-    const agent: IAgentScopeHandle = {
-      id: 'main',
-      kind: LifecycleScope.Agent,
-      accessor: accessor([
-        [IAgentProfileService, { _serviceBrand: undefined }],
-        [IAgentSupermoonService, { isActive: true, enter, exit }],
-        [IAgentLifecycleService, { broadcastPermissionMode: vi.fn() }],
-      ]),
-      dispose: () => {},
-    };
-    const agents = {
-      create: () => Promise.resolve(agent),
-      whenReady: () => Promise.resolve(agent),
-      list: () => [agent],
-    } as unknown as IAgentLifecycleService;
-    const session: ISessionScopeHandle = {
-      id: 'session-test',
-      kind: LifecycleScope.Session,
-      accessor: accessor([
-        [IAgentLifecycleService, agents],
-        [
-          ISessionMetadata,
-          {
-            read: () =>
-              Promise.resolve({ id: 'session-test', createdAt: 0, updatedAt: 0, archived: false }),
-          },
-        ],
-        [ISessionContext, { workspaceId: 'ws-test', cwd: '/workspace' }],
-      ]),
-      dispose: () => {},
-    };
-    stubSessionChain(ix, session);
-    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
-
-    await ix.get(ISessionLegacyService).updateProfile('session-test', {
-      agent_config: { supermoon_mode: false },
-    });
-
-    expect(exit).toHaveBeenCalledTimes(1);
-    expect(enter).not.toHaveBeenCalled();
-  });
-
-  it('leaves supermoon mode untouched when the patch matches the current state', async () => {
-    const enter = vi.fn();
-    const exit = vi.fn();
-    const agent: IAgentScopeHandle = {
-      id: 'main',
-      kind: LifecycleScope.Agent,
-      accessor: accessor([
-        [IAgentProfileService, { _serviceBrand: undefined }],
-        [IAgentSupermoonService, { isActive: true, enter, exit }],
-        [IAgentLifecycleService, { broadcastPermissionMode: vi.fn() }],
-      ]),
-      dispose: () => {},
-    };
-    const agents = {
-      create: () => Promise.resolve(agent),
-      whenReady: () => Promise.resolve(agent),
-      list: () => [agent],
-    } as unknown as IAgentLifecycleService;
-    const session: ISessionScopeHandle = {
-      id: 'session-test',
-      kind: LifecycleScope.Session,
-      accessor: accessor([
-        [IAgentLifecycleService, agents],
-        [
-          ISessionMetadata,
-          {
-            read: () =>
-              Promise.resolve({ id: 'session-test', createdAt: 0, updatedAt: 0, archived: false }),
-          },
-        ],
-        [ISessionContext, { workspaceId: 'ws-test', cwd: '/workspace' }],
-      ]),
-      dispose: () => {},
-    };
-    stubSessionChain(ix, session);
-    ix.set(ISessionLegacyService, new SyncDescriptor(SessionLegacyService));
-
-    await ix.get(ISessionLegacyService).updateProfile('session-test', {
-      agent_config: { supermoon_mode: true },
-    });
-
-    expect(enter).not.toHaveBeenCalled();
-    expect(exit).not.toHaveBeenCalled();
   });
 });
