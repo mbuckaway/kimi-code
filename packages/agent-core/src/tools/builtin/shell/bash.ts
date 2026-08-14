@@ -23,6 +23,7 @@
  */
 
 import type { Kaos, KaosProcess } from '@moonshot-ai/kaos';
+import { parse } from '@moonshot-ai/tree-sitter-bash';
 import { z } from 'zod';
 
 import { ProcessBackgroundTask, type BackgroundManager } from '../../../agent/background';
@@ -30,7 +31,8 @@ import type { BuiltinTool } from '../../../agent/tool';
 import type { ExecutableToolResult, ToolExecution, ToolUpdate } from '../../../loop/types';
 import { renderPrompt } from '../../../utils/render-prompt';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { literalRulePattern, matchesGlobRuleSubject } from '../../support/rule-match';
+import { literalRulePattern } from '../../support/rule-match';
+import { createCommandPartsProvider, matchesDecomposedCommandRule } from './command-parts';
 import {
   type ExecutableToolResultBuilderResult,
   ToolResultBuilder,
@@ -252,6 +254,7 @@ export class BashTool implements BuiltinTool<BashInput> {
 
   resolveExecution(args: BashInput): ToolExecution {
     const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
+    const commandParts = createCommandPartsProvider(parse, args.command);
     return {
       description: args.run_in_background
         ? `Starting background: ${preview}`
@@ -264,7 +267,8 @@ export class BashTool implements BuiltinTool<BashInput> {
         language: 'bash',
       },
       approvalRule: literalRulePattern(this.name, args.command),
-      matchesRule: (ruleArgs) => matchesGlobRuleSubject(ruleArgs, args.command),
+      matchesRule: (ruleArgs, context) =>
+        matchesDecomposedCommandRule(ruleArgs, args.command, context?.decision, commandParts),
       execute: ({ signal, onUpdate, onForegroundTaskStart }) =>
         this.execution(args, signal, onUpdate, onForegroundTaskStart),
     };
