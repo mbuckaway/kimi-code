@@ -157,19 +157,85 @@ describe('handleUpgrade', () => {
     expect(stdout.join('')).toContain('To update manually, run: npm install -g @mbuckaway/kimi-code@0.5.0');
   });
 
-  it('prints the manual update command without prompting when not interactive', async () => {
-    const { stdout, writable } = captureOutput();
+  it('auto-installs without prompting when not interactive and the install source supports it', async () => {
+    const { stdout, stderr, writable } = captureOutput();
     const deps = createDeps({ latest: '0.5.0', source: 'npm-global', isInteractive: false });
 
     await expect(handleUpgrade('0.4.0', { ...deps, ...writable })).resolves.toBe(0);
 
     expect(deps.promptForInstallChoice).not.toHaveBeenCalled();
-    expect(deps.installUpdate).not.toHaveBeenCalled();
-    expect(deps.track).toHaveBeenCalledWith('upgrade_command_manual_command', expect.objectContaining({
+    expect(deps.installUpdate).toHaveBeenCalledWith('npm-global', '0.5.0', 'darwin');
+    expect(deps.track).toHaveBeenCalledWith('upgrade_command_auto_install_started', expect.objectContaining({
+      current_version: '0.4.0',
       target_version: '0.5.0',
       source: 'npm-global',
     }));
-    expect(stdout.join('')).toContain('To update manually, run: npm install -g @mbuckaway/kimi-code@0.5.0');
+    expect(deps.track).toHaveBeenCalledWith('upgrade_command_succeeded', expect.objectContaining({
+      target_version: '0.5.0',
+      source: 'npm-global',
+    }));
+    expect(stdout.join('')).toContain('Updated @mbuckaway/kimi-code to 0.5.0');
+    expect(stderr.join('')).toBe('');
+  });
+
+  it('auto-installs a native update on non-Windows platforms when not interactive', async () => {
+    const { stdout, writable } = captureOutput();
+    const deps = createDeps({ latest: '0.5.0', source: 'native', isInteractive: false });
+
+    await expect(handleUpgrade('0.4.0', { ...deps, ...writable })).resolves.toBe(0);
+
+    expect(deps.promptForInstallChoice).not.toHaveBeenCalled();
+    expect(deps.installUpdate).toHaveBeenCalledWith('native', '0.5.0', 'darwin');
+    expect(stdout.join('')).toContain('Updated @mbuckaway/kimi-code to 0.5.0');
+  });
+
+  it('returns a failing exit code when the non-interactive auto-install fails', async () => {
+    const { stdout, stderr, writable } = captureOutput();
+    const deps = createDeps({
+      latest: '0.5.0',
+      source: 'npm-global',
+      isInteractive: false,
+      installUpdate: vi.fn().mockRejectedValue(new Error('npm exited with code 1')),
+    });
+
+    await expect(handleUpgrade('0.4.0', { ...deps, ...writable })).resolves.toBe(1);
+
+    expect(deps.track).toHaveBeenCalledWith('upgrade_command_failed', expect.objectContaining({
+      target_version: '0.5.0',
+      source: 'npm-global',
+      stage: 'install',
+    }));
+    expect(stderr.join('')).toContain(
+      'warning: failed to install @mbuckaway/kimi-code@0.5.0: npm exited with code 1',
+    );
+    expect(stdout.join('')).not.toContain('Updated @mbuckaway/kimi-code');
+  });
+
+  it('fails with a non-zero exit code when not interactive and the install source cannot be auto-installed', async () => {
+    const { stdout, stderr, writable } = captureOutput();
+    const deps = createDeps({ latest: '0.5.0', source: 'unsupported', isInteractive: false });
+
+    await expect(handleUpgrade('0.4.0', { ...deps, ...writable })).resolves.toBe(1);
+
+    expect(deps.installUpdate).not.toHaveBeenCalled();
+    expect(deps.promptForInstallChoice).not.toHaveBeenCalled();
+    expect(deps.track).toHaveBeenCalledWith('upgrade_command_manual_command', expect.objectContaining({
+      target_version: '0.5.0',
+      source: 'unsupported',
+    }));
+    expect(stderr.join('')).toContain('To update manually, run: npm install -g @mbuckaway/kimi-code@0.5.0');
+    expect(stdout.join('')).toBe('');
+  });
+
+  it('fails without installing when not interactive and the source is homebrew', async () => {
+    const { stderr, writable } = captureOutput();
+    const deps = createDeps({ latest: '0.5.0', source: 'homebrew', isInteractive: false });
+
+    await expect(handleUpgrade('0.4.0', { ...deps, ...writable })).resolves.toBe(1);
+
+    expect(deps.installUpdate).not.toHaveBeenCalled();
+    expect(deps.promptForInstallChoice).not.toHaveBeenCalled();
+    expect(stderr.join('')).toContain('To update manually, run: brew upgrade kimi-code');
   });
 
   it('returns a failing exit code when the foreground install fails', async () => {
