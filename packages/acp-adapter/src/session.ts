@@ -1601,6 +1601,14 @@ function mapPromptError(err: unknown, sessionId: string): RequestError {
     });
     return authErr;
   }
+  const overflowErr = contextOverflowFromUnknown(err);
+  if (overflowErr) {
+    log.warn('acp: prompt rejected with context overflow; preserving provider message', {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return overflowErr;
+  }
   log.error('acp: prompt failed', {
     sessionId,
     error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
@@ -1652,6 +1660,28 @@ function authRequiredFromUnknown(err: unknown): RequestError | undefined {
     const code = (err as { code?: unknown }).code;
     if (isAuthErrorCode(code)) {
       return RequestError.authRequired();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Map a context-overflow-coded prompt rejection to a `RequestError` that
+ * preserves the provider's message instead of collapsing to the generic
+ * authRequired ("Authentication required" would tell the client to re-login,
+ * which cannot fix an over-long context). The ACP SDK has no dedicated
+ * overflow code, so the error stays a generic internalError whose message
+ * carries the provider text (issue #2613).
+ */
+function contextOverflowFromUnknown(err: unknown): RequestError | undefined {
+  if (err && typeof err === 'object' && 'code' in err) {
+    const code = (err as { code?: unknown }).code;
+    if (code === ErrorCodes.CONTEXT_OVERFLOW) {
+      const message = (err as { message?: unknown }).message;
+      return RequestError.internalError(
+        undefined,
+        typeof message === 'string' ? message : undefined,
+      );
     }
   }
   return undefined;

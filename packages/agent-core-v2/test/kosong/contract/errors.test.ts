@@ -131,6 +131,28 @@ describe('isRetryableGenerateError', () => {
   });
 });
 
+describe('context-limit 401 classification', () => {
+  it('classifies a 401 whose message says "supports only N context" as context overflow', () => {
+    const error = normalizeAPIStatusError(401, 'k3-256k supports only 256K context.');
+    expect(error).toBeInstanceOf(APIContextOverflowError);
+    expect(error.statusCode).toBe(401);
+    expect(classifyApiError(error)).toEqual({ kind: 'context_overflow', statusCode: 401 });
+  });
+
+  it('classifies a raw 401 status error with the message as context overflow', () => {
+    expect(
+      classifyApiError(new APIStatusError(401, 'k3-256k supports only 256K context.')),
+    ).toEqual({ kind: 'context_overflow', statusCode: 401 });
+  });
+
+  it('keeps a plain 401 as auth', () => {
+    expect(classifyApiError(new APIStatusError(401, 'Unauthorized')).kind).toBe('auth');
+    const error = normalizeAPIStatusError(401, 'Unauthorized');
+    expect(error).toBeInstanceOf(APIStatusError);
+    expect(error).not.toBeInstanceOf(APIContextOverflowError);
+  });
+});
+
 describe('classifyApiError', () => {
   it('classifies typed errors and carries the status code', () => {
     expect(classifyApiError(new APIContextOverflowError(400, 'context length exceeded'))).toEqual({

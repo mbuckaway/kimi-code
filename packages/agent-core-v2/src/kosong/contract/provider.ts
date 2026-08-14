@@ -98,6 +98,7 @@ export interface GenerateOptions {
   maxCompletionTokens?: number;
   usedContextTokens?: number;
   maxContextTokens?: number;
+  stallTimeoutMs?: number;
   onRequestStart?: () => void;
   onRequestSent?: () => void;
   onStreamEnd?: (stats?: StreamDecodeStats) => void;

@@ -235,6 +235,12 @@ describe('normalizeAPIStatusError', () => {
     [400, 'prompt is too long: 210000 tokens exceeds the maximum'],
     [400, 'input token count 131072 exceeds the maximum number of tokens allowed'],
     [400, 'Invalid request: Your request exceeded model token limit: 262144 (requested: 274613)'],
+    // Kimi managed API signals context-window limits with a 401 body naming
+    // the model's window ("401 k3-256k supports only 256K context.") — the
+    // message is the discriminator, not the status.
+    [401, 'k3-256k supports only 256K context.'],
+    [401, 'Context length exceeded'],
+    [401, 'This model supports only 1M context'],
   ])('normalizes %i "%s" to APIContextOverflowError', (statusCode, message) => {
     const error = normalizeAPIStatusError(statusCode, message, 'req-context');
     expect(error).toBeInstanceOf(APIContextOverflowError);
@@ -243,7 +249,6 @@ describe('normalizeAPIStatusError', () => {
   });
 
   it.each([
-    [401, 'Context length exceeded'],
     [500, 'Context length exceeded'],
     [400, 'Bad request'],
     [422, 'Invalid tool schema'],

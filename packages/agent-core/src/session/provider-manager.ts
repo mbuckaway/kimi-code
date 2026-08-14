@@ -1,6 +1,7 @@
 import type { Logger } from '#/logging/types';
 import type { ProviderConfig as KosongProviderConfig, ModelCapability, ProviderRequestAuth } from '@moonshot-ai/kosong';
 import {
+  APIContextOverflowError,
   APIStatusError,
   classifyKimiQuotaError,
   getModelCapability,
@@ -214,6 +215,10 @@ export class ProviderManager implements ModelProvider {
         try {
           return await request(auth);
         } catch (error) {
+          // A context-overflow-classified 401 (e.g. "supports only 256K
+          // context") is a context-window rejection, not a stale token —
+          // refreshing OAuth cannot help (issue #2613).
+          if (error instanceof APIContextOverflowError) throw error;
           if (!(error instanceof APIStatusError) || error.statusCode !== 401) throw error;
           if (refreshed) {
             const reason = error.message.replaceAll('\r', '');

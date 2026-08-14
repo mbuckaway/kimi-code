@@ -22,7 +22,12 @@
 
 import { AsyncEventQueue } from '#/_base/asyncEventQueue';
 import type { VideoURLPart } from '#/kosong/contract/message';
-import { APIStatusError, isAbortError, VideoUploadUnsupportedError } from '#/kosong/contract/errors';
+import {
+  APIContextOverflowError,
+  APIStatusError,
+  isAbortError,
+  VideoUploadUnsupportedError,
+} from '#/kosong/contract/errors';
 import { generate, type GenerateResult } from '#/kosong/contract/generate';
 import type {
   ChatProvider,
@@ -120,6 +125,7 @@ export class ModelRequesterImpl implements ModelRequester {
       maxCompletionTokens: params?.maxCompletionTokens,
       usedContextTokens: params?.usedContextTokens,
       maxContextTokens: params?.maxContextTokens,
+      stallTimeoutMs: params?.stallTimeoutMs,
       onRequestStart: () => {
         requestStartedAt = Date.now();
       },
@@ -211,7 +217,10 @@ export class ModelRequesterImpl implements ModelRequester {
 }
 
 function isUnauthorizedStatusError(error: unknown): error is APIStatusError {
-  return error instanceof APIStatusError && error.statusCode === 401;
+  if (!(error instanceof APIStatusError) || error.statusCode !== 401) return false;
+  // A message-matched context-limit 401 is a context-window rejection, not a
+  // stale token — refreshing OAuth cannot help (issue #2613).
+  return !(error instanceof APIContextOverflowError);
 }
 
 type MutableModelRequestTiming = { -readonly [K in keyof ModelRequestTiming]: ModelRequestTiming[K] };

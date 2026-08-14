@@ -785,7 +785,8 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       if (
         isError2(error) &&
         (error.code === ErrorCodes.AUTH_LOGIN_REQUIRED ||
-          error.code === ErrorCodes.PROVIDER_AUTH_ERROR)
+          error.code === ErrorCodes.PROVIDER_AUTH_ERROR ||
+          error.code === ErrorCodes.CONTEXT_OVERFLOW)
       ) {
         throw error;
       }

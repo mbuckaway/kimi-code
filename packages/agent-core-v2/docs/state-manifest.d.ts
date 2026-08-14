@@ -1060,6 +1060,7 @@ export interface AgentStateSnapshot {
       readonly maxCompletionTokens?: number;
       readonly usedContextTokens?: number;
       readonly maxContextTokens?: number;
+      readonly stallTimeoutMs?: number;
       readonly onTraceId?: (traceId: string | null) => void;
     };
     readonly systemPrompt: string;
