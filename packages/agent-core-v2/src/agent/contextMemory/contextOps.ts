@@ -126,11 +126,9 @@ export const ContextModel = defineModel<ContextMessage[]>('contextMemory', () =>
   },
 });
 
-function popSwarmModeReminder(state: ContextMessage[], _payload: unknown): ContextMessage[] {
-  const last = state[state.length - 1];
-  if (last === undefined) return state;
-  const origin = last.origin;
-  if (origin?.kind !== 'injection' || origin.variant !== 'swarm_mode') return state;
+function popSwarmModeReminder(state: ContextMessage[]): ContextMessage[] {
+  const last = state.at(-1);
+  if (last?.origin?.kind !== 'injection' || last.origin.variant !== 'swarm_mode') return state;
   return resetFold(state.slice(0, -1)) as ContextMessage[];
 }
 
