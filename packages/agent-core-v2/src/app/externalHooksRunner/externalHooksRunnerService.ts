@@ -3,8 +3,14 @@
  *
  * Owns the configured-hook lifecycle: builds the event→hooks index from
  * `IConfigService` (`[[hooks]]`) + `IPluginService.enabledHooks()`, reloads it
- * on `plugin.onDidReload`, and dispatches each trigger through the pure
- * `runMatchedHooks`. The App-scope `IHostProcessService` is injected here and
+ * on plugin reload and on config change (the interactive TUI can (re)load
+ * `config.toml` into the layered config after app-scope construction, so the
+ * index must be rebuilt or late `[[hooks]]` would silently never fire, #2779),
+ * and dispatches each trigger through the pure
+ * `runMatchedHooks`. Rebuilds are serialized on a chain that triggers await,
+ * and a burst of config events coalesces into a single rebuild; a failed
+ * rebuild is logged (not silently swallowed) and the runner keeps failing
+ * open. The App-scope `IHostProcessService` is injected here and
  * threaded down to `runHook`, so hook commands spawn through the shared host
  * process service (cross-platform kill, hidden console on Windows) rather than
  * `node:child_process` directly. Per-call caller facts (`cwd` defaulting to
@@ -18,8 +24,10 @@ import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Emitter, type Event } from '#/_base/event';
+import { toErrorMessage } from '#/_base/errors/errorMessage';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
+import { ILogService } from '#/_base/log/log';
 import { IPluginService } from '#/app/plugin/plugin';
 import { HOOKS_SECTION, type HookDefConfig } from '#/agent/externalHooks/configSection';
 import type { HookBlockDecision, HookDef, HookResult } from '#/agent/externalHooks/types';
@@ -38,6 +46,11 @@ export class ExternalHooksRunnerService extends Disposable implements IExternalH
 
   private byEvent = new Map<string, HookDef[]>();
   readonly ready: Promise<void>;
+  // Serializes index rebuilds (a trigger that lands right after a config
+  // change awaits the newest rebuild) and coalesces a burst of config events
+  // into a single rebuild — only the final config state matters.
+  private reloadChain: Promise<void> = Promise.resolve();
+  private reloadQueued = false;
 
   private readonly _onDidReload = this._register(new Emitter<void>());
   readonly onDidReload: Event<void> = this._onDidReload.event;
@@ -47,15 +60,28 @@ export class ExternalHooksRunnerService extends Disposable implements IExternalH
     @IPluginService private readonly plugins: IPluginService,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IHostProcessService private readonly hostProcess: IHostProcessService,
+    @ILogService private readonly log: ILogService,
     private readonly callbacks: HookRunCallbacks = {},
   ) {
     super();
     this.ready = this.loadSafe();
     this._register(
       this.plugins.onDidReload(() => {
-        void this.reloadSafe();
+        this.queueReload();
       }),
     );
+    // Rebuild the hook index when the config changes, not just on plugin
+    // reload: the user config file (`config.toml`) can be (re)loaded into the
+    // layered config service after this runner's initial load, and in the
+    // interactive TUI `[[hooks]]` may arrive late (#2779). The member check
+    // keeps the subscription a no-op against partial `IConfigService` stubs.
+    if (this.config.onDidChangeConfiguration !== undefined) {
+      this._register(
+        this.config.onDidChangeConfiguration(() => {
+          this.queueReload();
+        }),
+      );
+    }
   }
 
   get summary(): Record<string, number> {
@@ -101,6 +127,7 @@ export class ExternalHooksRunnerService extends Disposable implements IExternalH
     args: ExternalHooksRunnerTriggerArgs,
   ): Promise<HookResult[]> {
     await this.ready;
+    await this.reloadChain;
     return runMatchedHooks(
       this.hostProcess,
       this.byEvent,
@@ -120,13 +147,22 @@ export class ExternalHooksRunnerService extends Disposable implements IExternalH
   private async loadSafe(): Promise<void> {
     try {
       await this.load();
-    } catch {}
+    } catch (error) {
+      this.log.error('external hooks: failed to load the hook index', {
+        error: toErrorMessage(error),
+      });
+    }
   }
 
-  private async reloadSafe(): Promise<void> {
-    try {
-      await this.load();
-    } catch {}
+  private queueReload(): void {
+    if (this.reloadQueued) return;
+    this.reloadQueued = true;
+    this.reloadChain = this.reloadChain
+      .catch(() => undefined)
+      .then(() => {
+        this.reloadQueued = false;
+        return this.loadSafe();
+      });
   }
 
   private async load(): Promise<void> {

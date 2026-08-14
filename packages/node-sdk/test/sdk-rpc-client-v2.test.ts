@@ -9,7 +9,7 @@
  */
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   FileTokenStorage,
@@ -32,11 +32,15 @@ import { foldAgentWireReplay } from '#/v2/resume-replay';
 import {
   drainQueryStoreDisposals,
   drainSessionIndexMirror,
+  ensureMainAgent,
+  getLiveSessionById,
   HostProcessError,
+  IAgentProfileService,
   IHostRequestHeaders,
   ISessionLifecycleService,
   IWorkspaceLifecycleService,
   OsProcessErrors,
+  type ProfileData,
 } from '@moonshot-ai/agent-core-v2';
 
 import { McpOAuthService } from '../../agent-core/src/mcp/oauth/service';
@@ -1114,10 +1118,216 @@ describe('removeProviderFromConfig', () => {
   });
 });
 
+describe('SDKRpcClientV2.createSession startup agent profile', () => {
+  it('binds the --agent profile so its tools/disallowedTools policy applies to the interactive main agent', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-home-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-work-'));
+    tempDirs.push(workDir);
+    await writeTestModelConfig(homeDir);
+    await writeAgentFile(join(homeDir, 'agents', 'restricted.md'), {
+      name: 'restricted',
+      description: 'Read-only test agent with a tools allowlist.',
+      tools: ['Read', 'Glob'],
+      disallowedTools: ['Bash'],
+      prompt: 'You are a read-only test agent.',
+    });
+    const rpc = new SDKRpcClientV2({ homeDir, identity: TEST_IDENTITY });
+    try {
+      const summary = await rpc.createSession({
+        workDir,
+        model: TEST_MODEL,
+        agentProfile: 'restricted',
+      });
+      const data = await mainAgentProfileData(rpc, summary.id);
+      expect(data.profileName).toBe('restricted');
+      expect(data.activeToolNames).toEqual(['Read', 'Glob']);
+      expect(data.disallowedTools).toEqual(['Bash']);
+    } finally {
+      await rpc.close();
+    }
+  });
+
+  it('falls back to the default profile when no --agent is selected', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-home-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-work-'));
+    tempDirs.push(workDir);
+    await writeTestModelConfig(homeDir);
+    const rpc = new SDKRpcClientV2({ homeDir, identity: TEST_IDENTITY });
+    try {
+      const summary = await rpc.createSession({ workDir, model: TEST_MODEL });
+      const data = await mainAgentProfileData(rpc, summary.id);
+      expect(data.profileName).toBe('agent');
+    } finally {
+      await rpc.close();
+    }
+  });
+
+  it('binds an --agent-file profile supplied solely through createSession agentFiles', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-home-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-work-'));
+    tempDirs.push(workDir);
+    await writeTestModelConfig(homeDir);
+    // Supplied only through the session's `agentFiles`: the file lives at the
+    // workDir root — not under <homeDir>/agents and not under any project
+    // agent root (.kimi-code/agents / .agents/agents) — so only the engine's
+    // explicit loader (seeded by this client) can register it for the bind.
+    const agentFilePath = join(workDir, 'explicit-only.md');
+    await writeAgentFile(agentFilePath, {
+      name: 'explicit-only',
+      description: 'Agent-file-only profile for the interactive --agent-file bind.',
+      tools: ['Read', 'Glob'],
+      prompt: 'You are an explicit agent-file-only profile.',
+    });
+    const rpc = new SDKRpcClientV2({ homeDir, identity: TEST_IDENTITY });
+    try {
+      const summary = await rpc.createSession({
+        workDir,
+        model: TEST_MODEL,
+        agentFiles: [agentFilePath],
+      });
+      const data = await mainAgentProfileData(rpc, summary.id);
+      expect(data.profileName).toBe('explicit-only');
+      expect(data.activeToolNames).toEqual(['Read', 'Glob']);
+    } finally {
+      await rpc.close();
+    }
+  });
+
+  it('binds a profile registered through the client-level agentFiles option', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-home-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-work-'));
+    tempDirs.push(workDir);
+    const explicitDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-explicit-'));
+    tempDirs.push(explicitDir);
+    await writeTestModelConfig(homeDir);
+    // Outside every discovery root: the profile can only reach the catalog
+    // through the client-level `agentFiles` registration (the channel the
+    // harness forwards for the whole launch).
+    const agentFilePath = join(explicitDir, 'launch-only.md');
+    await writeAgentFile(agentFilePath, {
+      name: 'launch-only',
+      description: 'Registered at client construction (the harness --agent-file channel).',
+      tools: ['Read', 'Glob'],
+      prompt: 'You are a launch-registered profile.',
+    });
+    const rpc = new SDKRpcClientV2({
+      homeDir,
+      identity: TEST_IDENTITY,
+      agentFiles: [agentFilePath],
+    });
+    try {
+      const summary = await rpc.createSession({
+        workDir,
+        model: TEST_MODEL,
+        agentProfile: 'launch-only',
+      });
+      const data = await mainAgentProfileData(rpc, summary.id);
+      expect(data.profileName).toBe('launch-only');
+      expect(data.systemPrompt).toContain('launch-registered profile.');
+    } finally {
+      await rpc.close();
+    }
+  });
+
+  it('does not leak a per-session --agent-file into a later session created without files', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-home-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-profile-work-'));
+    tempDirs.push(workDir);
+    await writeTestModelConfig(homeDir);
+    // Deliberately named after the builtin default profile: while registered,
+    // the explicit file shadows the builtin for the whole catalog.
+    const agentFilePath = join(workDir, 'agent.md');
+    await writeAgentFile(agentFilePath, {
+      name: 'agent',
+      description: 'Shadows the builtin default while registered.',
+      prompt: 'Shadowed default prompt.',
+    });
+    const rpc = new SDKRpcClientV2({ homeDir, identity: TEST_IDENTITY });
+    try {
+      const first = await rpc.createSession({
+        workDir,
+        model: TEST_MODEL,
+        agentProfile: 'agent',
+        agentFiles: [agentFilePath],
+      });
+      expect((await mainAgentProfileData(rpc, first.id)).systemPrompt).toContain(
+        'Shadowed default prompt.',
+      );
+      // A later session without files must not inherit the per-session file:
+      // its default bind resolves the builtin profile, not the shadow.
+      const later = await rpc.createSession({ workDir, model: TEST_MODEL });
+      expect((await mainAgentProfileData(rpc, later.id)).systemPrompt).not.toContain(
+        'Shadowed default prompt.',
+      );
+    } finally {
+      await rpc.close();
+    }
+  });
+});
+
 async function writeSkill(dir: string, name: string): Promise<void> {  await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, 'SKILL.md'),
     `---\nname: ${name}\ndescription: Skill ${name} for the escape-hatch test\n---\n\nBody of ${name}.\n`,
     'utf-8',
   );
+}
+
+const TEST_MODEL = 'kimi-test-model';
+
+async function writeTestModelConfig(homeDir: string): Promise<void> {
+  await writeFile(
+    join(homeDir, 'config.toml'),
+    `
+[providers.local]
+type = "kimi"
+base_url = "https://example.test/v1"
+api_key = "sk-test"
+
+[models."${TEST_MODEL}"]
+provider = "local"
+model = "${TEST_MODEL}"
+max_context_size = 1000
+`,
+    'utf-8',
+  );
+}
+
+async function writeAgentFile(
+  path: string,
+  def: {
+    readonly name: string;
+    readonly description: string;
+    readonly tools?: readonly string[];
+    readonly disallowedTools?: readonly string[];
+    readonly prompt: string;
+  },
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const lines = ['---', `name: ${def.name}`, `description: ${def.description}`];
+  if (def.tools !== undefined) {
+    lines.push('tools:');
+    lines.push(...def.tools.map((tool) => `  - ${tool}`));
+  }
+  if (def.disallowedTools !== undefined) {
+    lines.push('disallowedTools:');
+    lines.push(...def.disallowedTools.map((tool) => `  - ${tool}`));
+  }
+  lines.push('---', '', def.prompt, '');
+  await writeFile(path, lines.join('\n'), 'utf-8');
+}
+
+/** The profile the session's main agent is actually bound to. */
+async function mainAgentProfileData(rpc: SDKRpcClientV2, sessionId: string): Promise<ProfileData> {
+  const session = getLiveSessionById(rpc.engineAccessor, sessionId);
+  if (session === undefined) {
+    throw new Error(`live session "${sessionId}" not found`);
+  }
+  const agent = await ensureMainAgent(session);
+  return agent.accessor.get(IAgentProfileService).data();
 }

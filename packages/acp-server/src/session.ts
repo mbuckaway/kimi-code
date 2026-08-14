@@ -13,6 +13,14 @@
  * settles gracefully with `end_turn`, mirroring the engine's `PromptHandle`
  * behavior.
  *
+ * Events are attributed per-turn: while a client `session/prompt` is in
+ * flight only its turn's events stream (see {@link AcpSession.forwardingFor}).
+ * With no prompt in flight the turn is internally triggered — cron fire /
+ * catch-up and background-task terminal notifications enqueue engine turns
+ * that run and persist but used to stream nothing to the ACP client — so
+ * those events are forwarded too, keeping the client's view in sync with the
+ * engine.
+ *
  * KLIENT GAPS (all reported; each marked `KLIENT-GAP` inline):
  *  - no session MCP connection view / compaction service → the `/mcp` and
  *    `/compact` builtin slash commands answer with an explanatory notice
@@ -30,7 +38,7 @@ import type {
   ToolCallLocation,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import type { ContextMessage } from '@moonshot-ai/agent-core-v2';
+import type { ContextMessage, PermissionMode } from '@moonshot-ai/agent-core-v2';
 import type {
   AgentEventPayloads,
   AgentHandle,
@@ -84,7 +92,13 @@ import {
 import { AcpInteractionBridge } from './interaction-bridge';
 import { log } from './log';
 import { projectModelCatalog } from './model-catalog';
-import { ACP_MODES, type AcpModeId, acpModeToToggles, DEFAULT_MODE_ID } from './modes';
+import {
+  ACP_MODES,
+  type AcpModeId,
+  acpModeFromState,
+  acpModeToToggles,
+  DEFAULT_MODE_ID,
+} from './modes';
 import { projectHistoryToSessionUpdates } from './replay';
 import { buildAcpSkillSlashCommands, detectSlashIntent } from './slash';
 
@@ -256,6 +270,15 @@ export class AcpSession {
      * shared temp-dir fallback applies.
      */
     private readonly resolveOriginalsDir?: (sessionId: string) => string | undefined,
+    /**
+     * Resolve the live engine permission mode for a session
+     * (Agent-scope `IAgentPermissionModeService.mode`). This is a
+     * composition-root concern (it reads the live engine scope tree, not the
+     * klient facade) — `start.ts` builds it from the bootstrapped App scope,
+     * mirroring `resolveOriginalsDir`. Undefined / returning undefined →
+     * `init()` falls back to the `defaultPermissionMode` config value.
+     */
+    private readonly resolvePermissionMode?: (sessionId: string) => PermissionMode | undefined,
     private readonly hostCommands:
       | ReadonlyArray<AvailableCommand>
       | HostSlashCommandsSnapshot = [],
@@ -351,9 +374,10 @@ export class AcpSession {
     try {
       this.currentModelId = await this.agent.getModel();
       this.currentThinkingLevel = await this.agent.getThinking();
+      this.currentModeId = await this.resolveCurrentMode();
     } catch (error) {
       // Keep the unbound defaults — configOptions stays honest.
-      log.warn('acp: could not seed model/thinking state', {
+      log.warn('acp: could not seed model/thinking/mode state', {
         sessionId: this.sessionId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -361,6 +385,40 @@ export class AcpSession {
     // Awaited: the post-`session/new` `available_commands_update` must already
     // carry the skills (see `activateSession`).
     await this.refreshSkills();
+  }
+
+  /**
+   * Seed `currentModeId` from the engine's LIVE plan / permission state — the
+   * inverse of {@link setMode}'s toggles — so the advertised `modes` /
+   * `mode` config-option reflect the mode the engine genuinely runs, not the
+   * stale `DEFAULT_MODE_ID`:
+   *   - plan state via `agent.getPlan()` (non-null → plan mode active);
+   *   - permission via {@link resolvePermissionMode} (the composition-root
+   *     engine-scope read — a restored session reports its persisted
+   *     `permission.set_mode` override, not the config default).
+   * Without a live resolver the engine's bootstrap behavior is mirrored: the
+   * `defaultPermissionMode` config value when set, else `'manual'` (the wire
+   * model's initial value).
+   */
+  private async resolveCurrentMode(): Promise<AcpModeId> {
+    const plan = await this.agent.getPlan();
+    const permission = this.resolvePermissionMode?.(this.sessionId);
+    if (permission !== undefined) return acpModeFromState(plan !== null, permission);
+    try {
+      const inspected = await this.klient.global.config.inspect<PermissionMode>(
+        'defaultPermissionMode',
+      );
+      const configured = inspected.value;
+      if (configured === 'manual' || configured === 'auto' || configured === 'yolo') {
+        return acpModeFromState(plan !== null, configured);
+      }
+    } catch (error) {
+      log.warn('acp: could not read defaultPermissionMode', {
+        sessionId: this.sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return acpModeFromState(plan !== null, 'manual');
   }
 
   /** Refresh the skill cache from the session catalog (best-effort). */
@@ -725,27 +783,35 @@ export class AcpSession {
     action();
   }
 
-  /** The active driver, but only for events of ITS turn. */
-  private driverFor(turnId: number): TurnDriver | undefined {
+  /**
+   * Whether turn-scoped events for `turnId` should stream to the client. With
+   * a client `session/prompt` in flight only events of ITS turn are forwarded
+   * (a still-draining prior turn is dropped — the same verdict the live path
+   * gives). With NO prompt in flight the turn is internally triggered — cron
+   * fire/catch-up and background-task terminal notifications enqueue engine
+   * turns (`SteerStepRequest` / `TaskNotificationStepRequest`) that run and
+   * persist in the engine but used to stream nothing to the ACP client — so
+   * every event is forwarded, keeping the client's view in sync with the
+   * engine's live state.
+   */
+  private forwardingFor(turnId: number): boolean {
     const driver = this.driver;
-    if (driver === undefined || driver.turnId === undefined || driver.turnId !== turnId) {
-      return undefined;
-    }
-    return driver;
+    if (driver === undefined) return true;
+    return driver.turnId === turnId;
   }
 
   private onAssistantDelta(event: AgentEventPayloads['assistant.delta']): void {
-    if (this.driverFor(event.turnId) === undefined) return;
+    if (!this.forwardingFor(event.turnId)) return;
     this.emit(assistantDeltaToSessionUpdate(this.sessionId, event));
   }
 
   private onThinkingDelta(event: AgentEventPayloads['thinking.delta']): void {
-    if (this.driverFor(event.turnId) === undefined) return;
+    if (!this.forwardingFor(event.turnId)) return;
     this.emit(thinkingDeltaToSessionUpdate(this.sessionId, event));
   }
 
   private onToolCallStarted(event: AgentEventPayloads['tool.call.started']): void {
-    if (this.driverFor(event.turnId) === undefined) return;
+    if (!this.forwardingFor(event.turnId)) return;
     // The klient payload mirrors `ToolCallStartedEvent` (`args` / `display`
     // arrive as `unknown` — cast at this seam).
     const mapped = event as unknown as ToolCallStartedEvent;
@@ -787,7 +853,7 @@ export class AcpSession {
   }
 
   private onToolCallDelta(event: AgentEventPayloads['tool.call.delta']): void {
-    if (this.driverFor(event.turnId) === undefined) return;
+    if (!this.forwardingFor(event.turnId)) return;
     // The klient payload mirrors `ToolCallDeltaEvent` field-for-field.
     const mapped = event as unknown as ToolCallDeltaEvent;
     const key = acpToolCallId(event.turnId, event.toolCallId);
@@ -809,7 +875,7 @@ export class AcpSession {
   }
 
   private onToolProgress(event: AgentEventPayloads['tool.progress']): void {
-    if (this.driverFor(event.turnId) === undefined) return;
+    if (!this.forwardingFor(event.turnId)) return;
     // The klient payload mirrors `ToolProgressEvent` field-for-field; the
     // helper forwards only `status` updates with text (as a title refresh)
     // and returns null for everything else, which `emit` drops.
@@ -817,7 +883,7 @@ export class AcpSession {
   }
 
   private onToolResult(event: AgentEventPayloads['tool.result']): void {
-    if (this.driverFor(event.turnId) === undefined) return;
+    if (!this.forwardingFor(event.turnId)) return;
     const key = acpToolCallId(event.turnId, event.toolCallId);
     const locations = this.toolLocations.get(key);
     this.toolLocations.delete(key);
@@ -905,8 +971,11 @@ export class AcpSession {
   }
 
   private onTurnEnded(event: AgentEventPayloads['turn.ended']): void {
-    const driver = this.driverFor(event.turnId);
-    if (driver === undefined) return;
+    // Only a client-prompt turn has a driver to settle; an internal turn's
+    // `turn.ended` has no wire representation (the existing dispatch path maps
+    // turn settlement to the prompt response, not a `session/update`).
+    const driver = this.driver;
+    if (driver === undefined || driver.turnId !== event.turnId) return;
     const error = event.error as { readonly code: string; readonly message?: string } | undefined;
     this.settleDriver(driver, () => {
       // Auth failures must surface as a JSON-RPC `auth_required` error

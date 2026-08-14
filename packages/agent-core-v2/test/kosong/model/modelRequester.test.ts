@@ -18,7 +18,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { isError2 } from '#/_base/errors/errors';
-import { APIStatusError, createAbortError } from '#/kosong/contract/errors';
+import {
+  APIContextOverflowError,
+  APIStatusError,
+  createAbortError,
+} from '#/kosong/contract/errors';
 import type { Message, StreamedMessagePart } from '#/kosong/contract/message';
 import type {
   ChatProvider,
@@ -89,6 +93,22 @@ function streamOf(
   };
 }
 
+function stalledStreamOf(parts: readonly StreamedMessagePart[]): StreamedMessage {
+  return {
+    id: 'stall-1',
+    usage: emptyUsage(),
+    finishReason: 'completed',
+    rawFinishReason: 'stop',
+    traceId: null,
+    async *[Symbol.asyncIterator]() {
+      for (const part of parts) {
+        yield part;
+      }
+      await new Promise<void>(() => {});
+    },
+  };
+}
+
 function registryReturning(provider: ChatProvider): IProtocolAdapterRegistry {
   return {
     _serviceBrand: undefined,
@@ -139,6 +159,18 @@ async function collect(stream: AsyncIterable<ModelRequestEvent>): Promise<ModelR
   const events: ModelRequestEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
+}
+
+async function collectWithFailure(
+  stream: AsyncIterable<ModelRequestEvent>,
+): Promise<{ events: ModelRequestEvent[]; error: unknown }> {
+  const events: ModelRequestEvent[] = [];
+  try {
+    for await (const event of stream) events.push(event);
+    return { events, error: undefined };
+  } catch (error) {
+    return { events, error };
+  }
 }
 
 const INPUT = { systemPrompt: 'sys', tools: [], messages: [] };
@@ -261,6 +293,29 @@ describe('ModelRequesterImpl request execution', () => {
     expect(provider.calls).toHaveLength(2);
   });
 
+  it('does not force a token refresh for a context-limit 401', async () => {
+    const provider = new FakeChatProvider();
+    provider.handler = () =>
+      Promise.reject(new APIContextOverflowError(401, 'k3-256k supports only 256K context.'));
+    const authCalls: Array<{ force?: boolean }> = [];
+    const requester = new ModelRequesterImpl(
+      modelWith({
+        canRefresh: true,
+        getAuth: (options) => {
+          authCalls.push(options ?? {});
+          return Promise.resolve({ apiKey: 'tok-1' });
+        },
+      }),
+      registryReturning(provider),
+    );
+
+    const failure = await collect(requester.request(INPUT)).catch((error: unknown) => error);
+    expect(provider.calls).toHaveLength(1);
+    expect(authCalls).toEqual([{}]);
+    expect((failure as { code: string }).code).toBe(ProtocolErrors.codes.CONTEXT_OVERFLOW);
+    expect((failure as Error).message).toContain('supports only 256K context');
+  });
+
   it('does not replay 401s against a non-refreshable auth provider', async () => {
     const provider = new FakeChatProvider();
     provider.handler = () => Promise.reject(new APIStatusError(401, 'bad key'));
@@ -285,6 +340,21 @@ describe('ModelRequesterImpl request execution', () => {
     provider.handler = () => Promise.reject(abort);
     const aborted = await collect(requester.request(INPUT)).catch((error: unknown) => error);
     expect(aborted).toBe(abort);
+  });
+
+  it('aborts the request when the provider stream stalls mid-stream', async () => {
+    const provider = new FakeChatProvider();
+    provider.handler = () => Promise.resolve(stalledStreamOf([{ type: 'text', text: 'partial' }]));
+    const requester = new ModelRequesterImpl(modelWith(staticAuth()), registryReturning(provider));
+
+    const { events, error } = await collectWithFailure(
+      requester.request(INPUT, undefined, { stallTimeoutMs: 25 }),
+    );
+
+    expect(error).toBeInstanceOf(DOMException);
+    expect((error as DOMException).name).toBe('AbortError');
+    expect(events.filter((event) => event.type === 'part')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'finish')).toBe(false);
   });
 
   it('uploadVideo presence is the capability declaration', async () => {

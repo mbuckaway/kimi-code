@@ -26,6 +26,8 @@ export type {
   ToolExecution,
   ToolCall,
   ExecutableToolContext,
+  RuleMatchContext,
+  RuleMatchDecision,
   ToolExecutionHookContext,
   ResolvedToolExecutionHookContext,
   PrepareToolExecutionHook,

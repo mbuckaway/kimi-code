@@ -48,6 +48,7 @@ describe('acp-server config surface', () => {
     altThinking?: boolean;
     altSupportEfforts?: readonly string[];
     altDefaultEffort?: string;
+    defaultPermissionMode?: 'manual' | 'auto' | 'yolo';
   }): Promise<TestClient> {
     homeDir = await mkdtemp(join(tmpdir(), 'acp-config-'));
     if (opts?.fakeModel === true) {
@@ -58,6 +59,7 @@ describe('acp-server config surface', () => {
         altThinking: opts?.altThinking === true,
         altSupportEfforts: opts?.altSupportEfforts,
         altDefaultEffort: opts?.altDefaultEffort,
+        defaultPermissionMode: opts?.defaultPermissionMode,
       });
     }
     client = await createTestClient({ homeDir });
@@ -99,6 +101,62 @@ describe('acp-server config surface', () => {
         'auto',
         'yolo',
       ]);
+    },
+    30_000,
+  );
+
+  it(
+    'session/new seeds the mode from the engine permission posture (defaultPermissionMode yolo)',
+    async () => {
+      // The engine applies `defaultPermissionMode` at main-agent bootstrap, so
+      // the advertised mode must be the engine's live posture — not the stale
+      // DEFAULT_MODE_ID ('default') the session used to project.
+      await boot({ fakeModel: true, defaultPermissionMode: 'yolo' });
+      const { configOptions, modes } = await newSession();
+      const mode = configOptions.find((o) => o.id === 'mode')!;
+      expect(mode.currentValue).toBe('yolo');
+      expect(modes?.currentModeId).toBe('yolo');
+    },
+    30_000,
+  );
+
+  it(
+    'session/load re-seeds the mode from the restored engine permission posture',
+    async () => {
+      await boot({ fakeModel: true, defaultPermissionMode: 'yolo' });
+      const { sessionId } = await newSession();
+      // The bootstrap `permission.set_mode` op persisted; close then load so
+      // the engine re-materializes the session and replays the op.
+      await client!.send('session/close', { sessionId });
+      const loaded = (await client!.send('session/load', {
+        sessionId,
+        cwd: homeDir,
+        mcpServers: [],
+      })) as NewSessionResult;
+      expect(loaded.modes?.currentModeId).toBe('yolo');
+      expect(loaded.configOptions.find((o) => o.id === 'mode')?.currentValue).toBe('yolo');
+    },
+    30_000,
+  );
+
+  it(
+    'session/load reflects a persisted session/set_mode override, not the config default',
+    async () => {
+      // No defaultPermissionMode configured → the engine runs 'manual'. A
+      // client-driven `session/set_mode auto` persists a `permission.set_mode`
+      // op; after close + load the restored engine state must win over the
+      // config default.
+      await boot({ fakeModel: true });
+      const { sessionId } = await newSession();
+      await client!.send('session/set_mode', { sessionId, modeId: 'auto' });
+      await client!.send('session/close', { sessionId });
+      const loaded = (await client!.send('session/load', {
+        sessionId,
+        cwd: homeDir,
+        mcpServers: [],
+      })) as NewSessionResult;
+      expect(loaded.modes?.currentModeId).toBe('auto');
+      expect(loaded.configOptions.find((o) => o.id === 'mode')?.currentValue).toBe('auto');
     },
     30_000,
   );

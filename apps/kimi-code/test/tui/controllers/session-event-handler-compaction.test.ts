@@ -56,6 +56,7 @@ function makeHost() {
     restoreInputText: vi.fn(),
     appendTranscriptEntry: vi.fn(),
     sendNormalUserInput: vi.fn(),
+    refreshWireTipFromDisk: vi.fn(),
     sendQueuedMessage: vi.fn(),
     shiftQueuedMessage: vi.fn(),
     btwPanelController: { routeEvent: vi.fn(() => false) },

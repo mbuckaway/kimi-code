@@ -1,6 +1,6 @@
-import { type ToolCall } from '#/kosong/contract/message';
-import { emptyUsage } from '#/kosong/contract/usage';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { type ToolCall, type StreamedMessagePart } from '#/kosong/contract/message';
+import { emptyUsage, type TokenUsage } from '#/kosong/contract/usage';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IDisposable } from '#/_base/di/lifecycle';
 import { IAgentProfileService } from '#/index';
@@ -11,6 +11,14 @@ import { IAgentGoalService } from '#/agent/goal/goal';
 import { IAgentLoopService, type Turn } from '#/agent/loop/loop';
 import { ContinuationStepRequest, MessageStepRequest } from '#/agent/loop/stepRequest';
 import { RetryStepRequest } from '#/agent/prompt/promptStepRequests';
+import type {
+  ChatProvider,
+  FinishReason,
+  StreamedMessage,
+} from '#/kosong/contract/provider';
+import { STREAM_STALL_TIMEOUT_ENV } from '#/kosong/contract/stallTimeout';
+import { IProtocolAdapterRegistry } from '#/kosong/protocol/protocol';
+import { ProtocolAdapterRegistry } from '#/kosong/provider/protocolAdapterRegistry';
 import type { ExecutableTool } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentUsageService } from '#/agent/usage/usage';
@@ -19,6 +27,7 @@ import { userCancellationReason } from '#/_base/utils/abort';
 
 import {
   agentService,
+  appServices,
   createTestAgent,
   permissionModeServices,
   type TestAgentContext,
@@ -27,6 +36,42 @@ import {
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 
 type GenerateFn = NonNullable<TestAgentOptions['generate']>;
+
+class StalledProviderStream implements StreamedMessage {
+  readonly id: string | null = 'stall-1';
+  readonly usage: TokenUsage | null = emptyUsage();
+  readonly finishReason: FinishReason | null = 'completed';
+  readonly rawFinishReason: string | null = 'stop';
+  readonly traceId: string | null = null;
+
+  async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
+    yield { type: 'text', text: 'partial answer' };
+    await new Promise<void>(() => {});
+  }
+}
+
+function stalledProviderRegistry(): IProtocolAdapterRegistry {
+  const real = new ProtocolAdapterRegistry();
+  const provider: ChatProvider = {
+    name: 'kimi',
+    modelName: 'mock-model',
+    thinkingEffort: null,
+    generate: async (): Promise<StreamedMessage> => new StalledProviderStream(),
+  };
+  return {
+    _serviceBrand: undefined,
+    supportedProtocols: () => real.supportedProtocols(),
+    resolveAdapterIdentity: (protocol, providerType) =>
+      real.resolveAdapterIdentity(protocol, providerType),
+    resolveProviderBaseId: (protocol, providerType) =>
+      real.resolveProviderBaseId(protocol, providerType),
+    resolveCapability: (protocol, modelName, providerType) =>
+      real.resolveCapability(protocol, modelName, providerType),
+    explainCapability: (protocol, modelName, providerType) =>
+      real.explainCapability(protocol, modelName, providerType),
+    createChatProvider: () => provider,
+  } as IProtocolAdapterRegistry;
+}
 
 describe('Agent loop', () => {
   let ctx: TestAgentContext;
@@ -279,6 +324,47 @@ describe('Agent loop', () => {
 
     expect(result.type).toBe('cancelled');
     expect(called).toBe(false);
+  });
+
+  it('persists the partial stream and ends the turn when the provider stream stalls', async () => {
+    const local = createTestAgent(
+      appServices((reg) =>
+        reg.defineInstance(IProtocolAdapterRegistry, stalledProviderRegistry()),
+      ),
+    );
+    vi.stubEnv(STREAM_STALL_TIMEOUT_ENV, '40');
+    try {
+      local.get(IAgentProfileService).update({ activeToolNames: [] });
+      await local.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
+      await local.untilTurnEnd();
+
+      const turnEnded = local.allEvents.find(
+        (entry) => entry.type === '[rpc]' && entry.event === 'turn.ended',
+      );
+      expect(turnEnded?.args).toMatchObject({ turnId: 0, reason: 'cancelled' });
+
+      const interrupted = local.allEvents.find(
+        (entry) => entry.type === '[rpc]' && entry.event === 'turn.step.interrupted',
+      );
+      expect(interrupted?.args).toMatchObject({ step: 1, reason: 'aborted' });
+
+      const records = await local.persistedWireRecords();
+      const partialParts = records.filter(
+        (record) =>
+          record.type === 'context.append_loop_event' &&
+          (record as { event?: { type?: string } }).event?.type === 'content.part',
+      );
+      expect(partialParts).toContainEqual(
+        expect.objectContaining({
+          event: expect.objectContaining({
+            part: { type: 'text', text: 'partial answer' },
+          }),
+        }),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await local.dispose();
+    }
   });
 
   it('fails with the error handler error when recovery throws', async () => {

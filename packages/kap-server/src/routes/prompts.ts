@@ -11,6 +11,7 @@ import {
   IBootstrapService,
   IAgentLifecycleService,
   IAgentPermissionModeService,
+  IAgentPlanService,
   IAgentProfileService,
   IAgentToolPolicyService,
   IAgentPromptService,
@@ -119,6 +120,7 @@ async function resolvePromptFromSession(session: ISessionScopeHandle, agentId?: 
     profile: agent.accessor.get(IAgentProfileService),
     toolPolicy: agent.accessor.get(IAgentToolPolicyService),
     permissionMode: agent.accessor.get(IAgentPermissionModeService),
+    plan: agent.accessor.get(IAgentPlanService),
   };
 }
 
@@ -257,6 +259,17 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
         if (req.body.thinking !== undefined && !thinkingConsumed)
           resolved.profile.setThinking(req.body.thinking);
         if (req.body.permission_mode !== undefined) resolved.permissionMode.setMode(req.body.permission_mode);
+        if (req.body.plan_mode !== undefined) {
+          // Apply-only-when-set, idempotent like the agent_config dispatch:
+          // plan state changes only when it differs from the request, and an
+          // omitted field never touches it. The first prompt of a new Web
+          // session can therefore enter plan mode before its turn is enqueued.
+          const active = (await resolved.plan.status()) !== null;
+          if (active !== req.body.plan_mode) {
+            if (req.body.plan_mode) await resolved.plan.enter();
+            else resolved.plan.exit();
+          }
+        }
         if (req.body.disabled_tools !== undefined) {
           // A session denylist before bind throws `profile.not_bound` — map it
           // onto 40001 like the profile-selection errors above.

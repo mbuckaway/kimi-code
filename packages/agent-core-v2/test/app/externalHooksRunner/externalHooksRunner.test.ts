@@ -1,10 +1,13 @@
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
+import { Emitter } from '#/_base/event';
+import type { HookDef } from '#/agent/externalHooks/types';
 import type { ContentPart } from '#/kosong/contract/message';
 import { describe, expect, it, vi } from 'vitest';
 
 import { makeHookRunner } from '../../agent/externalHooks/runner-stub';
+import { stubLog } from '../../_base/log/stubs';
 
 function nodeCommand(source: string): string {
   return `node -e ${JSON.stringify(source.replaceAll(/\s*\n\s*/g, ' '))}`;
@@ -340,5 +343,111 @@ describe('ExternalHooksRunnerService', () => {
     expect(runner.hasHooksFor('PreToolUse')).toBe(true);
     expect(runner.hasHooksFor('SessionHeartbeat')).toBe(true);
     expect(runner.hasHooksFor('Stop')).toBe(false);
+  });
+
+  it('rebuilds the hook index when [[hooks]] arrive through a config change', async () => {
+    const hooks: HookDef[] = [];
+    const configChange = new Emitter<void>();
+    const runner = makeHookRunner(hooks, { onDidChangeConfiguration: configChange.event });
+
+    await runner.ready;
+    expect(runner.hasHooksFor('SessionStart')).toBe(false);
+    expect(runner.hasHooksFor('UserPromptSubmit')).toBe(false);
+
+    // The config gains a [[hooks]] section after the runner was constructed
+    // (the interactive TUI can load config.toml after app-scope construction).
+    // The runner must re-read the config instead of keeping the empty index
+    // forever, or the hooks would silently never fire (#2779).
+    hooks.push(
+      { event: 'SessionStart', command: nodeCommand('process.exit(0);'), timeout: 5 },
+      {
+        event: 'UserPromptSubmit',
+        matcher: 'hello',
+        command: nodeCommand('process.exit(0);'),
+        timeout: 5,
+      },
+    );
+    configChange.fire();
+
+    await vi.waitFor(() => {
+      expect(runner.hasHooksFor('SessionStart')).toBe(true);
+      expect(runner.hasHooksFor('UserPromptSubmit')).toBe(true);
+    });
+    await expect(runner.trigger('SessionStart')).resolves.toHaveLength(1);
+    await expect(
+      runner.trigger('UserPromptSubmit', { matcherValue: 'hello', inputData: {} }),
+    ).resolves.toHaveLength(1);
+  });
+
+  it('applies a rebuilt index to a trigger that lands right after the config change', async () => {
+    const hooks: HookDef[] = [];
+    const configChange = new Emitter<void>();
+    const runner = makeHookRunner(hooks, { onDidChangeConfiguration: configChange.event });
+
+    await runner.ready;
+    hooks.push({ event: 'SessionStart', command: nodeCommand('process.exit(0);'), timeout: 5 });
+    configChange.fire();
+
+    // No await between the event and the trigger: the trigger must wait for
+    // the in-flight rebuild instead of reading the stale empty index.
+    const results = await runner.trigger('SessionStart');
+    expect(results).toHaveLength(1);
+    expect(runner.hasHooksFor('SessionStart')).toBe(true);
+  });
+
+  it('coalesces a burst of config-change events into a single rebuild', async () => {
+    const hooks: HookDef[] = [];
+    const configChange = new Emitter<void>();
+    const runner = makeHookRunner(hooks, { onDidChangeConfiguration: configChange.event });
+    await runner.ready;
+
+    let reloads = 0;
+    runner.onDidReload(() => {
+      reloads += 1;
+    });
+
+    // A burst of config events (each config (re)load/set fires one). Only the
+    // final config state matters, so the runner must not rebuild per event.
+    hooks.push({ event: 'Stop', command: nodeCommand('process.exit(0);'), timeout: 5 });
+    configChange.fire();
+    configChange.fire();
+    configChange.fire();
+    hooks.push({ event: 'SessionStart', command: nodeCommand('process.exit(0);'), timeout: 5 });
+    configChange.fire();
+
+    await vi.waitFor(() => {
+      expect(runner.hasHooksFor('Stop')).toBe(true);
+      expect(runner.hasHooksFor('SessionStart')).toBe(true);
+    });
+    // Let any straggler rebuild land, then require the burst to have cost one.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reloads).toBe(1);
+  });
+
+  it('logs a failed index rebuild and keeps failing open', async () => {
+    const hooks: HookDef[] = [];
+    const configChange = new Emitter<void>();
+    const errors: string[] = [];
+    const log = { ...stubLog(), error: (message: string) => errors.push(message) };
+    const runner = makeHookRunner(hooks, {
+      onDidChangeConfiguration: configChange.event,
+      log,
+      enabledHooks: async () => {
+        throw new Error('plugin catalog unavailable');
+      },
+    });
+
+    await runner.ready;
+    expect(errors).toHaveLength(1);
+
+    hooks.push({ event: 'SessionStart', command: nodeCommand('process.exit(0);'), timeout: 5 });
+    configChange.fire();
+
+    await vi.waitFor(() => {
+      expect(errors).toHaveLength(2);
+    });
+    // Fail open: the trigger still resolves instead of throwing.
+    await expect(runner.trigger('SessionStart')).resolves.toEqual([]);
   });
 });

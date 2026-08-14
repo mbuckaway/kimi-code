@@ -431,11 +431,17 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     if (handle === undefined) return;
     await this.announceWillClose({ sessionId, handle, reason: 'exit' });
     this.sessions.delete(sessionId);
-    await this.drainAgents(handle);
-    await drainSessionMetadataWrites();
-    await this.indexMirror.drain();
-    handle.dispose();
-    this._onDidCloseSession.fire({ sessionId });
+    try {
+      await this.drainAgents(handle);
+      await drainSessionMetadataWrites();
+      await this.indexMirror.drain();
+    } finally {
+      // An agent removal failure (e.g. the wire flush in
+      // `AgentLifecycleService.remove`) must not leak the live scope or skip
+      // the close announcement — dispose always runs.
+      handle.dispose();
+      this._onDidCloseSession.fire({ sessionId });
+    }
   }
 
   async archive(sessionId: string): Promise<void> {

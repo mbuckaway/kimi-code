@@ -18,6 +18,16 @@
  *    that still carry a Claude marker (a `claude` substring or a bare family
  *    word like `sonnet-latest`); clearly non-Claude names served over the
  *    Anthropic protocol get no synthesized effort metadata.
+ *  - The auth-readiness probe resolves credentials in two stages: explicitly
+ *    configured credentials (inline `apiKey`, the provider's `env` bag,
+ *    `oauth`) are resolved first, in isolation from the ambient process env,
+ *    so a vendor key declared earlier in an endpoint chain can never outrank
+ *    the one the user configured, and an unrelated ambient key can never
+ *    invalidate a working oauth provider; only when nothing is configured
+ *    anywhere does the probe fall back to `process.env` through the vendor's
+ *    declared `apiKeyEnv` — the same source the request adapters read when
+ *    they build the request, keeping the gate no stricter than the code it
+ *    guards.
  */
 
 import { Error2 } from '#/_base/errors/errors';
@@ -62,25 +72,25 @@ export function resolveModelAuthMaterial(
   }
 
   const providerAuthType = args.provider?.type ?? args.model.protocol;
-  const providerEndpoint =
+  const configuredEndpoint =
     providerAuthType === undefined
       ? {}
       : explainProviderEndpoint(providerAuthType, args.provider?.env ?? {});
-  const providerApiKey = nonEmpty(args.provider?.apiKey) ?? nonEmpty(providerEndpoint.apiKey);
-  if (providerApiKey !== undefined && args.provider?.oauth !== undefined) {
+  const configuredApiKey = nonEmpty(args.provider?.apiKey) ?? nonEmpty(configuredEndpoint.apiKey);
+  if (configuredApiKey !== undefined && args.provider?.oauth !== undefined) {
     throw authConflictError('Provider', args.providerName);
   }
-  if (providerApiKey !== undefined) {
+  if (configuredApiKey !== undefined) {
     trace?.record(
       'resolved.auth',
       nonEmpty(args.provider?.apiKey) !== undefined
         ? { kind: 'config', detail: `provider '${args.providerName}' apiKey` }
         : {
             kind: 'env',
-            detail: `${providerEndpoint.apiKeyEnvName ?? '?'} (provider '${args.providerName}' env bag)`,
+            detail: `${configuredEndpoint.apiKeyEnvName ?? '?'} (provider '${args.providerName}' env bag)`,
           },
     );
-    return { apiKey: providerApiKey };
+    return { apiKey: configuredApiKey };
   }
   if (args.provider?.oauth !== undefined) {
     trace?.record('resolved.auth', {
@@ -91,6 +101,17 @@ export function resolveModelAuthMaterial(
       oauth: args.provider.oauth,
       oauthProviderKey: args.model.providerId ?? args.model.provider,
     };
+  }
+
+  const ambientEndpoint =
+    providerAuthType === undefined ? {} : explainProviderEndpoint(providerAuthType, process.env);
+  const ambientApiKey = nonEmpty(ambientEndpoint.apiKey);
+  if (ambientApiKey !== undefined) {
+    trace?.record('resolved.auth', {
+      kind: 'env',
+      detail: `${ambientEndpoint.apiKeyEnvName ?? '?'} (process env)`,
+    });
+    return { apiKey: ambientApiKey };
   }
   trace?.record('resolved.auth', {
     kind: 'none',

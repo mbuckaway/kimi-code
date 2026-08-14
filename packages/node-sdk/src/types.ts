@@ -118,6 +118,19 @@ export interface KimiHarnessOptions {
   readonly autoLoadConfig?: boolean | undefined;
   readonly uiMode?: string;
   readonly skillDirs?: readonly string[];
+  /**
+   * Explicit agent files (`--agent-file`) registered at the highest catalog
+   * priority. Registration is per harness, not per session: a session selects
+   * one of the profiles they define through
+   * {@link CreateSessionOptions.agentProfile}, and the profiles stay in the
+   * catalog for every later session this harness creates. Two harnesses in one
+   * process therefore have separate catalogs.
+   *
+   * `createKimiHarnessV2` only: the legacy harness ignores this option and
+   * takes explicit files per session through
+   * {@link CreateSessionOptions.agentFiles} instead.
+   */
+  readonly agentFiles?: readonly string[];
   readonly telemetry?: TelemetryClient | undefined;
   readonly onOAuthRefresh?: ((outcome: OAuthRefreshOutcome) => void) | undefined;
   readonly sessionStartedProperties?: TelemetryProperties;

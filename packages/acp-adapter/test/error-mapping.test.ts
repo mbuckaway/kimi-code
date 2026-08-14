@@ -212,6 +212,31 @@ describe('AcpServer error mapping', () => {
     ).rejects.toMatchObject({ code: -32000 });
   });
 
+  it('maps a session.prompt rejection carrying context.overflow to internalError (-32603) with the provider message preserved', async () => {
+    const sessionId = 'sess-context-overflow-reject';
+    const { session } = makeScriptedSession(sessionId, {
+      rejectWith: new KimiError(ErrorCodes.CONTEXT_OVERFLOW, 'k3-256k supports only 256K context.'),
+    });
+
+    const { agentStream, clientStream } = makeInMemoryStreamPair();
+    new AgentSideConnection((c) => new AcpServer(makeHarnessWithSession(session), c), agentStream);
+    const client = new ClientSideConnection(() => new StubClient(), clientStream);
+
+    await client.newSession({ cwd: '/tmp/x', mcpServers: [] });
+
+    let captured: unknown;
+    try {
+      await client.prompt({ sessionId, prompt: [textBlock('hi')] });
+    } catch (err) {
+      captured = err;
+    }
+    // A context-overflow failure must NOT surface as -32000 authRequired
+    // (re-login cannot fix an over-long context); it stays a generic JSON-RPC
+    // error whose message preserves the provider text (issue #2613).
+    expect(captured).toMatchObject({ code: -32603 });
+    expect((captured as { message?: string }).message).toContain('supports only 256K context');
+  });
+
   it('maps a generic session.prompt rejection to internalError (-32603) without leaking the stack', async () => {
     const sessionId = 'sess-generic-error';
     const stackTip = 'super-secret-stack-frame-do-not-leak';

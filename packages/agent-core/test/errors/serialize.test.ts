@@ -1,6 +1,11 @@
-import { APIProviderQuotaExhaustedError, APIStatusError } from '@moonshot-ai/kosong';
+import {
+  APIContextOverflowError,
+  APIProviderQuotaExhaustedError,
+  APIStatusError,
+} from '@moonshot-ai/kosong';
 import { describe, expect, it } from 'vitest';
 
+import { ErrorCodes } from '#/errors/codes';
 import { toKimiErrorPayload } from '#/errors/serialize';
 
 const NGINX_413_HTML =
@@ -46,6 +51,15 @@ describe('toKimiErrorPayload — APIStatusError message sanitization', () => {
     expect(toKimiErrorPayload(new APIStatusError(401, 'Unauthorized')).code).toBe(
       'provider.auth_error',
     );
+  });
+
+  it('maps a context-limit 401 (APIContextOverflowError) to context.overflow, not auth', () => {
+    const payload = toKimiErrorPayload(
+      new APIContextOverflowError(401, 'k3-256k supports only 256K context.'),
+    );
+    expect(payload.code).toBe(ErrorCodes.CONTEXT_OVERFLOW);
+    expect(payload.message).toBe('k3-256k supports only 256K context.');
+    expect(payload.details).toMatchObject({ statusCode: 401 });
   });
 });
 

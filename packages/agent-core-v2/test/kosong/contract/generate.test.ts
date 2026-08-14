@@ -9,8 +9,9 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { APIEmptyResponseError } from '#/kosong/contract/errors';
+import { APIEmptyResponseError, createAbortError } from '#/kosong/contract/errors';
 import { generate, type GenerateResult } from '#/kosong/contract/generate';
+import { STREAM_STALL_TIMEOUT_ENV } from '#/kosong/contract/stallTimeout';
 import type { Message, StreamedMessagePart, ToolCall } from '#/kosong/contract/message';
 import type {
   ChatProvider,
@@ -315,5 +316,175 @@ describe('generate() per-turn intent passthrough', () => {
 
     expect(generateSpy).toHaveBeenCalledTimes(1);
     expect(generateSpy.mock.calls[0]?.[3]).toBe(options);
+  });
+});
+
+class StalledStreamedMessage implements StreamedMessage {
+  readonly id: string | null = 'stall-1';
+  readonly usage: TokenUsage | null = USAGE;
+  readonly finishReason: FinishReason | null = 'completed';
+  readonly rawFinishReason: string | null = 'stop';
+  readonly traceId: string | null = null;
+  cancelCalls = 0;
+
+  constructor(private readonly parts: readonly StreamedMessagePart[]) {}
+
+  async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
+    for (const part of this.parts) {
+      yield part;
+    }
+    await new Promise<void>(() => {});
+  }
+
+  cancel(): void {
+    this.cancelCalls++;
+  }
+}
+
+class SlowedStreamedMessage implements StreamedMessage {
+  readonly id: string | null = 'slow-1';
+  readonly usage: TokenUsage | null = USAGE;
+  readonly finishReason: FinishReason | null = 'completed';
+  readonly rawFinishReason: string | null = 'stop';
+  readonly traceId: string | null = null;
+
+  constructor(
+    private readonly parts: readonly StreamedMessagePart[],
+    private readonly gapMs: number,
+  ) {}
+
+  async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
+    for (const part of this.parts) {
+      await new Promise((resolve) => setTimeout(resolve, this.gapMs));
+      yield part;
+    }
+  }
+}
+
+class SignalAwareStalledStream implements StreamedMessage {
+  readonly id: string | null = 'signal-stall-1';
+  readonly usage: TokenUsage | null = USAGE;
+  readonly finishReason: FinishReason | null = 'completed';
+  readonly rawFinishReason: string | null = 'stop';
+  readonly traceId: string | null = null;
+  cancelCalls = 0;
+
+  constructor(private readonly signal: AbortSignal) {}
+
+  async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
+    yield { type: 'text', text: 'first' };
+    await new Promise<never>((_resolve, reject) => {
+      this.signal.addEventListener('abort', () => reject(createAbortError()), { once: true });
+    });
+  }
+
+  cancel(): void {
+    this.cancelCalls++;
+  }
+}
+
+describe('generate() stream stall timeout', () => {
+  it('aborts a stream that yields no data for the stall window and cancels it', async () => {
+    const stream = new StalledStreamedMessage([{ type: 'text', text: 'partial' }]);
+    const { provider } = createFakeProvider(stream);
+
+    let caught: unknown;
+    try {
+      await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY, undefined, {
+        stallTimeoutMs: 25,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(DOMException);
+    expect((caught as DOMException).name).toBe('AbortError');
+    expect(stream.cancelCalls).toBe(1);
+  });
+
+  it('aborts a first-token stall before any chunk arrives', async () => {
+    const stream = new StalledStreamedMessage([]);
+    const { provider } = createFakeProvider(stream);
+
+    await expect(
+      generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY, undefined, { stallTimeoutMs: 25 }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('resets the stall window on every received chunk', async () => {
+    const stream = new SlowedStreamedMessage(
+      [
+        { type: 'text', text: 'a' },
+        { type: 'text', text: 'b' },
+        { type: 'text', text: 'c' },
+      ],
+      10,
+    );
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY, undefined, {
+      stallTimeoutMs: 30,
+    });
+
+    expect(result.message.content).toEqual([{ type: 'text', text: 'abc' }]);
+  });
+
+  it('applies the env-gated default stall window when not configured', async () => {
+    vi.stubEnv(STREAM_STALL_TIMEOUT_ENV, '25');
+    try {
+      const stream = new StalledStreamedMessage([{ type: 'text', text: 'partial' }]);
+      const { provider } = createFakeProvider(stream);
+
+      let caught: unknown;
+      try {
+        await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(DOMException);
+      expect((caught as DOMException).name).toBe('AbortError');
+      expect(stream.cancelCalls).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('does not interfere when the stall window is disabled', async () => {
+    const stream = new SlowedStreamedMessage(
+      [
+        { type: 'text', text: 'a' },
+        { type: 'text', text: 'b' },
+      ],
+      10,
+    );
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY, undefined, {
+      stallTimeoutMs: 0,
+    });
+
+    expect(result.message.content).toEqual([{ type: 'text', text: 'ab' }]);
+  });
+
+  it('does not double-abort when the caller signal aborts during a stall', async () => {
+    const controller = new AbortController();
+    const stream = new SignalAwareStalledStream(controller.signal);
+    const { provider } = createFakeProvider(stream);
+    setTimeout(() => controller.abort(), 10);
+
+    let caught: unknown;
+    try {
+      await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY, undefined, {
+        signal: controller.signal,
+        stallTimeoutMs: 500,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(DOMException);
+    expect((caught as DOMException).name).toBe('AbortError');
+    expect(stream.cancelCalls).toBe(0);
   });
 });

@@ -5,8 +5,8 @@
  * `ChatProvider.generate` and normalize the event stream": it merges streamed
  * deltas into a complete assistant `Message`, fires the caller's callbacks,
  * enforces the abort contract (standard abort DOMException, stream cancelled
- * on abort), and rejects empty or thinking-only responses with
- * `APIEmptyResponseError`.
+ * on abort), bounds silent stream idle gaps with the stall watchdog, and
+ * rejects empty or thinking-only responses with `APIEmptyResponseError`.
  */
 
 import { APIEmptyResponseError, createAbortError } from './errors';
@@ -20,6 +20,7 @@ import {
   type ToolCall,
 } from './message';
 import type { ChatProvider, FinishReason, GenerateOptions, StreamedMessage } from './provider';
+import { applyStreamStallTimeout, cancelStream, resolveStreamStallTimeoutMs } from './stallTimeout';
 import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
 
@@ -68,12 +69,21 @@ export async function generate(
 
   await throwIfAborted(options?.signal, stream);
 
+  const stallTimeoutMs = resolveStreamStallTimeoutMs(options?.stallTimeoutMs);
+  const iterable =
+    stallTimeoutMs > 0
+      ? applyStreamStallTimeout(stream, {
+          timeoutMs: stallTimeoutMs,
+          signal: options?.signal,
+        })
+      : stream;
+
   let serverDecodeMs = 0;
   let clientConsumeMs = 0;
   let firstPartAt: number | undefined;
   let lastResumeAt = 0;
 
-  for await (const part of stream) {
+  for await (const part of iterable) {
     const arrivedAt = Date.now();
     if (firstPartAt === undefined) {
       firstPartAt = arrivedAt;
@@ -179,23 +189,6 @@ export async function generate(
     return { ...result, traceId: stream.traceId };
   }
   return result;
-}
-
-type CancelableStream = StreamedMessage & {
-  cancel?: () => unknown;
-  return?: () => unknown;
-};
-
-async function cancelStream(stream: StreamedMessage): Promise<void> {
-  const cancelable = stream as CancelableStream;
-
-  try {
-    await cancelable.cancel?.();
-  } catch {}
-
-  try {
-    await cancelable.return?.();
-  } catch {}
 }
 
 async function throwIfAborted(signal?: AbortSignal, stream?: StreamedMessage): Promise<void> {

@@ -61,6 +61,7 @@ export interface ModelRequestParams {
   readonly maxCompletionTokens?: number;
   readonly usedContextTokens?: number;
   readonly maxContextTokens?: number;
+  readonly stallTimeoutMs?: number;
   readonly onTraceId?: (traceId: string | null) => void;
 }
 

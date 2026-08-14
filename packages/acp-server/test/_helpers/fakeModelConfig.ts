@@ -31,6 +31,12 @@ export interface FakeModelConfigOptions {
   readonly altThinking?: boolean;
   readonly altSupportEfforts?: readonly string[];
   readonly altDefaultEffort?: string;
+  /**
+   * Declare the engine's default permission posture
+   * (`defaultPermissionMode` config domain) — the mode a fresh main agent
+   * starts at. Absent → the engine's `'manual'` default.
+   */
+  readonly defaultPermissionMode?: 'manual' | 'auto' | 'yolo';
 }
 
 const configToml = (options?: FakeModelConfigOptions): string => {
@@ -40,9 +46,9 @@ const configToml = (options?: FakeModelConfigOptions): string => {
   const altThinking = options?.altThinking === true;
   const altEfforts = options?.altSupportEfforts;
   const altDefaultEffort = options?.altDefaultEffort;
+  const defaultPermissionMode = options?.defaultPermissionMode;
   return `defaultModel = "${FAKE_MODEL_ID}"
-
-[models.${FAKE_MODEL_ID}]
+${defaultPermissionMode !== undefined ? `defaultPermissionMode = "${defaultPermissionMode}"\n` : ''}[models.${FAKE_MODEL_ID}]
 name = "fake-model"
 protocol = "openai"
 baseUrl = "http://localhost"

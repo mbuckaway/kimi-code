@@ -56,6 +56,7 @@ import {
   type SetSessionModeRequest,
   type SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
+import type { PermissionMode } from '@moonshot-ai/agent-core-v2';
 import type {
   AgentHandle,
   Klient,
@@ -127,6 +128,15 @@ export interface AcpServerOptions {
    * scope. Absent → `persistOriginalImage`'s shared temp-dir fallback.
    */
   readonly resolveOriginalsDir?: (sessionId: string) => string | undefined;
+  /**
+   * Resolve a live session's engine permission mode (Agent-scope
+   * `IAgentPermissionModeService.mode`). Composition-root concern reading the
+   * live engine scope tree — `start.ts` builds it from the bootstrapped App
+   * scope (same pattern as `resolveOriginalsDir`). Absent / returning
+   * undefined → `init()` falls back to the `defaultPermissionMode` config
+   * value.
+   */
+  readonly resolvePermissionMode?: (sessionId: string) => PermissionMode | undefined;
   /** Static or per-session host command palette, compatible with acp-adapter. */
   readonly slashCommands?: SlashCommandsResolver;
 }
@@ -138,6 +148,7 @@ export class AcpServer {
   private readonly terminalAuthEnv: Readonly<Record<string, string>> | undefined;
   private readonly terminalAuthLegacyCommand: string | undefined;
   private readonly resolveOriginalsDir: ((sessionId: string) => string | undefined) | undefined;
+  private readonly resolvePermissionMode: ((sessionId: string) => PermissionMode | undefined) | undefined;
   private readonly resolveSlashCommands: (
     session: SessionHandle,
   ) => Promise<ReadonlyArray<AvailableCommand> | SlashCommandsSnapshot>;
@@ -159,6 +170,7 @@ export class AcpServer {
     this.terminalAuthEnv = opts.terminalAuthEnv;
     this.terminalAuthLegacyCommand = opts.terminalAuthLegacyCommand;
     this.resolveOriginalsDir = opts.resolveOriginalsDir;
+    this.resolvePermissionMode = opts.resolvePermissionMode;
     const slashCommands = opts.slashCommands;
     this.resolveSlashCommands =
       typeof slashCommands === 'function'
@@ -547,6 +559,7 @@ export class AcpServer {
       this.acpConnection,
       Boolean(this.clientCapabilities?.elicitation?.form),
       this.resolveOriginalsDir,
+      this.resolvePermissionMode,
       hostCommands,
     );
     await acpSession.init();

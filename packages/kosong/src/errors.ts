@@ -361,6 +361,10 @@ const CONTEXT_OVERFLOW_MESSAGE_PATTERNS = [
   /prompt is too long.*maximum/,
   /input token count.*exceeds?.*maximum number of tokens/,
   /request.*exceed(?:ed|s|ing)?.*model token limit/,
+  // Moonshot's managed API answers context-window violations with a 401 whose
+  // body names the model's window ("401 k3-256k supports only 256K context.");
+  // the status alone looks like auth, the message is the discriminator.
+  /supports only \d+(?:\.\d+)?\s*(?:k|m|b)?\s*(?:context|window|tokens)/,
 ] as const;
 
 const PROVIDER_RATE_LIMIT_MESSAGE_PATTERNS = [
@@ -490,7 +494,12 @@ export function parseRetryAfterMs(headers: unknown): number | null {
 }
 
 export function isContextOverflowStatusError(statusCode: number, message: string): boolean {
-  if (statusCode !== 400 && statusCode !== 413 && statusCode !== 422) return false;
+  // 401 is the Kimi managed API's status for plan/capability rejections — a
+  // context-window limit is one of them, so a message-matched 401 classifies
+  // as overflow; a plain 401 stays auth.
+  if (statusCode !== 400 && statusCode !== 401 && statusCode !== 413 && statusCode !== 422) {
+    return false;
+  }
   const lowerMessage = message.toLowerCase();
   return CONTEXT_OVERFLOW_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
 }

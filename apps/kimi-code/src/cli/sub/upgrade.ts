@@ -20,6 +20,7 @@ import {
   NPM_PACKAGE_NAME,
   type InstallSource,
   type UpdateCache,
+  type UpdateTarget,
 } from '#/cli/update/types';
 
 interface WritableLike {
@@ -86,7 +87,36 @@ export async function handleUpgrade(
 
   const source = await deps.detectInstallSource().catch(() => 'unsupported' as const);
   const installCommand = installCommandFor(source, target.version, deps.platform);
-  if (!canAutoInstall(source, deps.platform) || !deps.isInteractive) {
+  if (!deps.isInteractive) {
+    if (!canAutoInstall(source, deps.platform)) {
+      // Non-interactive session with no automatic install path: report the
+      // no-op with a non-zero exit code so automation can detect that the
+      // upgrade did not happen, and put the manual instructions on stderr.
+      trackUpgradeEvent(deps.track, 'upgrade_command_manual_command', {
+        current_version: currentVersion,
+        target_version: target.version,
+        source,
+      });
+      logUpgradeWarn(deps.logger, 'manual upgrade unavailable in non-interactive session', {
+        currentVersion,
+        targetVersion: target.version,
+        source,
+      });
+      deps.stderr.write(renderManualUpdateMessage(currentVersion, target, source, installCommand));
+      return 1;
+    }
+    // Non-interactive but auto-install is supported: run the update like the
+    // automatic update path instead of printing instructions and exiting 0.
+    return runForegroundInstall(
+      deps,
+      currentVersion,
+      target,
+      source,
+      'upgrade_command_auto_install_started',
+    );
+  }
+
+  if (!canAutoInstall(source, deps.platform)) {
     trackUpgradeEvent(deps.track, 'upgrade_command_manual_command', {
       current_version: currentVersion,
       target_version: target.version,
@@ -131,8 +161,24 @@ export async function handleUpgrade(
     return 0;
   }
 
+  return runForegroundInstall(
+    deps,
+    currentVersion,
+    target,
+    source,
+    'upgrade_command_install_selected',
+  );
+}
+
+async function runForegroundInstall(
+  deps: UpgradeDeps,
+  currentVersion: string,
+  target: UpdateTarget,
+  source: InstallSource,
+  startedEvent: string,
+): Promise<number> {
   try {
-    trackUpgradeEvent(deps.track, 'upgrade_command_install_selected', {
+    trackUpgradeEvent(deps.track, startedEvent, {
       current_version: currentVersion,
       target_version: target.version,
       source,
