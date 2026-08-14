@@ -7,7 +7,12 @@
  * AND the bound Profile's tool policy (`profile`), it resolves the
  * Agent-scope service through the container — nothing constructs the tool
  * before this `accessor.get` — and registers the real instance into the
- * runtime registry.
+ * runtime registry. The `select_tools` disclosure tool is exempt from the
+ * profile allowlist — it stays registered for the main agent regardless of
+ * which profile is bound, the same carve-out `toolSelect` and `toolPolicy`
+ * already apply to it — while the workspace veto, an explicit
+ * `disallowedTools` opt-out, and the contribution's `when` predicate still
+ * gate it.
  *
  * The fold is incremental: `view.onDidChange` re-folds deltas — an `added`
  * record walks the same activation judgment, a `removed` record (provider
@@ -38,9 +43,10 @@ import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentProfileService } from '#/agent/profile/profile';
-import { isToolActive } from '#/agent/toolPolicy/evaluate';
+import { isToolActive, type ToolActivationPolicy } from '#/agent/toolPolicy/evaluate';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolContribution } from '#/agent/toolRegistry/toolContribution';
+import { SELECT_TOOLS_TOOL_NAME } from '#/agent/toolSelect/toolSelect';
 import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
 
 import { IAgentToolActivationService } from './toolActivation';
@@ -90,7 +96,11 @@ export class AgentToolActivationService extends Service implements IAgentToolAct
         const source = options.source ?? 'builtin';
         if (this.toolRegistry.resolve(options.name) !== undefined) continue;
         if (!isToolActive(workspaceVeto, options.name, source)) continue;
-        if (!isToolActive(policy, options.name, source)) continue;
+        const profilePolicy: ToolActivationPolicy =
+          options.name === SELECT_TOOLS_TOOL_NAME
+            ? { disallowedTools: policy.disallowedTools }
+            : policy;
+        if (!isToolActive(profilePolicy, options.name, source)) continue;
         if (options.when !== undefined && !options.when(accessor)) continue;
         const tool = accessor.get(id);
         const registration = this.toolRegistry.register(tool, {

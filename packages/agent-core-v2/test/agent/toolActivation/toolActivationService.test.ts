@@ -31,6 +31,7 @@ import {
 } from '#/agent/toolRegistry/toolContribution';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
+import { IAgentToolSelectService, SELECT_TOOLS_TOOL_NAME } from '#/agent/toolSelect/toolSelect';
 import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
 import type { AgentTool, ToolExecution } from '#/tool/toolContract';
 import '#/agent/tools/agent/agentTool';
@@ -67,10 +68,12 @@ class StubTool implements AgentTool {
 const IAlphaTool = createDecorator<AgentTool>('activationTestAlphaTool');
 const IBetaTool = createDecorator<AgentTool>('activationTestBetaTool');
 const IGammaTool = createDecorator<AgentTool>('activationTestGammaTool');
+const IDisclosureTool = createDecorator<AgentTool>('activationTestDisclosureTool');
 
 let alphaConstructions = 0;
 let betaConstructions = 0;
 let gammaConstructions = 0;
+let disclosureConstructions = 0;
 
 class AlphaTool extends StubTool {
   constructor() {
@@ -90,6 +93,13 @@ class GammaTool extends StubTool {
   constructor() {
     super('Gamma');
     gammaConstructions += 1;
+  }
+}
+
+class DisclosureTool extends StubTool {
+  constructor() {
+    super(SELECT_TOOLS_TOOL_NAME);
+    disclosureConstructions += 1;
   }
 }
 
@@ -159,6 +169,7 @@ describe('AgentToolActivationService', () => {
         reg.define(IAlphaTool, AlphaTool);
         reg.define(IBetaTool, BetaTool);
         reg.define(IGammaTool, GammaTool);
+        reg.define(IDisclosureTool, DisclosureTool);
       },
     });
     disposables.add(ix.createInstance(TestContributionAssembly));
@@ -171,6 +182,7 @@ describe('AgentToolActivationService', () => {
     alphaConstructions = 0;
     betaConstructions = 0;
     gammaConstructions = 0;
+    disclosureConstructions = 0;
     _clearAgentToolContributionsForTests();
     delete profileData.activeToolNames;
     delete profileData.disallowedTools;
@@ -299,6 +311,68 @@ describe('AgentToolActivationService', () => {
     expect(registry.resolve('Beta')).toBeInstanceOf(BetaTool);
   });
 
+  describe('select_tools disclosure carve-out', () => {
+    it('registers select_tools even when the profile allowlist omits it', async () => {
+      profileData.activeToolNames = ['Alpha'];
+      registerAgentToolService(IAlphaTool, AlphaTool, { name: 'Alpha' });
+      registerAgentToolService(IDisclosureTool, DisclosureTool, {
+        name: SELECT_TOOLS_TOOL_NAME,
+      });
+      const ix = createActivationHost();
+
+      await ix.get(IAgentToolActivationService).activate();
+
+      const registry = ix.get(IAgentToolRegistryService);
+      expect(registry.resolve('Alpha')).toBeInstanceOf(AlphaTool);
+      expect(registry.resolve(SELECT_TOOLS_TOOL_NAME)).toBeInstanceOf(DisclosureTool);
+      expect(registry.list().map((tool) => tool.name)).toContain(SELECT_TOOLS_TOOL_NAME);
+    });
+
+    it('still honors an explicit profile disallowedTools opt-out for select_tools', async () => {
+      profileData.activeToolNames = ['Alpha'];
+      profileData.disallowedTools = [SELECT_TOOLS_TOOL_NAME];
+      registerAgentToolService(IAlphaTool, AlphaTool, { name: 'Alpha' });
+      registerAgentToolService(IDisclosureTool, DisclosureTool, {
+        name: SELECT_TOOLS_TOOL_NAME,
+      });
+      const ix = createActivationHost();
+
+      await ix.get(IAgentToolActivationService).activate();
+
+      const registry = ix.get(IAgentToolRegistryService);
+      expect(registry.resolve('Alpha')).toBeInstanceOf(AlphaTool);
+      expect(registry.resolve(SELECT_TOOLS_TOOL_NAME)).toBeUndefined();
+      expect(disclosureConstructions).toBe(0);
+    });
+
+    it('still honors the workspace tool-policy veto for select_tools', async () => {
+      gateData.disabledTools = [SELECT_TOOLS_TOOL_NAME];
+      registerAgentToolService(IDisclosureTool, DisclosureTool, {
+        name: SELECT_TOOLS_TOOL_NAME,
+      });
+      const ix = createActivationHost();
+
+      await ix.get(IAgentToolActivationService).activate();
+
+      expect(ix.get(IAgentToolRegistryService).resolve(SELECT_TOOLS_TOOL_NAME)).toBeUndefined();
+      expect(disclosureConstructions).toBe(0);
+    });
+
+    it('still runs the when predicate for select_tools', async () => {
+      profileData.activeToolNames = ['Alpha'];
+      registerAgentToolService(IDisclosureTool, DisclosureTool, {
+        name: SELECT_TOOLS_TOOL_NAME,
+        when: () => false,
+      });
+      const ix = createActivationHost();
+
+      await ix.get(IAgentToolActivationService).activate();
+
+      expect(ix.get(IAgentToolRegistryService).resolve(SELECT_TOOLS_TOOL_NAME)).toBeUndefined();
+      expect(disclosureConstructions).toBe(0);
+    });
+  });
+
   describe('collection fold (scoped tree)', () => {
     beforeEach(() => {
       _clearScopedRegistryForTests();
@@ -332,6 +406,13 @@ describe('AgentToolActivationService', () => {
       );
       registerScopedService(
         LifecycleScope.Agent,
+        IDisclosureTool,
+        DisclosureTool,
+        ScopeActivation.OnDemand,
+        'toolActivation',
+      );
+      registerScopedService(
+        LifecycleScope.Agent,
         IDynamicToolProvider,
         DynamicToolProvider,
         ScopeActivation.OnDemand,
@@ -343,6 +424,18 @@ describe('AgentToolActivationService', () => {
       return [
         [IAgentProfileService, { data: () => profileData as ProfileData }],
         [IEventBus, { subscribe: () => toDisposable(() => {}) }],
+        [
+          IAgentToolSelectService,
+          {
+            _serviceBrand: undefined,
+            enabled: () => false,
+            shapeTools: (entries) => entries,
+            shapeHistory: (messages) => messages,
+            load: () => ({ toLoad: [], alreadyAvailable: [], unknown: [] }),
+            drainPendingToolSchemas: () => undefined,
+            loadableToolsAnnouncement: () => undefined,
+          } satisfies IAgentToolSelectService,
+        ],
         ...extra,
       ];
     }
@@ -429,7 +522,24 @@ describe('AgentToolActivationService', () => {
       }
 
       await agent.accessor.get(IAgentToolActivationService).activate();
-      expect(agent.accessor.get(IAgentToolRegistryService).list()).toHaveLength(0);
+      const registry = agent.accessor.get(IAgentToolRegistryService);
+      expect(registry.list().map((tool) => tool.name)).toEqual([SELECT_TOOLS_TOOL_NAME]);
+      expect(registry.resolve(SELECT_TOOLS_TOOL_NAME)?.name).toBe(SELECT_TOOLS_TOOL_NAME);
+      app.dispose();
+    });
+
+    it('registers select_tools in a scoped agent tree when the profile allowlist omits it', async () => {
+      profileData.activeToolNames = ['Alpha'];
+      registerAgentToolService(IAlphaTool, AlphaTool, { name: 'Alpha' });
+      registerAgentToolService(IDisclosureTool, DisclosureTool, {
+        name: SELECT_TOOLS_TOOL_NAME,
+      });
+      const { app, agent } = createScopeTree();
+
+      await agent.accessor.get(IAgentToolActivationService).activate();
+      const registry = agent.accessor.get(IAgentToolRegistryService);
+      expect(registry.resolve('Alpha')).toBeInstanceOf(AlphaTool);
+      expect(registry.resolve(SELECT_TOOLS_TOOL_NAME)).toBeInstanceOf(DisclosureTool);
       app.dispose();
     });
   });
