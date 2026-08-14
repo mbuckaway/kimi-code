@@ -39,6 +39,7 @@ import { MODELS_SECTION } from '#/app/kosongConfig/configSection';
 import { IProviderService, type ProviderConfig, type ProvidersChangedEvent } from '#/kosong/provider/provider';
 
 import '#/kosong/provider/providers/kimi/kimi.contrib';
+import '#/kosong/provider/providers/standard.contrib';
 
 import { registerBootstrapServices } from '../bootstrap/stubs';
 import { registerTelemetryServices } from '../telemetry/stubs';
@@ -46,6 +47,7 @@ import { stubAgentIdentity } from '../../app/agentIdentity/stubs';
 
 const OAUTH_PROVIDER = 'managed:kimi-code';
 const NON_OAUTH_PROVIDER = 'openai-main';
+const ENV_ONLY_PROVIDER = 'openai-env-only';
 
 const deviceAuth = {
   userCode: 'ABCD-EFGH',
@@ -1247,7 +1249,10 @@ describe('AuthSummaryService', () => {
       },
     });
   });
-  afterEach(() => disposables.dispose());
+  afterEach(() => {
+    disposables.dispose();
+    vi.unstubAllEnvs();
+  });
 
   function createSummary(): IAuthSummaryService {
     return ix.get(IAuthSummaryService);
@@ -1330,6 +1335,19 @@ describe('AuthSummaryService', () => {
 
   it('ensureReady accepts provider api keys', async () => {
     await expect(createSummary().ensureReady('openai')).resolves.toBeUndefined();
+    expect(getCachedAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('ensureReady accepts provider keys resolved from the process environment', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'process-env-key');
+    providers[ENV_ONLY_PROVIDER] = { type: 'openai' };
+    models[ENV_ONLY_PROVIDER] = {
+      provider: ENV_ONLY_PROVIDER,
+      model: 'gpt-4.1',
+      protocol: 'openai',
+      maxContextSize: 128000,
+    };
+    await expect(createSummary().ensureReady(ENV_ONLY_PROVIDER)).resolves.toBeUndefined();
     expect(getCachedAccessToken).not.toHaveBeenCalled();
   });
 
