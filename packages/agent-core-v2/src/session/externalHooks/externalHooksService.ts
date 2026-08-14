@@ -112,8 +112,8 @@ export class SessionExternalHooksService
     // Arm the heartbeat only once the configured-hook index has loaded and
     // only when the event has hooks at all, so sessions without a
     // SessionHeartbeat hook never hold a recurring timer. Re-sync on every
-    // hook-index reload (plugin reload) so late-registered heartbeat hooks
-    // still arm, and removed ones disarm.
+    // hook-index reload (plugin reload or config change) so late-registered
+    // heartbeat hooks still arm, and removed ones disarm.
     void this.runner.ready
       .then(() => this.syncHeartbeat())
       .catch(() => undefined);

@@ -40,7 +40,7 @@ import { ExternalHooksRunnerService } from '#/app/externalHooksRunner/externalHo
 import { makeHookRunner } from '../../agent/externalHooks/runner-stub';
 import type { AgentTaskInfo } from '#/agent/task/task';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { IConfigService } from '#/app/config/config';
+import { IConfigService, type ConfigChangedEvent } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { IPluginService } from '#/app/plugin/plugin';
@@ -70,6 +70,7 @@ import { IModelService } from '#/kosong/model/model';
 
 import { stubBootstrap } from '../bootstrap/stubs';
 import { stubLoopWithHooks, stubToolExecutor } from '../../agent/loop/stubs';
+import { registerLogServices } from '../../_base/log/stubs';
 import { registerStateServices } from '../../state/stubs';
 import { registerTestAgentWireServices } from '../../wire/stubs';
 
@@ -617,6 +618,7 @@ describe('IExternalHooksRunnerService integration', () => {
         strict: true,
         additionalServices: (reg) => {
           registerStateServices(reg);
+          registerLogServices(reg);
           reg.defineInstance(IBootstrapService, stubBootstrap());
           reg.defineInstance(ISessionContext, stubSessionContext());
           reg.defineInstance(ISessionMetadata, stubSessionMetadata());
@@ -878,6 +880,7 @@ describe('IExternalHooksRunnerService integration', () => {
         strict: true,
         additionalServices: (reg) => {
           registerStateServices(reg);
+          registerLogServices(reg);
           reg.defineInstance(ISessionContext, {
             _serviceBrand: undefined,
             sessionId: 'session-1',
@@ -1086,6 +1089,7 @@ describe('IExternalHooksRunnerService integration', () => {
         strict: true,
         additionalServices: (reg) => {
           registerStateServices(reg);
+          registerLogServices(reg);
           reg.defineInstance(ISessionContext, stubSessionContext());
           reg.definePartialInstance(ISessionLifecycleService, lifecycle.service);
           reg.defineInstance(ISessionMetadata, stubSessionMetadata('My Session'));
@@ -1395,6 +1399,83 @@ describe('IExternalHooksRunnerService integration', () => {
       reloadEmitter.fire();
       await vi.advanceTimersByTimeAsync(120_000);
       expect(fired).toEqual(['SessionHeartbeat']);
+    } finally {
+      ix?.dispose();
+      disposables.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('arms SessionHeartbeat when [[hooks]] arrive through a config change', async () => {
+    vi.useFakeTimers();
+    const disposables = new DisposableStore();
+    let ix: TestInstantiationService | undefined;
+    try {
+      const hooks: Array<{ event: string; command: string; timeout: number }> = [];
+      const configChange = disposables.add(new Emitter<ConfigChangedEvent>());
+
+      ix = createServices(disposables, {
+        strict: true,
+        additionalServices: (reg) => {
+          registerStateServices(reg);
+          registerLogServices(reg);
+          reg.defineInstance(ISessionContext, stubSessionContext());
+          reg.definePartialInstance(ISessionLifecycleService, stubSessionLifecycle().service);
+          reg.defineInstance(ISessionMetadata, stubSessionMetadata());
+          reg.defineInstance(ISessionAgentProfileCatalog, stubProfileCatalog());
+          reg.defineInstance(IModelService, stubModelService());
+          reg.definePartialInstance(ISessionSubagentService, {
+            hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']),
+            onDidStopAgentTask: Event.None as Event<AgentTaskStopHookContext>,
+          });
+          reg.definePartialInstance(IConfigService, {
+            ready: Promise.resolve(),
+            get: <T = unknown>(domain: string): T =>
+              (domain === HOOKS_SECTION ? hooks : undefined) as T,
+            onDidChangeConfiguration: configChange.event,
+          });
+          reg.definePartialInstance(IPluginService, {
+            enabledHooks: async () => [],
+            onDidReload: Event.None as IPluginService['onDidReload'],
+          });
+          reg.defineInstance(IBootstrapService, stubBootstrap());
+          reg.define(IHostProcessService, HostProcessService);
+        },
+      });
+      ix.set(IExternalHooksRunnerService, new SyncDescriptor(ExternalHooksRunnerService));
+      ix.set(ISessionExternalHooksService, new SyncDescriptor(SessionExternalHooksService));
+      ix.get(ISessionExternalHooksService);
+
+      const runner = ix.get(IExternalHooksRunnerService);
+      const fireAndForgetTrigger = vi
+        .spyOn(runner, 'fireAndForgetTrigger')
+        .mockResolvedValue([]);
+
+      // No SessionHeartbeat hook at startup: the timer never arms.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fireAndForgetTrigger).not.toHaveBeenCalled();
+
+      // A [[hooks]] section lands in the config after construction: the
+      // runner rebuilds its index, the session service re-syncs, and the
+      // heartbeat timer arms.
+      hooks.push({
+        event: 'SessionHeartbeat',
+        command: nodeCommand('process.exit(0);'),
+        timeout: 5,
+      });
+      configChange.fire({
+        domain: HOOKS_SECTION,
+        source: 'set',
+        value: undefined,
+        previousValue: undefined,
+      });
+      // Triggering awaits the config-change rebuild (and the onDidReload
+      // re-sync that arms the timer).
+      await runner.trigger('SessionHeartbeat');
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fireAndForgetTrigger).toHaveBeenCalledTimes(1);
+      expect(fireAndForgetTrigger.mock.calls[0]?.[0]).toBe('SessionHeartbeat');
     } finally {
       ix?.dispose();
       disposables.dispose();
