@@ -9,8 +9,9 @@
  * Agent-scoped telemetry view. New logs receive a metadata
  * envelope while non-empty unversioned logs are rejected. Removal awaits the
  * agent task manager's graceful exit policy before draining turns and full
- * compaction, then disposing the child scope. Fans session-level
- * permission-mode switches out to every live agent. Bound at Session scope.
+ * compaction, flushing the replayable wire, then disposing the child scope.
+ * Fans session-level permission-mode switches out to every live agent. Bound
+ * at Session scope.
  *
  * No agent id is special here: the main agent is simply the agent created
  * with the conventional `MAIN_AGENT_ID`, and `fork` requires its source to
@@ -268,8 +269,16 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       compaction.abortController.abort(reason);
     }
     await Promise.all([loop.settled(), compactionSettled]);
-    handle.dispose();
-    this.onDidDisposeEmitter.fire(agentId);
+    try {
+      // `ContextModel` (and peers) dehydrate blobs asynchronously, so the
+      // tail `content.part` / `turn.ended` records may still be queued on
+      // `WireService.persistQueue`. Flush before dispose or the last records
+      // of a closed session are dropped (Refs #2727).
+      await handle.accessor.get(IWireService).flush();
+    } finally {
+      handle.dispose();
+      this.onDidDisposeEmitter.fire(agentId);
+    }
   }
 }
 

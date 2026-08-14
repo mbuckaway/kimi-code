@@ -52,6 +52,7 @@ import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStor
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { createWireMetadataRecord, type WireRecord } from '#/wire/record';
+import { IWireService } from '#/wire/wire';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentFullCompactionService } from '#/agent/fullCompaction/fullCompaction';
@@ -454,6 +455,52 @@ describe('AgentLifecycleService', () => {
     rejectCompaction(abortController.signal.reason);
     await removal;
     expect(removed).toBe(true);
+  });
+
+  it('remove waits for the agent wire to flush before completing', async () => {
+    const svc = ix.get(IAgentLifecycleService);
+    const handle = await svc.create({ agentId: 'main' });
+    let markFlushStarted!: () => void;
+    const flushStarted = new Promise<void>((resolve) => {
+      markFlushStarted = resolve;
+    });
+    let releaseFlush!: () => void;
+    const flushReleased = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const flush = vi
+      .spyOn(handle.accessor.get(IWireService), 'flush')
+      .mockImplementation(async () => {
+        markFlushStarted();
+        await flushReleased;
+      });
+
+    let removed = false;
+    const removal = svc.remove('main').then(() => {
+      removed = true;
+    });
+    await flushStarted;
+    expect(removed).toBe(false);
+
+    releaseFlush();
+    await removal;
+    expect(flush).toHaveBeenCalledOnce();
+    expect(removed).toBe(true);
+  });
+
+  it('remove still disposes the agent when the wire flush rejects', async () => {
+    const svc = ix.get(IAgentLifecycleService);
+    const handle = await svc.create({ agentId: 'main' });
+    const flushError = new Error('wire flush failed');
+    vi.spyOn(handle.accessor.get(IWireService), 'flush').mockRejectedValueOnce(flushError);
+    const disposed: string[] = [];
+    disposables.add(svc.onDidDispose((id) => disposed.push(id)));
+
+    await expect(svc.remove('main')).rejects.toBe(flushError);
+
+    expect(svc.get('main')).toBeUndefined();
+    expect(disposed).toEqual(['main']);
+    expect(() => handle.accessor.get(IWireService)).toThrow();
   });
 
   it('ignites the self-wiring toolDedupe plugin so its listeners exist before the first turn', async () => {
