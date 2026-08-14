@@ -526,6 +526,159 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
   }, 30_000);
 });
 
+describe('acp-server internal-turn event forwarding', () => {
+  let homeDir: string | undefined;
+  let client: TestClient | undefined;
+  let scripted: ScriptedProvider | undefined;
+
+  afterEach(async () => {
+    if (client !== undefined) {
+      await client.close();
+      client = undefined;
+    }
+    if (homeDir !== undefined) {
+      await rm(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      homeDir = undefined;
+    }
+  });
+
+  async function boot(): Promise<TestClient> {
+    homeDir = await mkdtemp(join(tmpdir(), 'acp-internal-turn-'));
+    await writeFakeModelConfig(homeDir);
+    scripted = createScriptedProvider();
+    client = await createTestClient({ homeDir, extraSeeds: [scripted.seed] });
+    await client.send('initialize', { protocolVersion: 1, clientCapabilities: {} });
+    return client;
+  }
+
+  /** The main agent's live event bus (to publish synthetic turn events). */
+  function mainAgentBus(sessionId: string): { publish(event: unknown): void } {
+    const session = getLiveSessionById(client!.server.core.accessor, sessionId);
+    const agentHandle = session?.accessor.get(IAgentLifecycleService).get('main');
+    const bus = agentHandle?.accessor.get(IEventBus);
+    expect(bus).toBeDefined();
+    return { publish: (event) => bus!.publish(event as never) };
+  }
+
+  /**
+   * Poll the received `agent_message_chunk`s until one carries `needle`
+   * (chunks from a prior turn may already be on the wire, so a plain
+   * waitForSessionUpdate is not specific enough).
+   */
+  async function waitForTextChunk(c: TestClient, needle: string, timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const hit = c
+        .sessionUpdates()
+        .map((m) => (m.params as { update?: { content?: { text?: string } } }).update)
+        .find((u) => u?.content?.text === needle);
+      if (hit !== undefined) return;
+      if (Date.now() > deadline) {
+        throw new Error(`timed out waiting for an agent_message_chunk '${needle}'`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  it('streams an internally-triggered turn (no client prompt) as session/update notifications', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    // An engine turn triggered outside any `session/prompt` (cron catch-up,
+    // background-task notification): its events carry a turnId with no driver,
+    // which used to drop every handler before it reached the wire.
+    const bus = mainAgentBus(created.sessionId);
+    bus.publish({ type: 'assistant.delta', turnId: 9001, delta: 'internal cron reply' });
+    const chunk = await c.waitForSessionUpdate('agent_message_chunk', 10_000);
+    const update = (chunk.params as { update?: { content?: { text?: string } } }).update;
+    expect(update?.content?.text).toBe('internal cron reply');
+
+    // Tool traffic of the internal turn streams through the same dispatch path.
+    bus.publish({
+      type: 'tool.call.started',
+      turnId: 9001,
+      toolCallId: 'call_internal',
+      name: 'Bash',
+      args: { command: 'echo internal' },
+    });
+    const tool = await c.waitForSessionUpdate('tool_call', 10_000);
+    const toolUpdate = (tool.params as { update?: { toolCallId?: string } }).update;
+    expect(toolUpdate?.toolCallId).toBe('9001:call_internal');
+
+    // A client-initiated turn afterwards still streams normally.
+    scripted!.mockNextText('client turn reply');
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'hi again' }],
+    });
+    await waitForTextChunk(c, 'client turn reply');
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+  }, 30_000);
+
+  it('ignores turn events that are not attributable to the in-flight client prompt', async () => {
+    const c = await boot();
+    // Park the first turn at a Bash approval so the in-flight driver's turnId
+    // is known and the turn stays alive while we publish the stray event.
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_1',
+      name: 'Bash',
+      arguments: '{"command":"echo busy_probe"}',
+    });
+    scripted!.mockNextText('done');
+    let answerPermission: ((response: unknown) => void) | undefined;
+    const permissionSeen = new Promise<void>((seen) => {
+      c.onRequest('session/request_permission', () => {
+        seen();
+        return new Promise((resolve) => {
+          answerPermission = resolve;
+        });
+      });
+    });
+
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'run echo' }],
+    });
+    // Both the wire `tool_call` create (→ the client turn's turnId) and the
+    // parked approval mark the turn as in flight with a known id.
+    const [create] = await Promise.all([
+      c.waitForSessionUpdate('tool_call', 10_000),
+      permissionSeen,
+    ]);
+    const wireId = (create.params as { update?: { toolCallId?: string } }).update?.toolCallId;
+    const turnId = Number(wireId?.split(':')[0]);
+    expect(Number.isFinite(turnId)).toBe(true);
+
+    // A turn that is neither the in-flight prompt's nor otherwise attributable
+    // must NOT cross the wire while the client turn runs.
+    mainAgentBus(created.sessionId).publish({
+      type: 'assistant.delta',
+      turnId: turnId + 1,
+      delta: 'stray internal text',
+    });
+
+    answerPermission!({ outcome: { outcome: 'selected', optionId: 'approve_once' } });
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+
+    const stray = c
+      .sessionUpdates()
+      .map((m) => (m.params as { update?: { content?: { text?: string } } }).update)
+      .filter((u) => u?.content?.text === 'stray internal text');
+    expect(stray).toHaveLength(0);
+  }, 30_000);
+});
+
 describe('mapPromptLaunchError', () => {
   it('maps an auth-coded rejection to auth_required (-32000)', () => {
     const error = Object.assign(new Error('Provider returned 401'), {

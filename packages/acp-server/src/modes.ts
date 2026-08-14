@@ -3,8 +3,11 @@
  *
  * The 4 modes (`default`, `plan`, `auto`, `yolo`) are the locked decision.
  * Every `session/new` and `session/load` response advertises {@link ACP_MODES}
- * as the mode picker plus {@link DEFAULT_MODE_ID} as `currentModeId`, so ACP
- * clients render the dropdown from a single canonical source.
+ * as the mode picker plus the session's live mode as `currentModeId` (seeded
+ * from the engine's actual plan/permission state — see
+ * {@link acpModeFromState} — falling back to {@link DEFAULT_MODE_ID} when the
+ * engine state is unreadable), so ACP clients render the dropdown from a
+ * single canonical source.
  *
  * `session/set_mode` and the `mode` arm of `session/set_config_option` consume
  * the same source of truth: {@link isAcpModeId} narrows the wire string, and
@@ -83,5 +86,26 @@ export function acpModeToToggles(id: AcpModeId): AcpModeToggles {
       const _exhaustive: never = id;
       throw new Error(`Unhandled AcpModeId: ${String(_exhaustive)}`);
     }
+  }
+}
+
+/**
+ * Inverse of {@link acpModeToToggles}: resolve the engine's LIVE plan /
+ * permission state back to the {@link AcpModeId} that produced it. Used to
+ * seed `currentModeId` at `init()` from the engine's actual posture (a session
+ * booted with `defaultPermissionMode = 'yolo'` must advertise `'yolo'`, not
+ * the stale `'default'`). Plan mode wins — `plan: true` maps to `'plan'`
+ * regardless of the permission posture, the same precedence `setMode` applies
+ * when entering plan.
+ */
+export function acpModeFromState(plan: boolean, permission: PermissionMode): AcpModeId {
+  if (plan) return 'plan';
+  switch (permission) {
+    case 'manual':
+      return 'default';
+    case 'auto':
+      return 'auto';
+    case 'yolo':
+      return 'yolo';
   }
 }

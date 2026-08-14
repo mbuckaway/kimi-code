@@ -20,6 +20,8 @@ import {
   drainSessionIndexMirror,
   drainSessionMetadataWrites,
   getLiveSessionById,
+  IAgentLifecycleService,
+  IAgentPermissionModeService,
   IAppendLogStore,
   ISessionContext,
   ISessionIndexMirror,
@@ -152,6 +154,20 @@ export async function runAcpServerWithStream(
       return handle === undefined
         ? undefined
         : sessionMediaOriginalsDir(handle.accessor.get(ISessionContext).sessionDir);
+    },
+    // Seed the advertised ACP mode from the engine's LIVE permission mode
+    // (Agent-scope `IAgentPermissionModeService.mode` — the same read
+    // kap-server's prompt route uses). Reads the live scope tree because the
+    // klient facade has no permission getter; a restored session reports its
+    // persisted `permission.set_mode` override, not the config default. The
+    // session falls back to the `defaultPermissionMode` config when this
+    // yields undefined.
+    resolvePermissionMode: (sessionId) => {
+      const sessionHandle = getLiveSessionById(core.accessor, sessionId);
+      if (sessionHandle === undefined) return undefined;
+      const agentHandle = sessionHandle.accessor.get(IAgentLifecycleService).get('main');
+      if (agentHandle === undefined) return undefined;
+      return agentHandle.accessor.get(IAgentPermissionModeService).mode;
     },
   });
 
