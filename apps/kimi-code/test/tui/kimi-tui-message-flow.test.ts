@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -1443,7 +1443,46 @@ command = "vim"
     const homeDir = await makeTempHome();
     process.env['KIMI_CODE_HOME'] = homeDir;
     await writeFile(join(homeDir, 'tui.toml'), 'theme = "light"\n', 'utf-8');
-    const { driver, session, harness } = await makeDriver();
+    // /reload re-reads the wire journal from disk and re-hydrates the
+    // transcript from the fresh resume snapshot, so the snapshot must replay
+    // the turn sent before the reload (a real reload folds the wire).
+    const session = makeSession({
+      getResumeState: vi.fn(() => ({
+        sessionMetadata: {},
+        agents: {
+          main: {
+            type: 'main',
+            config: {
+              modelAlias: 'k2',
+              provider: undefined,
+              modelCapabilities: undefined,
+              profileName: undefined,
+              thinkingEffort: undefined,
+              systemPrompt: undefined,
+            },
+            context: { history: [], tokenCount: 0 },
+            replay: [
+              {
+                type: 'message',
+                time: 100,
+                message: {
+                  role: 'user',
+                  content: [{ type: 'text', text: 'hello before reload' }],
+                  origin: { kind: 'user_input' },
+                },
+              },
+            ],
+            permission: { mode: 'manual', rules: [] },
+            plan: null,
+            swarmMode: false,
+            usage: {},
+            tools: [],
+            background: [],
+          },
+        },
+      })),
+    });
+    const { driver, harness } = await makeDriver(session);
     harness.track.mockClear();
     session.reloadSession.mockClear();
     driver.handleUserInput('hello before reload');
@@ -7094,5 +7133,204 @@ describe('transcript step and assistant folding', () => {
     // The conclusion stays mounted.
     const lastAssistant = assistants.at(-1)!;
     expect(stripSgr(lastAssistant.render(120).join('\n'))).toContain(`msg-${cycles - 1}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wire-journal staleness (issue #2835)
+//
+// The TUI renders a per-process in-memory transcript while the engine persists
+// every op to `<sessionDir>/agents/main/wire.jsonl`. An external client (ACP
+// attach, mobile) can append turns to that journal without the TUI ever seeing
+// an event; the send guard must refuse input that would silently fork the
+// session, and re-selecting the current session must reload the wire instead
+// of short-circuiting on the stale view.
+// ---------------------------------------------------------------------------
+
+function wireJsonl(...records: Array<Record<string, unknown>>): string {
+  return records.map((record) => JSON.stringify(record)).join('\n');
+}
+
+function wireTurn(time: number, turnId: number): Record<string, unknown> {
+  return {
+    type: 'turn.prompt',
+    time,
+    turnId,
+    input: { input: [], origin: { kind: 'user_input' } },
+  };
+}
+
+function wireTurnEnded(time: number, turnId: number): Record<string, unknown> {
+  return { type: 'turn.ended', time, turnId, reason: 'completed' };
+}
+
+async function writeWireJournal(sessionDir: string, contents: string): Promise<void> {
+  await mkdir(join(sessionDir, 'agents', 'main'), { recursive: true });
+  await writeFile(join(sessionDir, 'agents', 'main', 'wire.jsonl'), contents);
+}
+
+async function appendWireJournal(sessionDir: string, extra: string): Promise<void> {
+  await appendFile(join(sessionDir, 'agents', 'main', 'wire.jsonl'), `\n${extra}`);
+}
+
+function makeReplayResumeState(replay: unknown[]): Record<string, unknown> {
+  return {
+    sessionMetadata: {},
+    agents: {
+      main: {
+        type: 'main',
+        config: {
+          modelAlias: 'k2',
+          provider: undefined,
+          modelCapabilities: undefined,
+          profileName: undefined,
+          thinkingEffort: undefined,
+          systemPrompt: undefined,
+        },
+        context: { history: [], tokenCount: 0 },
+        replay,
+        permission: { mode: 'manual', rules: [] },
+        plan: null,
+        swarmMode: false,
+        usage: {},
+        tools: [],
+        background: [],
+      },
+    },
+  };
+}
+
+function makeWireSession(
+  sessionDir: string,
+  opts: { resumeState?: Record<string, unknown>; reloadSession?: () => Promise<unknown> } = {},
+): ReturnType<typeof makeSession> {
+  const resumeState = opts.resumeState ?? makeReplayResumeState([]);
+  return makeSession({
+    summary: { title: null, sessionDir },
+    getResumeState: vi.fn(() => resumeState),
+    reloadSession: opts.reloadSession === undefined ? vi.fn(async () => ({})) : vi.fn(opts.reloadSession),
+  });
+}
+
+describe('KimiTUI wire-journal staleness', () => {
+  function wireStartupInput(): KimiTUIStartupInput {
+    return {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+  }
+
+  async function endActiveTurn(driver: MessageDriver): Promise<void> {
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.ended',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 1,
+        reason: 'completed',
+      } as Event,
+      vi.fn(),
+    );
+  }
+
+  it('blocks a prompt when an external client appended a turn to the wire journal', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kimi-tui-wire-stale-'));
+    try {
+      await writeWireJournal(dir, wireJsonl(wireTurn(1_000, 1), wireTurnEnded(1_100, 1)));
+      const session = makeWireSession(dir);
+      const { driver } = await makeDriver(session, {}, wireStartupInput());
+
+      driver.handleUserInput('first message');
+      await vi.waitFor(() => {
+        expect(session.prompt).toHaveBeenCalledTimes(1);
+      });
+      await endActiveTurn(driver);
+
+      // Simulate an external (ACP/mobile) client appending a turn this TUI
+      // never rendered.
+      await appendWireJournal(dir, wireJsonl(wireTurn(2_000, 2), wireTurnEnded(2_100, 2)));
+
+      driver.handleUserInput('second message');
+      await vi.waitFor(() => {
+        expect(renderTranscript(driver)).toContain('Session was modified outside this terminal');
+      });
+      expect(session.prompt).toHaveBeenCalledTimes(1);
+      expect(renderTranscript(driver)).not.toContain('second message');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps sending normally while the wire journal is unchanged', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kimi-tui-wire-fresh-'));
+    try {
+      await writeWireJournal(dir, wireJsonl(wireTurn(1_000, 1), wireTurnEnded(1_100, 1)));
+      const session = makeWireSession(dir);
+      const { driver } = await makeDriver(session, {}, wireStartupInput());
+
+      driver.handleUserInput('first message');
+      await vi.waitFor(() => {
+        expect(session.prompt).toHaveBeenCalledTimes(1);
+      });
+      await endActiveTurn(driver);
+
+      driver.handleUserInput('second message');
+      await vi.waitFor(() => {
+        expect(session.prompt).toHaveBeenCalledTimes(2);
+      });
+      expect(session.prompt).toHaveBeenLastCalledWith('second message');
+      expect(renderTranscript(driver)).not.toContain('Session was modified outside this terminal');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reloads and re-hydrates the current session when it is re-selected', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kimi-tui-wire-reselect-'));
+    try {
+      await writeWireJournal(dir, wireJsonl(wireTurn(1_000, 1), wireTurnEnded(1_100, 1)));
+      const resumeState = makeReplayResumeState([]);
+      const session = makeWireSession(dir, {
+        resumeState,
+        reloadSession: async () => {
+          // A real reload re-reads the wire journal from disk; simulate the
+          // fresh snapshot now containing the externally-appended turn.
+          const agents = resumeState['agents'] as { main: { replay: unknown[] } };
+          agents.main.replay = [
+            {
+              type: 'message',
+              time: 2_000,
+              message: {
+                role: 'user',
+                content: [{ type: 'text', text: 'external turn from ACP' }],
+                origin: { kind: 'user_input' },
+              },
+            },
+          ];
+          return {};
+        },
+      });
+      const { driver } = await makeDriver(session, {}, wireStartupInput());
+
+      driver.handleUserInput('first message');
+      await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledTimes(1);
+    });
+      await endActiveTurn(driver);
+
+      const resumed = await (
+        driver as unknown as { resumeSession(targetSessionId: string): Promise<boolean> }
+      ).resumeSession('ses-1');
+
+      expect(resumed).toBe(true);
+      expect(session.reloadSession).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(renderTranscript(driver)).toContain('external turn from ACP');
+      });
+      expect(renderTranscript(driver)).not.toContain('Already on this session.');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
