@@ -93,6 +93,7 @@ describe('PlanModeService dynamic injection content', () => {
     expect(text).toContain('Write');
     expect(text).toContain('Edit');
     expect(text).toContain('ExitPlanMode');
+    expect(text).toContain('Plan review gate');
     expect(text).toContain(`Plan file: ${planFilePath}`);
     expect(text).toContain(
       'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
@@ -137,6 +138,7 @@ describe('PlanModeService dynamic injection content', () => {
 
     expect(lastPlanReminder(context)).toContain('Re-entering Plan Mode');
     expect(lastPlanReminder(context)).toContain('Read the existing plan file');
+    expect(lastPlanReminder(context)).toContain('do not re-run it');
     expect(lastPlanReminder(context)).toContain(
       'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
     );
@@ -191,6 +193,7 @@ describe('PlanModeService dynamic injection cadence', () => {
     const text = lastPlanReminder(context);
     expect(text).toContain('Plan mode still active');
     expect(text).toContain('see full instructions earlier');
+    expect(text).toContain('do not run it twice');
     expect(text).toContain(`Plan file: ${planFilePath}`);
     expect(text).toContain(
       'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
