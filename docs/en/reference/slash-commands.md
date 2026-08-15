@@ -53,8 +53,6 @@ Some commands are only available in the idle state. Executing these commands whi
 | `/plan clear` | — | Clear the current plan | No |
 | `/swarm on\|off` | — | Turn swarm mode on or off without sending a prompt. | Yes |
 | `/swarm <task>` | — | Turn swarm mode on, then send `<task>` as a normal prompt. If the turn completes normally, swarm mode turns off automatically. In `manual` permission mode, Kimi Code asks whether to switch to `auto` or `yolo` before starting. | No |
-| `/supermoon on\|off` | — | Turn Supermoon mode on or off without sending a prompt. While on, the agent orchestrates multi-agent work on every substantive task and pins thinking effort to its highest supported level. See [Supermoon Mode](../guides/supermoon-mode.md) | Yes |
-| `/supermoon <task>` | — | Turn Supermoon mode on, send `<task>` as a normal prompt, and turn the mode off automatically when the turn completes normally. | No |
 | `/goal [...]` | — | Start or manage an autonomous goal | See below |
 
 ::: warning

@@ -1,5 +1,5 @@
 import type { Component, Focusable } from '@moonshot-ai/pi-tui';
-import { log } from '@moonshot-ai/kimi-code-sdk';
+import { effectiveModelAlias, log } from '@moonshot-ai/kimi-code-sdk';
 import type {
   AgentStatusUpdatedEvent,
   AssistantDeltaEvent,
@@ -719,10 +719,7 @@ export class SessionEventHandler {
       event.swarmMode === false &&
       this.host.state.appState.swarmMode &&
       this.host.state.swarmModeEntry === 'task';
-    const shouldRenderSupermoonEnded =
-      event.supermoonMode === false &&
-      this.host.state.appState.supermoonMode &&
-      this.host.state.supermoonModeEntry === 'task';
+    const wasSupermoonOn = this.host.state.appState.supermoonMode;
     const patch: Partial<AppState> = {};
     if (event.contextUsage !== undefined) patch.contextUsage = event.contextUsage;
     if (event.contextTokens !== undefined) patch.contextTokens = event.contextTokens;
@@ -742,17 +739,44 @@ export class SessionEventHandler {
         this.renderSwarmModeMarker('ended');
       }
     }
+    // Supermoon is agent-driven now (EnterSupermoonMode / ExitSupermoonMode
+    // tools, REST toggles): reflect every transition in the transcript and keep
+    // the thinking-effort pin in step with the observed mode.
+    if (event.supermoonMode === true && !wasSupermoonOn) {
+      this.renderSupermoonModeMarker('active');
+      void this.pinSupermoonEffort();
+    }
     if (event.supermoonMode === false) {
-      this.host.state.supermoonModeEntry = undefined;
+      this.renderSupermoonModeMarker('inactive');
       const previous = this.host.state.supermoonPreviousEffort;
       if (previous !== undefined) {
         this.host.state.supermoonPreviousEffort = undefined;
         void this.restoreSupermoonEffort(previous);
       }
-      if (shouldRenderSupermoonEnded) {
-        this.renderSupermoonModeMarker('ended');
-      }
     }
+  }
+
+  /**
+   * Pin the session's thinking effort to the active model's highest supported
+   * effort when supermoon mode turns on, remembering the previous effort so it
+   * can be restored on exit. Best-effort: a failure only leaves a log trail,
+   * never an error toast during a turn.
+   */
+  private async pinSupermoonEffort(): Promise<void> {
+    const alias = this.host.state.appState.model;
+    const model = this.host.state.appState.availableModels[alias];
+    const efforts = model === undefined ? [] : effectiveModelAlias(model)?.supportEfforts ?? [];
+    if (efforts.length === 0) return;
+    const highest = efforts.at(-1)!;
+    const previous = this.host.state.appState.thinkingEffort;
+    try {
+      await this.host.requireSession().setThinking(highest);
+    } catch (error) {
+      log.warn('failed to pin thinking effort for supermoon mode', { error: String(error) });
+      return;
+    }
+    this.host.state.supermoonPreviousEffort = previous;
+    this.host.setAppState({ thinkingEffort: highest });
   }
 
   /**

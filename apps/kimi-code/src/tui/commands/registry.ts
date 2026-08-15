@@ -178,14 +178,6 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'idle-only',
   },
   {
-    name: 'supermoon',
-    aliases: [],
-    description: 'Toggle Supermoon mode or run one task in Supermoon mode',
-    priority: 100,
-    argumentHint: '[on|off] | <task>',
-    availability: 'idle-only',
-  },
-  {
     name: 'model',
     aliases: [],
     description: 'Switch LLM model',

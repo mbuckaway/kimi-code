@@ -70,6 +70,19 @@ Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只�
 
 **`ExitPlanMode`** 读取当前计划文件内容，将计划呈现给用户审批后退出 Plan 模式。可选参数 `options` 允许 Agent 提供 1–3 个备选方案（每项含 `label` 与 `description`，`label` 最长 80 字符），供用户在审批时选择；`label` 不能重复，也不能使用 `Approve`、`Reject`、`Reject and Exit`、`Revise` 等保留词。
 
+## Supermoon 模式
+
+| 工具 | 默认审批 | 说明 |
+| --- | --- | --- |
+| `EnterSupermoonMode` | 自动放行 | 开启 Supermoon 模式 |
+| `ExitSupermoonMode` | 自动放行 | 关闭 Supermoon 模式 |
+
+Supermoon 模式是最大严谨度的工作状态：开启后，Agent 默认用子代理编排实质性任务并应用优先严谨性的质量模式，客户端会把模型的思考强度锁定到支持的最高档位。参见 [Supermoon 模式指南](../guides/supermoon-mode.md)。
+
+**`EnterSupermoonMode`** 不接受任何参数，为当前会话开启该模式；模式会保持开启，直到调用 `ExitSupermoonMode`。
+
+**`ExitSupermoonMode`** 不接受任何参数，关闭该模式并恢复此前的思考强度。
+
 ## 状态管理
 
 | 工具 | 默认审批 | 说明 |

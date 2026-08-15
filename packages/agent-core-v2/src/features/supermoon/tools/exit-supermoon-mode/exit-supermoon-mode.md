@@ -1,0 +1,1 @@
+Use this tool to turn supermoon mode off once the task no longer needs thorough, multi-agent work. Supermoon mode stays on until you call this tool; leaving it active past the task wastes effort. After exiting, follow the normal tool rules unless the user asks for multi-agent work.

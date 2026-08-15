@@ -15,11 +15,7 @@ You do not need to ask for multi-agent work while Supermoon is on — the mode i
 
 ## Enabling and disabling
 
-| Command | Behavior |
-| --- | --- |
-| `/supermoon` | Toggle Supermoon mode on or off. |
-| `/supermoon on` / `/supermoon off` | Force the mode on or off. |
-| `/supermoon <task>` | Turn Supermoon on, send `<task>` as a normal prompt, and turn the mode off automatically when the turn completes normally. |
+Supermoon mode is controlled through the `EnterSupermoonMode` and `ExitSupermoonMode` tools: the agent turns the mode on with `EnterSupermoonMode` and off with `ExitSupermoonMode`, so it can enable the mode itself whenever the task calls for maximum thoroughness. The mode persists across turns until it is explicitly exited. In the web UI you can also toggle it from the modes menu.
 
 While Supermoon is on, the footer mode list shows a `supermoon` chip alongside `auto`, `yolo`, `plan`, and `swarm`.
 

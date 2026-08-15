@@ -78,12 +78,10 @@ export interface TUIState {
    */
   queuedMessageDispatchPending: boolean;
   swarmModeEntry: 'manual' | 'task' | undefined;
-  supermoonModeEntry: 'manual' | 'task' | undefined;
   /**
    * Thinking effort captured before supermoon mode pinned it to the model's
    * highest supported effort. Restored via `session.setThinking` when the
-   * mode is disabled (explicitly or by the engine's one-shot auto-exit).
-   * Undefined when no effort pin was applied.
+   * mode is disabled. Undefined when no effort pin was applied.
    */
   supermoonPreviousEffort: ThinkingEffort | undefined;
 }
@@ -193,7 +191,6 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     queuedMessages: [],
     queuedMessageDispatchPending: false,
     swarmModeEntry: undefined,
-    supermoonModeEntry: undefined,
     supermoonPreviousEffort: undefined,
   };
 }

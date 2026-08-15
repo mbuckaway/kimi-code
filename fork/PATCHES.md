@@ -32,6 +32,7 @@ mark the row `merged-upstream` (keep the row as history).
 | non-TTY upgrade | `fix/acp-headless-regressions` | Non-TTY `kimi upgrade` runs the auto-install (or exits non-zero when unsupported) instead of silently exiting 0 | — | [#2629](https://github.com/MoonshotAI/kimi-code/issues/2629) | local |
 | prompt plan_mode | `fix/acp-headless-regressions` | The prompt submit route applies `plan_mode` enter/exit-if-different so a new web session's first message enters plan mode (adapts upstream PR #2869) | [#2869](https://github.com/MoonshotAI/kimi-code/pull/2869) | [#2658](https://github.com/MoonshotAI/kimi-code/issues/2658) | local |
 | session profile bind | `fix/acp-headless-regressions` | Session create binds the requested `--agent`/`--agent-file` profile and threads `agentFiles` through the harness so the profile's tools apply (adapts upstream PRs #2832, #2770) | [#2832](https://github.com/MoonshotAI/kimi-code/pull/2832) | [#2765](https://github.com/MoonshotAI/kimi-code/issues/2765), [#2767](https://github.com/MoonshotAI/kimi-code/issues/2767) | local |
+| supermoon tools | `fix/supermoon-tools` | Replace the `/supermoon` slash command (TUI + web) with `EnterSupermoonMode` / `ExitSupermoonMode` agent tools (feature-contributed, `'tool'` trigger persists like `manual`); apply `swarm_mode`/`supermoon_mode` on prompt submit so a new web session's first prompt enters them — fixes the desktop Mode-menu toggle snap-back on fresh sessions | — | — | local |
 
 Changesets under `.changeset/` deliberately name the upstream package
 `@moonshot-ai/kimi-code`, not the fork's `@mbuckaway/kimi-code`, so a change can
@@ -62,3 +63,4 @@ changesets, so the stale name is harmless here.
 | 0.34.0-MB.1.12 | 0.34.0 | Release self-heal CI (#38); web mode-menu fix bundle (#40); ci/release-independent-of-upstream merged (PR #41/#42) |
 | 0.34.0-MB.1.13 | 0.34.0 | Fork web bundle ship (#44) |
 | 0.36.0-MB.1.14 (pending) | 0.36.0 (upstream main tip `102984aa6`) | Upstream 0.36.0 sync: fork patches ported, `dist-web` bundle kept fork-side, supermoon `agent_config` behavior preserved at the kap-server edge (`sessionAgentConfig.ts`), esc-interrupt patch retained (v1 half has no upstream equivalent) |
+| 0.36.0-MB.1.16 (pending) | 0.36.0 | Supermoon tools (replace `/supermoon` slash command with `EnterSupermoonMode` / `ExitSupermoonMode`); prompt submit applies `swarm_mode`/`supermoon_mode` (Mode-menu fix); fork web bundle ship |

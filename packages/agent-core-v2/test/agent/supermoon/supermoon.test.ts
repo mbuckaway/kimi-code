@@ -180,6 +180,23 @@ describe('AgentSupermoonService', () => {
     expect(supermoon.isActive).toBe(true);
   });
 
+  it('keeps tool trigger active across turn.ended', () => {
+    const supermoon = ix.get(IAgentSupermoonService);
+    supermoon.enter('tool');
+
+    publishTurnEnded();
+
+    expect(supermoon.isActive).toBe(true);
+  });
+
+  it('exits cleanly on explicit exit when entered with the tool trigger', () => {
+    const supermoon = ix.get(IAgentSupermoonService);
+    supermoon.enter('tool');
+    supermoon.exit();
+
+    expect(supermoon.isActive).toBe(false);
+  });
+
   it('is a no-op when entering while already active', () => {
     const supermoon = ix.get(IAgentSupermoonService);
     const context = ix.get(IAgentContextMemoryService) as StubContextMemory;

@@ -70,6 +70,19 @@ Plan mode is a constrained working state: once entered, `Write` and `Edit` are r
 
 **`ExitPlanMode`** reads the current plan file, presents the plan to the user for approval, then exits Plan mode. The optional `options` parameter lets the Agent offer 1–3 alternative approaches (each with a `label` and `description`; `label` max 80 characters) for the user to choose from during approval. Labels must be unique and cannot use reserved words such as `Approve`, `Reject`, `Reject and Exit`, or `Revise`.
 
+## Supermoon Mode
+
+| Tool | Default Approval | Description |
+| --- | --- | --- |
+| `EnterSupermoonMode` | Auto-allow | Turn Supermoon mode on |
+| `ExitSupermoonMode` | Auto-allow | Turn Supermoon mode off |
+
+Supermoon mode is a maximum-thoroughness working state: while on, the agent orchestrates substantive work with subagents by default and applies thoroughness-first quality patterns, and the client pins the model's thinking effort to its highest supported level. See the [Supermoon Mode guide](../guides/supermoon-mode.md).
+
+**`EnterSupermoonMode`** accepts no parameters and turns the mode on for the session; it stays on until `ExitSupermoonMode` is called.
+
+**`ExitSupermoonMode`** accepts no parameters and turns the mode off, restoring the previous thinking effort.
+
 ## State Management
 
 | Tool | Default Approval | Description |

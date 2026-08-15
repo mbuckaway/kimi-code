@@ -105,18 +105,12 @@ describe('Supermoon mode (SDKRpcClientBase)', () => {
     );
   });
 
-  it('supermoon_rejectsAnUnknownTriggerAtCompileTime', () => {
-    // SupermoonModeTrigger deliberately has no `tool` trigger (unlike
-    // SwarmModeTrigger) — the discriminated input type below is the spec:
-    // enabled requires a manual/task trigger, disabled requires none.
-    const manual: SupermoonModeTrigger = 'manual';
-    const task: SupermoonModeTrigger = 'task';
-    expect(manual).toBe('manual');
-    expect(task).toBe('task');
-
-    // @ts-expect-error — SupermoonModeTrigger excludes the 'tool' trigger.
+  it('supermoon_acceptsTheToolTrigger', () => {
+    // `tool` is a real trigger now (entered via the EnterSupermoonMode tool;
+    // persists like `manual` until ExitSupermoonMode).
     const tool: SupermoonModeTrigger = 'tool';
-    void tool;
+    expect(tool).toBe('tool');
+    expect(client.rpcEnterSupermoon).not.toHaveBeenCalled();
   });
 
   it('setSupermoonMode_acceptsOnlyTriggeredEnableAndUntriggeredDisable', async () => {
