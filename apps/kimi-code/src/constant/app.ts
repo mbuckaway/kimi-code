@@ -90,11 +90,15 @@ export const KIMI_CODE_CDN_LATEST_URL = `${KIMI_CODE_CDN_BASE}/latest`;
 // bodies, and the CDN install scripts read it for fresh installs.
 export const KIMI_CODE_CDN_LATEST_JSON_URL = `${KIMI_CODE_CDN_BASE}/latest.json`;
 export const KIMI_CODE_TIPS_BANNER_URL = 'https://cdn.kimi.com/kimi-code-tips/tips.json';
-// Plugin marketplace stays on the upstream CDN: the catalog content is
-// upstream-hosted, and the fork's update channel does not mirror it.
-export const KIMI_CODE_PLUGIN_MARKETPLACE_URL =
-  'https://code.kimi.com/kimi-code/plugins/marketplace.json';
-export const KIMI_CODE_PLUGIN_MARKETPLACE_URL_ENV = 'KIMI_CODE_PLUGIN_MARKETPLACE_URL';
+// The marketplace catalog location constants live in the shared
+// agent-core-v2 plugin domain (kap-server consumes them from there).
+// Deep-path import: this module is evaluated on every CLI invocation, so it
+// must not pull in the engine root. Fork: the shared default is the upstream
+// CDN URL — the fork's update channel does not mirror the catalog.
+export {
+  KIMI_CODE_PLUGIN_MARKETPLACE_URL,
+  KIMI_CODE_PLUGIN_MARKETPLACE_URL_ENV,
+} from '@moonshot-ai/agent-core-v2/app/plugin/marketplace';
 // Official plugins whose usage bills against the user's plan quota. Installing
 // one of these shows a quota note after the install result.
 export const QUOTA_CONSUMING_PLUGIN_IDS: readonly string[] = ['kimi-datasource'];
