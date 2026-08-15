@@ -187,6 +187,8 @@ describe('default agent profiles', () => {
       'Edit',
       'EnterPlanMode',
       'ExitPlanMode',
+      'EnterSupermoonMode',
+      'ExitSupermoonMode',
       'Glob',
       'Grep',
       'Read',

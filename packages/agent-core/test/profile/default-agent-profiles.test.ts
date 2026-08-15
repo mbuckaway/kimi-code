@@ -73,6 +73,19 @@ describe('default agent profiles', () => {
     }
   });
 
+  it('lists the supermoon tools on agent and coder but not on explore/plan (v2 parity)', () => {
+    for (const name of ['agent', 'coder']) {
+      const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
+      expect(tools).toContain('EnterSupermoonMode');
+      expect(tools).toContain('ExitSupermoonMode');
+    }
+    for (const name of ['explore', 'plan']) {
+      const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
+      expect(tools).not.toContain('EnterSupermoonMode');
+      expect(tools).not.toContain('ExitSupermoonMode');
+    }
+  });
+
   it('fails loudly when an embedded system prompt source is missing', () => {
     expect(() =>
       loadAgentProfilesFromSources(['profile/default/agent.yaml'], {

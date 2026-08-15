@@ -99,6 +99,7 @@ export interface AgentStatePatch {
   permission_mode?: string;
   plan_mode?: boolean;
   swarm_mode?: boolean;
+  supermoon_mode?: boolean;
   goal_objective?: string;
   goal_control?: 'pause' | 'resume' | 'cancel';
 }
@@ -344,6 +345,7 @@ export interface AgentStateSnapshot {
   permissionMode?: string;
   planMode?: boolean;
   swarmMode?: boolean;
+  supermoonMode?: boolean;
 }
 
 /**
@@ -366,6 +368,8 @@ export interface PromptDispatchLogEntry {
     | 'cancelPlan'
     | 'enterSwarm'
     | 'exitSwarm'
+    | 'enterSupermoon'
+    | 'exitSupermoon'
     | 'createGoal'
     | 'pauseGoal'
     | 'resumeGoal'

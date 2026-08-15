@@ -51,6 +51,7 @@ import {
 import { ReplayBuilder, type ReplayBuilderOptions } from './replay';
 import { SkillManager } from './skill';
 import type { SkillRegistry } from './skill/types';
+import { SupermoonMode } from './supermoon';
 import { SwarmMode } from './swarm';
 import { ToolManager } from './tool/index';
 import { TurnFlow } from './turn';
@@ -64,6 +65,7 @@ import type { ToolServices } from '../tools/support/services';
 
 export type { AgentRecord, AgentRecordPersistence } from './records';
 export type { SwarmModeTrigger } from './swarm';
+export type { SupermoonModeTrigger } from './supermoon';
 export type {
   BuiltinTool,
   ToolDisclosure,
@@ -156,6 +158,7 @@ export class Agent {
   readonly permission: PermissionManager;
   readonly planMode: PlanMode;
   readonly swarmMode: SwarmMode;
+  readonly supermoonMode: SupermoonMode;
   readonly usage: UsageRecorder;
   readonly skills: SkillManager | null;
   readonly tools: ToolManager;
@@ -238,6 +241,7 @@ export class Agent {
     this.permission = new PermissionManager(this, options.permission);
     this.planMode = new PlanMode(this);
     this.swarmMode = new SwarmMode(this);
+    this.supermoonMode = new SupermoonMode(this);
     this.usage = new UsageRecorder(this);
     this.skills = options.skills ? new SkillManager(this, options.skills) : null;
     this.tools = new ToolManager(this);
@@ -629,6 +633,15 @@ export class Agent {
       getSwarmMode: () => {
         return this.swarmMode.isActive;
       },
+      enterSupermoon: (payload) => {
+        this.supermoonMode.enter(payload.trigger);
+      },
+      exitSupermoon: () => {
+        this.supermoonMode.exit();
+      },
+      getSupermoonMode: () => {
+        return this.supermoonMode.isActive;
+      },
       beginCompaction: (payload) => {
         this.fullCompaction.begin({ source: 'manual', instruction: payload.instruction });
       },
@@ -750,6 +763,7 @@ export class Agent {
       contextUsage,
       planMode: this.planMode.isActive,
       swarmMode: this.swarmMode.isActive,
+      supermoonMode: this.supermoonMode.isActive,
       permission: this.permission.mode,
       usage,
     });

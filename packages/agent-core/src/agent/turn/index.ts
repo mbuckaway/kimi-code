@@ -724,6 +724,9 @@ export class TurnFlow {
     if (this.agent.swarmMode.shouldAutoExit) {
       this.agent.swarmMode.exit();
     }
+    if (this.agent.supermoonMode.shouldAutoExit) {
+      this.agent.supermoonMode.exit();
+    }
     if (errorEvent !== undefined) {
       this.agent.emitEvent(errorEvent);
     }

@@ -108,6 +108,9 @@ interface RpcRecord {
   startBtwCalls: unknown[];
   enterSwarmCalls: unknown[];
   exitSwarmCalls: unknown[];
+  enterSupermoonCalls: unknown[];
+  exitSupermoonCalls: unknown[];
+  getSupermoonModeCalls: number;
   createGoalCalls: unknown[];
   pauseGoalCalls: unknown[];
   resumeGoalCalls: unknown[];
@@ -142,6 +145,9 @@ function makeBridge(
     startBtwCalls: [],
     enterSwarmCalls: [],
     exitSwarmCalls: [],
+    enterSupermoonCalls: [],
+    exitSupermoonCalls: [],
+    getSupermoonModeCalls: 0,
     createGoalCalls: [],
     pauseGoalCalls: [],
     resumeGoalCalls: [],
@@ -221,6 +227,16 @@ function makeBridge(
     }),
     exitSwarm: vi.fn().mockImplementation(async (payload) => {
       record.exitSwarmCalls.push(payload);
+    }),
+    enterSupermoon: vi.fn().mockImplementation(async (payload) => {
+      record.enterSupermoonCalls.push(payload);
+    }),
+    exitSupermoon: vi.fn().mockImplementation(async (payload) => {
+      record.exitSupermoonCalls.push(payload);
+    }),
+    getSupermoonMode: vi.fn().mockImplementation(async () => {
+      record.getSupermoonModeCalls += 1;
+      return false;
     }),
     createGoal: vi.fn().mockImplementation(async (payload) => {
       record.createGoalCalls.push(payload);
@@ -1095,6 +1111,7 @@ describe('PromptService stateless controls — bootstrap + shadow', () => {
       permissionMode: 'yolo',
       planMode: true,
       swarmMode: false,
+      supermoonMode: false,
     });
     // Getters fired exactly once each.
     expect(record.getConfigCalls).toBe(1);
@@ -1521,6 +1538,77 @@ describe('PromptService stateless controls — dispatch log', () => {
     expect(record.exitSwarmCalls[0]).toEqual({ sessionId: SID, agentId: 'main' });
     log = impl._dispatchLogForTest(SID);
     expect(log?.some((e) => e.kind === 'exitSwarm')).toBe(true);
+  });
+
+  it('dispatches enterSupermoon/exitSupermoon and records them in the log', async () => {
+    const { bridge, record } = makeBridge({
+      config: { modelAlias: 'kimi-code/k2', thinkingEffort: 'off' },
+      permission: { mode: 'manual' },
+      plan: null,
+    });
+    const { bus, triggerSubscribers } = makeBus();
+    const impl = newSvc(bridge, bus);
+
+    await impl.submit(SID, mkBody({ supermoon_mode: true }));
+    expect(record.enterSupermoonCalls.length).toBe(1);
+    expect(record.enterSupermoonCalls[0]).toEqual({
+      sessionId: SID,
+      agentId: 'main',
+      trigger: 'manual',
+    });
+    let log = impl._dispatchLogForTest(SID);
+    expect(log?.some((e) => e.kind === 'enterSupermoon')).toBe(true);
+
+    triggerSubscribers({
+      type: 'turn.started',
+      turnId: 1,
+      origin: { kind: 'user' },
+      sessionId: SID,
+      agentId: 'main',
+    } as unknown as Event);
+    triggerSubscribers({
+      type: 'turn.ended',
+      turnId: 1,
+      reason: 'completed',
+      sessionId: SID,
+      agentId: 'main',
+    } as unknown as Event);
+
+    await impl.submit(SID, mkBody({ supermoon_mode: false }));
+    expect(record.exitSupermoonCalls.length).toBe(1);
+    expect(record.exitSupermoonCalls[0]).toEqual({ sessionId: SID, agentId: 'main' });
+    log = impl._dispatchLogForTest(SID);
+    expect(log?.some((e) => e.kind === 'exitSupermoon')).toBe(true);
+  });
+
+  it('does not re-dispatch supermoon_mode when it matches the shadow', async () => {
+    const { bridge, record } = makeBridge({
+      config: { modelAlias: 'kimi-code/k2', thinkingEffort: 'off' },
+      permission: { mode: 'manual' },
+      plan: null,
+    });
+    const { bus, triggerSubscribers } = makeBus();
+    const impl = newSvc(bridge, bus);
+    await impl.submit(SID, mkBody({ supermoon_mode: true }));
+    expect(record.enterSupermoonCalls.length).toBe(1);
+
+    triggerSubscribers({
+      type: 'turn.started',
+      turnId: 1,
+      origin: { kind: 'user' },
+      sessionId: SID,
+      agentId: 'main',
+    } as unknown as Event);
+    triggerSubscribers({
+      type: 'turn.ended',
+      turnId: 1,
+      reason: 'completed',
+      sessionId: SID,
+      agentId: 'main',
+    } as unknown as Event);
+
+    await impl.submit(SID, mkBody({ supermoon_mode: true }));
+    expect(record.enterSupermoonCalls.length).toBe(1);
   });
 
   it('does not re-dispatch swarm_mode when it matches the shadow', async () => {
