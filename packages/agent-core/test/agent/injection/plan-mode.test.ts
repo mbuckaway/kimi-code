@@ -58,6 +58,9 @@ describe('PlanModeInjector content', () => {
     // TaskStop/CronCreate/CronDelete are hard-denied in plan mode
     // (plan-mode-guard-deny.ts); the reminder must name them.
     expect(text).toContain('TaskStop');
+    expect(text).toContain(
+      'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+    );
   });
 
   it('uses the inline reminder when no plan file path is available', async () => {
@@ -120,6 +123,9 @@ describe('PlanModeInjector cadence', () => {
     expect(text).toContain('Plan mode still active');
     expect(text).toContain('see full instructions earlier');
     expect(text).toContain('Plan file: /tmp/plan.md');
+    expect(text).toContain(
+      'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+    );
   });
 
   it('refreshes the full reminder after the long assistant-turn threshold', async () => {

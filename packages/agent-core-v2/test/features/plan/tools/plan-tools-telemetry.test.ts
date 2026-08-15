@@ -142,6 +142,11 @@ describe('EnterPlanModeTool telemetry', () => {
     expect(result.isError).toBeFalsy();
     expect(result.output).toContain('Wait for the host to provide a plan file path');
     expect(result.output).toContain('no plan file path is available');
+    expect(result.output).toContain(
+      'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+    );
+    expect(result.output).toContain('AskUserQuestion');
+    expect(result.output).toContain('Plan review gate');
   });
 
   it('uses plan-file guidance when the host provides a plan file path', async () => {
@@ -165,6 +170,11 @@ describe('EnterPlanModeTool telemetry', () => {
     expect(result.isError).toBeFalsy();
     expect(result.output).toContain(`Plan file: ${ACTIVE_PLAN.path}`);
     expect(result.output).toContain('Write the plan to the plan file with Write or Edit');
+    expect(result.output).toContain(
+      'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+    );
+    expect(result.output).toContain('AskUserQuestion');
+    expect(result.output).toContain('Plan review gate');
   });
 
   it('returns an error when entering plan mode fails', async () => {
@@ -267,6 +277,11 @@ describe('AgentPlanService EnterPlanMode telemetry', () => {
 
         expect(result[0]?.isError).toBeFalsy();
         expect(result[0]?.output).toContain('Plan mode is now active');
+        expect(result[0]?.output).toContain(
+          'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+        );
+        expect(result[0]?.output).toContain('AskUserQuestion');
+        expect(result[0]?.output).toContain('Plan review gate');
         expect(
           ctx.allEvents.some((event) => event.type === '[rpc]' && event.event === 'requestApproval'),
         ).toBe(false);

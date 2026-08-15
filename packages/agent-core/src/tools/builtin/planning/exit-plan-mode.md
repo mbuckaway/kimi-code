@@ -11,9 +11,6 @@ Only use this tool for tasks that require planning implementation steps. For res
 ## What a good plan contains
 List specific, verifiable steps grounded in the actual codebase — real files, functions, and commands, in a sensible order. Each step should be concrete enough to act on and to check. Avoid vague filler like "improve performance" or "add tests"; say what to change and where.
 
-## Multiple Approaches
-If your plan offers multiple alternative approaches, pass them via the `options` parameter so the user can choose which one to execute — see the `options` parameter for the format, count, and reserved labels. In yolo and manual modes the user sees all options alongside the host's Reject and Revise controls.
-
 ## Before Using
 - In auto permission mode, do NOT use AskUserQuestion; make the best decision from available context.
 - In auto permission mode, this tool exits plan mode without asking the user.
