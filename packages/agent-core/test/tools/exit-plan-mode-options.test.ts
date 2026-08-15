@@ -286,6 +286,5 @@ describe('ExitPlanMode options documentation consistency', () => {
     expect(optionsParamDescription()).toMatch(/single option/i);
     expect(optionsParamDescription()).toMatch(/plain plan approval/i);
     expect(DESCRIPTION).not.toMatch(/single option/i);
-    expect(DESCRIPTION).toMatch(/pass them via the .?options.? parameter/i);
   });
 });

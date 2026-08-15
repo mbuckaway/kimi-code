@@ -94,6 +94,9 @@ describe('PlanModeService dynamic injection content', () => {
     expect(text).toContain('Edit');
     expect(text).toContain('ExitPlanMode');
     expect(text).toContain(`Plan file: ${planFilePath}`);
+    expect(text).toContain(
+      'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+    );
   });
 
   it('derives a plan file path before injecting the full reminder', async () => {
@@ -134,6 +137,9 @@ describe('PlanModeService dynamic injection content', () => {
 
     expect(lastPlanReminder(context)).toContain('Re-entering Plan Mode');
     expect(lastPlanReminder(context)).toContain('Read the existing plan file');
+    expect(lastPlanReminder(context)).toContain(
+      'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+    );
   });
 });
 
@@ -186,6 +192,9 @@ describe('PlanModeService dynamic injection cadence', () => {
     expect(text).toContain('Plan mode still active');
     expect(text).toContain('see full instructions earlier');
     expect(text).toContain(`Plan file: ${planFilePath}`);
+    expect(text).toContain(
+      'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
+    );
   });
 
   it('refreshes the full reminder after the long assistant-turn threshold', async () => {

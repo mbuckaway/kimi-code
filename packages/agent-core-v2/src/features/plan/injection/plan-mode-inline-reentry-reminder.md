@@ -1,5 +1,7 @@
 Plan mode is active. You MUST NOT make any edits or otherwise make changes to the system unless a tool request is explicitly approved. Prefer read-only tools. Use Bash only when needed; Bash follows the normal permission mode and rules. This supersedes any other instructions you have received.
 
+Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.
+
 ## Re-entering Plan Mode
 No plan file path is available in this host.
 Before proceeding:

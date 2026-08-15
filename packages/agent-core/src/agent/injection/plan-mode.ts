@@ -90,6 +90,8 @@ function fullReminder(planFilePath: PlanFilePath): string {
 
   const body = `Plan mode is active. You MUST NOT make any edits (with the exception of the current plan file) or otherwise make changes to the system unless a tool request is explicitly approved. Prefer read-only tools. Use Bash only when needed; Bash follows the normal permission mode and rules. This supersedes any other instructions you have received. TaskStop, CronCreate, and CronDelete are also blocked in plan mode — call ExitPlanMode first if you need them.
 
+Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.
+
 Workflow:
   1. Understand — explore the codebase with Glob, Grep, Read.
   2. Design — converge on the best approach; consider trade-offs but aim for a single recommendation.
@@ -100,8 +102,6 @@ Workflow:
 ## Handling multiple approaches
 Keep it focused: at most 2-3 meaningfully different approaches. Do NOT pad with minor variations — if one approach is clearly superior, just propose that one.
 When the best approach depends on user preferences, constraints, or context you don't have, use AskUserQuestion to clarify first. This helps you write a better, more targeted plan rather than dumping multiple options for the user to sort through.
-When you do include multiple approaches in the plan, you MUST pass them as the \`options\` parameter when calling ExitPlanMode, so the user can select which approach to execute at approval time.
-NEVER write multiple approaches in the plan and call ExitPlanMode without the \`options\` parameter — the user will only see the default approval controls with no way to choose a specific approach.
 
 AskUserQuestion is for clarifying missing requirements or user preferences that affect the plan.
 Never ask about plan approval via text or AskUserQuestion.
@@ -115,7 +115,7 @@ function sparseReminder(planFilePath: PlanFilePath): string {
     return inlineSparseReminder();
   }
 
-  const body = `Plan mode still active (see full instructions earlier). Prefer read-only tools except the current plan file. Use Write or Edit to modify the plan file. If it does not exist yet, create it with Write first. Use Bash only when needed; Bash follows the normal permission mode and rules. Use AskUserQuestion to clarify user preferences when it helps you write a better plan. If the plan has multiple approaches, pass options to ExitPlanMode so the user can choose. End turns with AskUserQuestion (for clarifications) or ExitPlanMode (for approval). Never ask about plan approval via text or AskUserQuestion.`;
+  const body = `Plan mode still active (see full instructions earlier). Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities. Prefer read-only tools except the current plan file. Use Write or Edit to modify the plan file. If it does not exist yet, create it with Write first. Use Bash only when needed; Bash follows the normal permission mode and rules. Use AskUserQuestion to clarify user preferences when it helps you write a better plan. End turns with AskUserQuestion (for clarifications) or ExitPlanMode (for approval). Never ask about plan approval via text or AskUserQuestion.`;
   return withPlanFileFooter(body, planFilePath);
 }
 
@@ -125,6 +125,8 @@ function reentryReminder(planFilePath: PlanFilePath): string {
   }
 
   const body = `Plan mode is active. You MUST NOT make any edits (with the exception of the current plan file) or otherwise make changes to the system unless a tool request is explicitly approved. Prefer read-only tools. Use Bash only when needed; Bash follows the normal permission mode and rules. This supersedes any other instructions you have received.
+
+Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.
 
 ## Re-entering Plan Mode
 A plan file from a previous planning session already exists.
@@ -143,6 +145,8 @@ Your turn must end with either AskUserQuestion (to clarify requirements) or Exit
 function inlineFullReminder(): string {
   return `Plan mode is active. You MUST NOT make any edits or otherwise make changes to the system unless a tool request is explicitly approved. Prefer read-only tools. Use Bash only when needed; Bash follows the normal permission mode and rules. This supersedes any other instructions you have received.
 
+Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.
+
 Workflow:
   1. Understand — explore the codebase with Glob, Grep, Read.
   2. Design — converge on the best approach; consider trade-offs but aim for a single recommendation.
@@ -152,7 +156,6 @@ Workflow:
 ## Handling multiple approaches
 Keep it focused: at most 2-3 meaningfully different approaches. Do NOT pad with minor variations — if one approach is clearly superior, just propose that one.
 When the best approach depends on user preferences, constraints, or context you don't have, use AskUserQuestion to clarify first.
-When you do include multiple approaches in the plan, you MUST pass them as the \`options\` parameter when calling ExitPlanMode, so the user can select which approach to execute at approval time.
 
 AskUserQuestion is for clarifying missing requirements or user preferences that affect the plan.
 Never ask about plan approval via text or AskUserQuestion.
@@ -160,11 +163,13 @@ Your turn must end with either AskUserQuestion (to clarify requirements or prefe
 }
 
 function inlineSparseReminder(): string {
-  return `Plan mode still active (see full instructions earlier). Read-only; no plan file path is available in this host. Wait for the host to provide a plan file path before calling ExitPlanMode. Use AskUserQuestion to clarify user preferences when it helps you write a better plan. If the plan has multiple approaches, pass options to ExitPlanMode so the user can choose. End turns with AskUserQuestion (for clarifications) or ExitPlanMode (for approval).`;
+  return `Plan mode still active (see full instructions earlier). Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities. Read-only; no plan file path is available in this host. Wait for the host to provide a plan file path before calling ExitPlanMode. Use AskUserQuestion to clarify user preferences when it helps you write a better plan. End turns with AskUserQuestion (for clarifications) or ExitPlanMode (for approval).`;
 }
 
 function inlineReentryReminder(): string {
   return `Plan mode is active. You MUST NOT make any edits or otherwise make changes to the system unless a tool request is explicitly approved. Prefer read-only tools. Use Bash only when needed; Bash follows the normal permission mode and rules. This supersedes any other instructions you have received.
+
+Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.
 
 ## Re-entering Plan Mode
 No plan file path is available in this host.
