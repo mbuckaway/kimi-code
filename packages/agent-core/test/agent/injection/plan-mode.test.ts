@@ -58,6 +58,7 @@ describe('PlanModeInjector content', () => {
     // TaskStop/CronCreate/CronDelete are hard-denied in plan mode
     // (plan-mode-guard-deny.ts); the reminder must name them.
     expect(text).toContain('TaskStop');
+    expect(text).toContain('Plan review gate');
     expect(text).toContain(
       'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',
     );
@@ -122,6 +123,7 @@ describe('PlanModeInjector cadence', () => {
     const text = lastReminder(agent);
     expect(text).toContain('Plan mode still active');
     expect(text).toContain('see full instructions earlier');
+    expect(text).toContain('do not run it twice');
     expect(text).toContain('Plan file: /tmp/plan.md');
     expect(text).toContain(
       'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',

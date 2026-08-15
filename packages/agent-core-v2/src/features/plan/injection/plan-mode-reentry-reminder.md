@@ -11,5 +11,6 @@ Before proceeding:
   4. You may use Write or Edit to modify the plan file. If the file does not exist yet, create it with Write first.
   5. Use AskUserQuestion to clarify missing requirements or user preferences that affect the plan.
   6. Always edit the plan file before calling ExitPlanMode.
+  7. Run the plan-review skill before ExitPlanMode if it is available and the plan file does not already contain a ## Review Findings section; if that section is present the skill has already run — do not re-run it. The skill's close-out calls ExitPlanMode itself; do not call it again.
 
 Your turn must end with either AskUserQuestion (to clarify requirements) or ExitPlanMode (to request plan approval).

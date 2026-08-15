@@ -8,5 +8,6 @@ Before proceeding:
   1. Re-evaluate the user request and any existing conversation context.
   2. Use AskUserQuestion to clarify missing requirements or user preferences that affect the plan.
   3. Wait for the host to provide a plan file path, write the revised plan there, then call ExitPlanMode.
+  4. Run the plan-review skill before ExitPlanMode if it is available and the plan lacks a ## Review Findings section; if that section is present the skill has already run — do not re-run it. The skill's close-out calls ExitPlanMode itself; do not call it again.
 
 Your turn must end with either AskUserQuestion (to clarify requirements) or ExitPlanMode (to request plan approval).
