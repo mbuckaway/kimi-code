@@ -117,11 +117,11 @@ export type SetSessionSwarmModeRpcInput =
   | (SessionIdRpcInput & { readonly enabled: false });
 
 /**
- * Trigger for entering Supermoon mode. Unlike `SwarmModeTrigger`, there is no
- * `tool` trigger: Supermoon is entered manually or one-shot via the
- * task-triggered `supermoon()` prompt.
+ * Trigger for entering Supermoon mode: `manual` (persists), `task` (one-shot,
+ * auto-exits on turn end), or `tool` (entered via the `EnterSupermoonMode`
+ * tool; persists like `manual` until `ExitSupermoonMode`).
  */
-export type SupermoonModeTrigger = 'manual' | 'task';
+export type SupermoonModeTrigger = 'manual' | 'task' | 'tool';
 
 export type SetSessionSupermoonModeRpcInput =
   | (SessionIdRpcInput & { readonly enabled: true; readonly trigger: SupermoonModeTrigger })
@@ -131,8 +131,7 @@ export type SetSessionSupermoonModeRpcInput =
  * Structural view of the supermoon RPC methods on the engine client. The
  * engine's `CoreAPI` does not declare `enterSupermoon` / `exitSupermoon` yet
  * (only `enterSwarm` / `exitSwarm`), so the base client reaches them
- * structurally — the same feature-detection approach `capabilityRpc` uses in
- * `session.ts`. Drop this cast once the engine declares the methods.
+ * structurally. Drop this cast once the engine declares the methods.
  */
 interface SupermoonRpcSurface {
   enterSupermoon(payload: {

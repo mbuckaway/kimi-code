@@ -4217,7 +4217,7 @@ command = "vim"
     expect(transcript).not.toContain('Swarm deactivated');
   });
 
-  it('syncs supermoon mode from status events without rendering markers', async () => {
+  it('syncs supermoon mode from status events and renders transition markers', async () => {
     const { driver } = await makeDriver();
 
     driver.sessionEventHandler.handleEvent(
@@ -4231,7 +4231,9 @@ command = "vim"
     );
 
     expect(driver.state.appState.supermoonMode).toBe(true);
-    expect(stripSgr(renderTranscript(driver))).not.toContain('Supermoon activated');
+    await vi.waitFor(() => {
+      expect(countOccurrences(stripSgr(renderTranscript(driver)), 'Supermoon activated')).toBe(1);
+    });
 
     driver.sessionEventHandler.handleEvent(
       {
@@ -4245,14 +4247,13 @@ command = "vim"
 
     expect(driver.state.appState.supermoonMode).toBe(false);
     const transcript = stripSgr(renderTranscript(driver));
-    expect(transcript).not.toContain('Supermoon activated');
-    expect(transcript).not.toContain('Supermoon deactivated');
+    expect(countOccurrences(transcript, 'Supermoon activated')).toBe(1);
+    expect(countOccurrences(transcript, 'Supermoon deactivated')).toBe(1);
     expect(transcript).not.toContain('Supermoon ended');
   });
 
-  it('renders an ended marker and restores the pinned effort when a one-shot /supermoon task exits', async () => {
+  it('pins and restores the thinking effort when supermoon mode toggles via status events', async () => {
     const { driver, session } = await makeDriver(undefined);
-    driver.state.appState.permissionMode = 'auto';
     driver.state.appState.model = 'k2';
     driver.state.appState.thinkingEffort = 'low';
     driver.state.appState.availableModels = {
@@ -4264,22 +4265,22 @@ command = "vim"
       },
     };
 
-    driver.handleUserInput('/supermoon Ship feature X');
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        supermoonMode: true,
+      } as Event,
+      vi.fn(),
+    );
 
-    await vi.waitFor(() => {
-      expect(session.setSupermoonMode).toHaveBeenCalledWith(true, 'task');
-    });
     await vi.waitFor(() => {
       expect(session.setThinking).toHaveBeenCalledWith('max');
     });
-    expect(driver.state.supermoonModeEntry).toBe('task');
     expect(driver.state.supermoonPreviousEffort).toBe('low');
-    await vi.waitFor(() => {
-      expect(countOccurrences(stripSgr(renderTranscript(driver)), 'Supermoon activated')).toBe(1);
-    });
-    let transcript = stripSgr(renderTranscript(driver));
-    expect(countOccurrences(transcript, 'Supermoon activated')).toBe(1);
-    expect(transcript).not.toContain('Supermoon ended');
+    expect(driver.state.appState.thinkingEffort).toBe('max');
+    expect(countOccurrences(stripSgr(renderTranscript(driver)), 'Supermoon activated')).toBe(1);
 
     driver.sessionEventHandler.handleEvent(
       {
@@ -4292,15 +4293,12 @@ command = "vim"
     );
 
     expect(driver.state.appState.supermoonMode).toBe(false);
-    expect(driver.state.supermoonModeEntry).toBeUndefined();
     expect(driver.state.supermoonPreviousEffort).toBeUndefined();
     await vi.waitFor(() => {
       expect(session.setThinking).toHaveBeenCalledWith('low');
     });
-    transcript = stripSgr(renderTranscript(driver));
-    expect(countOccurrences(transcript, 'Supermoon activated')).toBe(1);
-    expect(countOccurrences(transcript, 'Supermoon ended')).toBe(1);
-    expect(transcript).not.toContain('Supermoon deactivated');
+    const transcript = stripSgr(renderTranscript(driver));
+    expect(countOccurrences(transcript, 'Supermoon deactivated')).toBe(1);
   });
 
   it('queues Ctrl-S input instead of steering while /init is running', async () => {

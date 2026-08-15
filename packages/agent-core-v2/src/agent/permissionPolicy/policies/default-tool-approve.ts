@@ -22,6 +22,8 @@ const DEFAULT_APPROVE_TOOLS = new Set([
   'Skill',
   'EnterPlanMode',
   'ExitPlanMode',
+  'EnterSupermoonMode',
+  'ExitSupermoonMode',
   'CreateGoal',
   'GetGoal',
   'SetGoalBudget',

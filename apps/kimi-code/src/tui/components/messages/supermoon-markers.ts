@@ -3,7 +3,7 @@ import { truncateToWidth, type Component } from '@moonshot-ai/pi-tui';
 import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 
-export type SupermoonModeMarkerState = 'active' | 'inactive' | 'ended';
+export type SupermoonModeMarkerState = 'active' | 'inactive';
 
 export class SupermoonModeMarkerComponent implements Component {
   constructor(private readonly state: SupermoonModeMarkerState) {}
@@ -27,7 +27,5 @@ function supermoonMarkerLabel(state: SupermoonModeMarkerState): string {
       return 'Supermoon activated';
     case 'inactive':
       return 'Supermoon deactivated';
-    case 'ended':
-      return 'Supermoon ended';
   }
 }

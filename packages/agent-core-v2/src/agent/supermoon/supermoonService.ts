@@ -5,13 +5,13 @@
  * through the `supermoon_mode.enter` / `supermoon_mode.exit` Ops, read through
  * `wire.getModel`), mirrors it into `systemReminder` as live-only side effects,
  * derives `agent.status.updated` from the Ops' `toEvent`, and auto-exits on
- * turn end via `turn` when entered with the `task` trigger (`manual` persists
- * until explicitly exited). The enter-reminder removal on exit is a cross-model
- * fold on `ContextModel`: dispatching `supermoon_mode.exit` pops the reminder
- * when it is the last message, both live and on replay. The service only
- * publishes the live-only `context.spliced` event for that pop (so injector
- * bookkeeping stays in step) and appends the exit reminder when nothing was
- * popped. Bound at Agent scope.
+ * turn end via `turn` when entered with the `task` trigger (`manual` and `tool`
+ * persist until explicitly exited). The enter-reminder removal on exit is a
+ * cross-model fold on `ContextModel`: dispatching `supermoon_mode.exit` pops
+ * the reminder when it is the last message, both live and on replay. The
+ * service only publishes the live-only `context.spliced` event for that pop (so
+ * injector bookkeeping stays in step) and appends the exit reminder when
+ * nothing was popped. Bound at Agent scope.
  */
 
 import { Service } from '#/_base/di/service';

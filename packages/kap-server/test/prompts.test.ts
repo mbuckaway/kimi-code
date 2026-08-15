@@ -281,6 +281,109 @@ describe('server-v2 /api/v1 prompts', () => {
     expect(status.body.data.plan_mode).toBe(true);
   });
 
+  it('enters swarm mode when the first prompt requests it', async () => {
+    const id = await createSession(home as string);
+
+    const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+      model: 'stub',
+      swarm_mode: true,
+      content: [{ type: 'text', text: 'investigate the bug' }],
+    });
+    expect(submitted.body.code).toBe(0);
+
+    const status = await call<{ swarm_mode: boolean }>(
+      'GET',
+      `/api/v1/sessions/${id}/status`,
+    );
+    expect(status.body.code).toBe(0);
+    expect(status.body.data.swarm_mode).toBe(true);
+  });
+
+  it('enters supermoon mode when the first prompt requests it', async () => {
+    const id = await createSession(home as string);
+
+    const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+      model: 'stub',
+      supermoon_mode: true,
+      content: [{ type: 'text', text: 'investigate the bug' }],
+    });
+    expect(submitted.body.code).toBe(0);
+
+    const status = await call<{ supermoon_mode: boolean }>(
+      'GET',
+      `/api/v1/sessions/${id}/status`,
+    );
+    expect(status.body.code).toBe(0);
+    expect(status.body.data.supermoon_mode).toBe(true);
+  });
+
+  it('exits swarm mode when a prompt disables it', async () => {
+    const id = await createSession(home as string);
+    await createMainAgent(id);
+
+    const profile = await call<unknown>('POST', `/api/v1/sessions/${id}/profile`, {
+      agent_config: { swarm_mode: true },
+    });
+    expect(profile.body.code).toBe(0);
+
+    const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+      model: 'stub',
+      swarm_mode: false,
+      content: [{ type: 'text', text: 'implement the fix' }],
+    });
+    expect(submitted.body.code).toBe(0);
+
+    const status = await call<{ swarm_mode: boolean }>(
+      'GET',
+      `/api/v1/sessions/${id}/status`,
+    );
+    expect(status.body.code).toBe(0);
+    expect(status.body.data.swarm_mode).toBe(false);
+  });
+
+  it('exits supermoon mode when a prompt disables it', async () => {
+    const id = await createSession(home as string);
+    await createMainAgent(id);
+
+    const profile = await call<unknown>('POST', `/api/v1/sessions/${id}/profile`, {
+      agent_config: { supermoon_mode: true },
+    });
+    expect(profile.body.code).toBe(0);
+
+    const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+      model: 'stub',
+      supermoon_mode: false,
+      content: [{ type: 'text', text: 'implement the fix' }],
+    });
+    expect(submitted.body.code).toBe(0);
+
+    const status = await call<{ supermoon_mode: boolean }>(
+      'GET',
+      `/api/v1/sessions/${id}/status`,
+    );
+    expect(status.body.code).toBe(0);
+    expect(status.body.data.supermoon_mode).toBe(false);
+  });
+
+  it('leaves swarm and supermoon mode untouched when a prompt omits them', async () => {
+    const id = await createSession(home as string);
+
+    const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+      model: 'stub',
+      content: [{ type: 'text', text: 'no mode preference' }],
+    });
+    expect(submitted.body.code).toBe(0);
+
+    const status = await call<{ swarm_mode: boolean; supermoon_mode: boolean }>(
+      'GET',
+      `/api/v1/sessions/${id}/status`,
+    );
+    expect(status.body.code).toBe(0);
+    // The default false stays false — an omitted field never enters a mode.
+    expect(status.body.data.swarm_mode).toBe(false);
+    expect(status.body.data.supermoon_mode).toBe(false);
+  });
+
   it('makes the first three REST prompts available to title generation', async () => {
     const id = await createSession(home as string);
     await createMainAgent(id);

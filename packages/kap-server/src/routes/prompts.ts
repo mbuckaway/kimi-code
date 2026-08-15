@@ -12,6 +12,8 @@ import {
   IAgentLifecycleService,
   IAgentPermissionModeService,
   IAgentPlanService,
+  IAgentSupermoonService,
+  IAgentSwarmService,
   IAgentProfileService,
   IAgentToolPolicyService,
   IAgentPromptService,
@@ -121,6 +123,8 @@ async function resolvePromptFromSession(session: ISessionScopeHandle, agentId?: 
     toolPolicy: agent.accessor.get(IAgentToolPolicyService),
     permissionMode: agent.accessor.get(IAgentPermissionModeService),
     plan: agent.accessor.get(IAgentPlanService),
+    swarm: agent.accessor.get(IAgentSwarmService),
+    supermoon: agent.accessor.get(IAgentSupermoonService),
   };
 }
 
@@ -268,6 +272,21 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           if (active !== req.body.plan_mode) {
             if (req.body.plan_mode) await resolved.plan.enter();
             else resolved.plan.exit();
+          }
+        }
+        // Swarm and supermoon apply-only-when-set like the plan_mode block: an
+        // omitted field never touches state, so the first prompt of a new Web
+        // session can enter (or exit) a mode before its turn is enqueued.
+        if (req.body.swarm_mode !== undefined) {
+          if (resolved.swarm.isActive !== req.body.swarm_mode) {
+            if (req.body.swarm_mode) resolved.swarm.enter('manual');
+            else resolved.swarm.exit();
+          }
+        }
+        if (req.body.supermoon_mode !== undefined) {
+          if (resolved.supermoon.isActive !== req.body.supermoon_mode) {
+            if (req.body.supermoon_mode) resolved.supermoon.enter('manual');
+            else resolved.supermoon.exit();
           }
         }
         if (req.body.disabled_tools !== undefined) {

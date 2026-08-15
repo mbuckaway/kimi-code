@@ -15,11 +15,7 @@ Supermoon 开启期间，你无需主动要求多智能体协作——模式本�
 
 ## 开启与关闭
 
-| 命令 | 行为 |
-| --- | --- |
-| `/supermoon` | 切换 Supermoon 模式（开/关）。 |
-| `/supermoon on` / `/supermoon off` | 强制开启或关闭该模式。 |
-| `/supermoon <task>` | 先开启 Supermoon，再把 `<task>` 作为普通提示词发送；该轮次正常完成后自动关闭模式。 |
+Supermoon 模式通过 `EnterSupermoonMode` 和 `ExitSupermoonMode` 两个工具控制：Agent 用 `EnterSupermoonMode` 开启模式，用 `ExitSupermoonMode` 关闭模式，因此在任务需要最大程度的严谨性时，Agent 可以自行开启。模式会跨轮次保持，直到显式退出。在 Web 界面中，你也可以通过模式菜单切换。
 
 Supermoon 开启期间，底部模式列表会在 `auto`、`yolo`、`plan`、`swarm` 之外额外显示一个 `supermoon` 徽标。
 

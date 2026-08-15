@@ -509,7 +509,7 @@ interface SkillActivatePayload {
 interface SupermoonModeEnterPayload {
   _name: 'supermoon_mode.enter';
   /** SupermoonModeTrigger */
-  trigger: 'manual' | 'task';
+  trigger: 'manual' | 'task' | 'tool';
 }
 
 /**

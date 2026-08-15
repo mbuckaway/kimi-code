@@ -59,21 +59,6 @@ describe('built-in slash command registry', () => {
     expect(resolveSlashCommandAvailability(swarm!, 'Ship feature X')).toBe('idle-only');
   });
 
-  it('registers supermoon as an idle-only command with the expected hint', () => {
-    const supermoon = findBuiltInSlashCommand('supermoon');
-    expect(supermoon).toBeDefined();
-    expect((supermoon as KimiSlashCommand).aliases).toEqual([]);
-    expect((supermoon as KimiSlashCommand).description).toBe(
-      'Toggle Supermoon mode or run one task in Supermoon mode',
-    );
-    expect((supermoon as KimiSlashCommand).priority).toBe(100);
-    expect((supermoon as KimiSlashCommand).argumentHint).toBe('[on|off] | <task>');
-    expect((supermoon as KimiSlashCommand).experimentalFlag).toBeUndefined();
-    expect(resolveSlashCommandAvailability(supermoon!, 'on')).toBe('idle-only');
-    expect(resolveSlashCommandAvailability(supermoon!, 'off')).toBe('idle-only');
-    expect(resolveSlashCommandAvailability(supermoon!, 'Ship feature X')).toBe('idle-only');
-  });
-
   it('offers swarm subcommand argument completions', () => {
     const values = (prefix: string): string[] | null => {
       const items = swarmArgumentCompletions(prefix);
@@ -186,7 +171,6 @@ describe('built-in slash command registry', () => {
         'sessions',
         'settings',
         'status',
-        'supermoon',
         'theme',
         'title',
         'undo',
