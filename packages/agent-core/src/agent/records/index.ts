@@ -112,6 +112,12 @@ function restoreAgentRecord(agent: Agent, input: AgentRecord): void {
     case 'swarm_mode.exit':
       agent.swarmMode.exit();
       return;
+    case 'supermoon_mode.enter':
+      agent.supermoonMode.restoreEnter(input.trigger);
+      return;
+    case 'supermoon_mode.exit':
+      agent.supermoonMode.exit();
+      return;
     case 'context.append_message':
       agent.context.appendMessage(input.message);
       return;

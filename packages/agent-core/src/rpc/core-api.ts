@@ -14,6 +14,7 @@ import type {
 import type { PermissionData, PermissionMode } from '#/agent/permission';
 import type { PlanData } from '#/agent/plan';
 import type { SwarmModeTrigger } from '#/agent/swarm';
+import type { SupermoonModeTrigger } from '#/agent/supermoon';
 import type { ToolDisclosure, ToolInfo } from '#/agent/tool';
 import type { KimiConfig, KimiConfigPatch, McpServerConfig } from '#/config';
 import type { ExperimentalFeatureState } from '#/flags';
@@ -252,6 +253,9 @@ export interface CancelPlanPayload {
 }
 export interface EnterSwarmPayload {
   readonly trigger: SwarmModeTrigger;
+}
+export interface EnterSupermoonPayload {
+  readonly trigger: SupermoonModeTrigger;
 }
 export interface BeginCompactionPayload {
   readonly instruction?: string;
@@ -534,6 +538,9 @@ export interface AgentAPI {
   enterSwarm: (payload: EnterSwarmPayload) => void;
   exitSwarm: (payload: EmptyPayload) => void;
   getSwarmMode: (payload: EmptyPayload) => boolean;
+  enterSupermoon: (payload: EnterSupermoonPayload) => void;
+  exitSupermoon: (payload: EmptyPayload) => void;
+  getSupermoonMode: (payload: EmptyPayload) => boolean;
   beginCompaction: (payload: BeginCompactionPayload) => void;
   cancelCompaction: (payload: EmptyPayload) => void;
   registerTool: (payload: RegisterToolPayload) => void;

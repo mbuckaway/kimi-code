@@ -342,6 +342,7 @@ export class SessionService extends Disposable implements ISessionService {
       if (ac.permission_mode !== undefined) patch.permission_mode = ac.permission_mode;
       if (ac.plan_mode !== undefined) patch.plan_mode = ac.plan_mode;
       if (ac.swarm_mode !== undefined) patch.swarm_mode = ac.swarm_mode;
+      if (ac.supermoon_mode !== undefined) patch.supermoon_mode = ac.supermoon_mode;
       if (ac.goal_objective !== undefined) patch.goal_objective = ac.goal_objective;
       if (ac.goal_control !== undefined) patch.goal_control = ac.goal_control;
       if (
@@ -350,6 +351,7 @@ export class SessionService extends Disposable implements ISessionService {
         patch.permission_mode !== undefined ||
         patch.plan_mode !== undefined ||
         patch.swarm_mode !== undefined ||
+        patch.supermoon_mode !== undefined ||
         patch.goal_objective !== undefined ||
         patch.goal_control !== undefined
       ) {
@@ -465,11 +467,12 @@ export class SessionService extends Disposable implements ISessionService {
       throw new SessionNotFoundError(id);
     }
 
-    const [config, context, permission, plan] = await Promise.all([
+    const [config, context, permission, plan, supermoonMode] = await Promise.all([
       this.core.rpc.getConfig({ sessionId: id, agentId: 'main' }),
       this.core.rpc.getContext({ sessionId: id, agentId: 'main' }),
       this.core.rpc.getPermission({ sessionId: id, agentId: 'main' }),
       this.core.rpc.getPlan({ sessionId: id, agentId: 'main' }),
+      this.core.rpc.getSupermoonMode({ sessionId: id, agentId: 'main' }),
     ]);
 
     const capability = config.modelCapabilities;
@@ -486,7 +489,7 @@ export class SessionService extends Disposable implements ISessionService {
       permission: permission.mode,
       plan_mode: plan !== null,
       swarm_mode: agentState?.swarmMode ?? false,
-      supermoon_mode: false,
+      supermoon_mode: supermoonMode,
       context_tokens: contextTokens,
       max_context_tokens: maxContextTokens,
       context_usage: contextUsage,

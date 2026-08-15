@@ -57,6 +57,7 @@ function hasAnyAgentStateField(patch: AgentStatePatch): boolean {
     patch.permission_mode !== undefined ||
     patch.plan_mode !== undefined ||
     patch.swarm_mode !== undefined ||
+    patch.supermoon_mode !== undefined ||
     patch.goal_objective !== undefined ||
     patch.goal_control !== undefined
   );
@@ -75,6 +76,7 @@ function pickAgentStatePatch(body: PromptSubmission): AgentStatePatch | undefine
   if (body.permission_mode !== undefined) patch.permission_mode = body.permission_mode;
   if (body.plan_mode !== undefined) patch.plan_mode = body.plan_mode;
   if (body.swarm_mode !== undefined) patch.swarm_mode = body.swarm_mode;
+  if (body.supermoon_mode !== undefined) patch.supermoon_mode = body.supermoon_mode;
   if (body.goal_objective !== undefined) patch.goal_objective = body.goal_objective;
   if (body.goal_control !== undefined) patch.goal_control = body.goal_control;
   return hasAnyAgentStateField(patch) ? patch : undefined;
@@ -601,11 +603,12 @@ export class PromptService
    */
   private async _ensureAgentStateBootstrapped(sid: string): Promise<void> {
     if (this._agentState.has(sid)) return;
-    const [config, permission, plan, swarmMode] = await Promise.all([
+    const [config, permission, plan, swarmMode, supermoonMode] = await Promise.all([
       this.core.rpc.getConfig({ sessionId: sid, agentId: MAIN_AGENT_ID }),
       this.core.rpc.getPermission({ sessionId: sid, agentId: MAIN_AGENT_ID }),
       this.core.rpc.getPlan({ sessionId: sid, agentId: MAIN_AGENT_ID }),
       this.core.rpc.getSwarmMode({ sessionId: sid, agentId: MAIN_AGENT_ID }),
+      this.core.rpc.getSupermoonMode({ sessionId: sid, agentId: MAIN_AGENT_ID }),
     ]);
     const snapshot: AgentStateSnapshot = {};
     if (config.modelAlias !== undefined) snapshot.model = config.modelAlias;
@@ -617,6 +620,7 @@ export class PromptService
     snapshot.permissionMode = permission.mode;
     snapshot.planMode = plan !== null;
     snapshot.swarmMode = swarmMode;
+    snapshot.supermoonMode = supermoonMode;
     this._agentState.set(sid, snapshot);
   }
 
@@ -701,6 +705,26 @@ export class PromptService
         this._recordDispatch(sid, 'exitSwarm', payload, promptId, source);
       }
       shadow.swarmMode = patch.swarm_mode;
+    }
+
+    // Supermoon mode toggle. enterSupermoon/exitSupermoon are idempotent
+    // no-throw on the agent side; guard with the shadow to avoid redundant
+    // dispatch-log entries. Manual-trigger semantics: a settings toggle is a
+    // persistent mode (never auto-exits at turn end).
+    if (
+      patch.supermoon_mode !== undefined &&
+      patch.supermoon_mode !== shadow.supermoonMode
+    ) {
+      const payload = { sessionId: sid, agentId };
+      if (patch.supermoon_mode) {
+        const enterPayload = { ...payload, trigger: 'manual' as const };
+        await this.core.rpc.enterSupermoon(enterPayload);
+        this._recordDispatch(sid, 'enterSupermoon', enterPayload, promptId, source);
+      } else {
+        await this.core.rpc.exitSupermoon(payload);
+        this._recordDispatch(sid, 'exitSupermoon', payload, promptId, source);
+      }
+      shadow.supermoonMode = patch.supermoon_mode;
     }
 
     // Goal creation. createGoal throws KimiError on invalid input

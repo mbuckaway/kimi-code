@@ -127,24 +127,6 @@ export type SetSessionSupermoonModeRpcInput =
   | (SessionIdRpcInput & { readonly enabled: true; readonly trigger: SupermoonModeTrigger })
   | (SessionIdRpcInput & { readonly enabled: false });
 
-/**
- * Structural view of the supermoon RPC methods on the engine client. The
- * engine's `CoreAPI` does not declare `enterSupermoon` / `exitSupermoon` yet
- * (only `enterSwarm` / `exitSwarm`), so the base client reaches them
- * structurally. Drop this cast once the engine declares the methods.
- */
-interface SupermoonRpcSurface {
-  enterSupermoon(payload: {
-    readonly sessionId: string;
-    readonly agentId: string;
-    readonly trigger: SupermoonModeTrigger;
-  }): Promise<void> | void;
-  exitSupermoon(payload: {
-    readonly sessionId: string;
-    readonly agentId: string;
-  }): Promise<void> | void;
-}
-
 export interface ActivateSkillRpcInput extends SessionIdRpcInput {
   readonly name: string;
   readonly args?: string | undefined;
@@ -605,7 +587,7 @@ export abstract class SDKRpcClientBase {
   private async enterSupermoonMode(
     input: SessionIdRpcInput & { readonly trigger: SupermoonModeTrigger },
   ): Promise<void> {
-    const rpc = (await this.getRpc()) as unknown as SupermoonRpcSurface;
+    const rpc = await this.getRpc();
     return rpc.enterSupermoon({
       sessionId: input.sessionId,
       agentId: this.interactiveAgentId,
@@ -614,7 +596,7 @@ export abstract class SDKRpcClientBase {
   }
 
   private async exitSupermoonMode(input: SessionIdRpcInput): Promise<void> {
-    const rpc = (await this.getRpc()) as unknown as SupermoonRpcSurface;
+    const rpc = await this.getRpc();
     return rpc.exitSupermoon({
       sessionId: input.sessionId,
       agentId: this.interactiveAgentId,
@@ -702,6 +684,10 @@ export abstract class SDKRpcClientBase {
       sessionId: input.sessionId,
       agentId,
     });
+    const supermoonMode = await rpc.getSupermoonMode({
+      sessionId: input.sessionId,
+      agentId,
+    });
     const usage = await rpc.getUsage({
       sessionId: input.sessionId,
       agentId,
@@ -721,6 +707,7 @@ export abstract class SDKRpcClientBase {
       permission: permission.mode,
       planMode: plan !== null,
       swarmMode,
+      supermoonMode,
       contextTokens,
       maxContextTokens,
       contextUsage,

@@ -198,6 +198,7 @@ function makeFakeBridge(state: FakeBridgeState): ICoreProcessService {
     }),
     getPermission: vi.fn().mockResolvedValue({ mode: 'manual' }),
     getPlan: vi.fn().mockResolvedValue(null),
+    getSupermoonMode: vi.fn().mockResolvedValue(false),
   };
   return {
     rpc: rpc as CoreRPC,
@@ -1138,6 +1139,12 @@ describe('SessionService busy lifecycle', () => {
     const session = await svc.create({ metadata: { cwd: '/tmp/status' } });
     const status = await svc.getStatus(session.id);
     expect(status.busy).toBe(false);
+  });
+
+  it('getStatus reports the supermoon mode from the live RPC read', async () => {
+    const session = await svc.create({ metadata: { cwd: '/tmp/status-sm' } });
+    const status = await svc.getStatus(session.id);
+    expect(status.supermoon_mode).toBe(false);
   });
 
   it('patches created session to not busy', async () => {

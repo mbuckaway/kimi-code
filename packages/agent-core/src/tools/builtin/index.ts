@@ -20,6 +20,8 @@ export * from './goal/set-goal-budget';
 export * from './goal/update-goal';
 export * from './planning/enter-plan-mode';
 export * from './planning/exit-plan-mode';
+export * from './supermoon/enter-supermoon-mode';
+export * from './supermoon/exit-supermoon-mode';
 export * from './select-tools';
 export * from './shell/bash';
 export * from './state/todo-list';

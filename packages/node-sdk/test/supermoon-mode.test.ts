@@ -10,20 +10,32 @@ import type {
 
 /**
  * Test double for `SDKRpcClientBase` whose `getRpc()` returns a stub exposing
- * the supermoon dispatch methods (`enterSupermoon` / `exitSupermoon`) plus the
- * prompt sink the base class composes over. The engine's `CoreAPI` does not
- * declare the supermoon methods yet, so the stub casts itself to the full
- * `RPCMethods<CoreAPI>` shape.
+ * the supermoon dispatch methods (`enterSupermoon` / `exitSupermoon` /
+ * `getSupermoonMode`) plus the prompt sink the base class composes over. The
+ * engine's `CoreAPI` now declares the supermoon methods, so the stub can cast
+ * straight to the full `RPCMethods<CoreAPI>` shape.
  */
 class FakeRpcClient extends SDKRpcClientBase {
   readonly rpcEnterSupermoon = vi.fn();
   readonly rpcExitSupermoon = vi.fn();
+  readonly rpcGetSupermoonMode = vi.fn().mockResolvedValue(false);
   readonly rpcPrompt = vi.fn();
 
   protected getRpc(): Promise<RPCMethods<CoreAPI>> {
     return Promise.resolve({
       enterSupermoon: this.rpcEnterSupermoon,
       exitSupermoon: this.rpcExitSupermoon,
+      getSupermoonMode: this.rpcGetSupermoonMode,
+      getConfig: vi.fn().mockResolvedValue({
+        modelAlias: 'kimi-k2',
+        thinkingEffort: 'auto',
+        modelCapabilities: { max_context_tokens: 100 },
+      }),
+      getContext: vi.fn().mockResolvedValue({ history: [], tokenCount: 0 }),
+      getPermission: vi.fn().mockResolvedValue({ mode: 'manual' }),
+      getPlan: vi.fn().mockResolvedValue(null),
+      getSwarmMode: vi.fn().mockResolvedValue(false),
+      getUsage: vi.fn().mockResolvedValue({}),
       prompt: this.rpcPrompt,
     } as unknown as RPCMethods<CoreAPI>);
   }
@@ -128,5 +140,18 @@ describe('Supermoon mode (SDKRpcClientBase)', () => {
 
     expect(client.rpcEnterSupermoon).toHaveBeenCalledTimes(1);
     expect(client.rpcExitSupermoon).toHaveBeenCalledTimes(1);
+  });
+
+  it('getStatus_reportsTheSupermoonModeFromTheEngineRpc', async () => {
+    client.rpcGetSupermoonMode.mockResolvedValue(true);
+
+    const status = await client.getStatus({ sessionId: 'session-1' });
+
+    expect(client.rpcGetSupermoonMode).toHaveBeenCalledTimes(1);
+    expect(client.rpcGetSupermoonMode).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      agentId: 'main',
+    });
+    expect(status.supermoonMode).toBe(true);
   });
 });

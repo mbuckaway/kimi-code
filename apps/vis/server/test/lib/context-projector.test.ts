@@ -773,6 +773,16 @@ describe('context-projector', () => {
     expect(exit.swarm.active).toBe(false);
   });
 
+  it('tracks supermoon mode enter/exit', () => {
+    const enter = projectContext([{ lineNo: 1, data: { type: 'supermoon_mode.enter' as const, trigger: 'tool' }, raw: {} }] as any);
+    expect(enter.supermoon).toEqual({ active: true, trigger: 'tool' });
+    const exit = projectContext([
+      { lineNo: 1, data: { type: 'supermoon_mode.enter' as const, trigger: 'tool' }, raw: {} },
+      { lineNo: 2, data: { type: 'supermoon_mode.exit' as const }, raw: {} },
+    ] as any);
+    expect(exit.supermoon.active).toBe(false);
+  });
+
   it('uses the latest step.end usage as the absolute context-token snapshot', () => {
     const entries = [
       { lineNo: 1, data: { type: 'context.append_loop_event' as const,

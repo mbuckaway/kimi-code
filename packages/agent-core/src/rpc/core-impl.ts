@@ -102,6 +102,7 @@ import type {
   DetachBackgroundPayload,
   ClientTelemetryInfo,
   EmptyPayload,
+  EnterSupermoonPayload,
   EnterSwarmPayload,
   GoalSnapshot,
   GoalToolResult,
@@ -1151,6 +1152,18 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
 
   getSwarmMode({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
     return this.sessionApi(sessionId).getSwarmMode(payload);
+  }
+
+  enterSupermoon({ sessionId, ...payload }: SessionAgentPayload<EnterSupermoonPayload>) {
+    return this.sessionApi(sessionId).enterSupermoon(payload);
+  }
+
+  exitSupermoon({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
+    return this.sessionApi(sessionId).exitSupermoon(payload);
+  }
+
+  getSupermoonMode({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
+    return this.sessionApi(sessionId).getSupermoonMode(payload);
   }
 
   beginCompaction({ sessionId, ...payload }: SessionAgentPayload<BeginCompactionPayload>) {

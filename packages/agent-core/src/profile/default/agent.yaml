@@ -28,6 +28,8 @@ tools:
   - AskUserQuestion
   - EnterPlanMode
   - ExitPlanMode
+  - EnterSupermoonMode
+  - ExitSupermoonMode
   - CreateGoal
   - GetGoal
   - SetGoalBudget

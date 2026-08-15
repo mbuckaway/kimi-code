@@ -13,6 +13,7 @@ import type {
   CreateGoalPayload,
   DetachBackgroundPayload,
   EmptyPayload,
+  EnterSupermoonPayload,
   EnterSwarmPayload,
   GetBackgroundOutputPayload,
   GetBackgroundPayload,
@@ -191,6 +192,18 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
 
   async getSwarmMode({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
     return (await this.getAgent(agentId)).getSwarmMode(payload);
+  }
+
+  async enterSupermoon({ agentId, ...payload }: AgentScopedPayload<EnterSupermoonPayload>) {
+    return (await this.getAgent(agentId)).enterSupermoon(payload);
+  }
+
+  async exitSupermoon({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
+    return (await this.getAgent(agentId)).exitSupermoon(payload);
+  }
+
+  async getSupermoonMode({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
+    return (await this.getAgent(agentId)).getSupermoonMode(payload);
   }
 
   async beginCompaction({ agentId, ...payload }: AgentScopedPayload<BeginCompactionPayload>) {

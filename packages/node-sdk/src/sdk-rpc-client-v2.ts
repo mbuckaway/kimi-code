@@ -171,6 +171,7 @@ import {
   IAgentProfileService,
   IAgentSkillService,
   IAgentSwarmService,
+  IAgentSupermoonService,
   IAgentTaskService,
   IAgentTokenCountingService,
   IAgentToolPolicyService,
@@ -251,6 +252,7 @@ import {
   type SetSessionPermissionRpcInput,
   type SetSessionPlanModeRpcInput,
   type SetSessionSwarmModeRpcInput,
+  type SetSessionSupermoonModeRpcInput,
   type SetSessionThinkingRpcInput,
   type UpdateSessionMetadataRpcInput,
 } from '#/rpc';
@@ -1768,6 +1770,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       permission: agent.accessor.get(IAgentPermissionModeService).mode,
       planMode: plan !== null,
       swarmMode: agent.accessor.get(IAgentSwarmService).isActive,
+      supermoonMode: agent.accessor.get(IAgentSupermoonService).isActive,
       contextTokens,
       maxContextTokens,
       contextUsage,
@@ -2038,6 +2041,30 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   /** v1's `swarm()` composition: enter with the one-shot `task` trigger, then prompt. */
   override async swarm(input: SessionPromptRpcInput): Promise<void> {
     await this.setSwarmMode({ sessionId: input.sessionId, enabled: true, trigger: 'task' });
+    return this.prompt(input);
+  }
+
+  /**
+   * v2 supermoon override. The base class dispatches through the v1 engine's
+   * `CoreAPI` RPCs; the v2 port of v1's `SupermoonMode` lives on the agent
+   * scope's `IAgentSupermoonService`. Enter/exit are idempotent on the agent
+   * side and the service itself appends/pops the mode reminders, so the
+   * override is a thin forward (no injector reconcile — the swarm override
+   * needs one because it touches the injector; supermoon does not).
+   */
+  override async setSupermoonMode(input: SetSessionSupermoonModeRpcInput): Promise<void> {
+    const agent = await this.agentScope(input.sessionId);
+    const supermoon = agent.accessor.get(IAgentSupermoonService);
+    if (input.enabled) {
+      supermoon.enter(input.trigger);
+    } else {
+      supermoon.exit();
+    }
+  }
+
+  /** v1's `supermoon()` composition: enter with the one-shot `task` trigger, then prompt. */
+  override async supermoon(input: SessionPromptRpcInput): Promise<void> {
+    await this.setSupermoonMode({ sessionId: input.sessionId, enabled: true, trigger: 'task' });
     return this.prompt(input);
   }
 

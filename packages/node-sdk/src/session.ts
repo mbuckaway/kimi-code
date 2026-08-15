@@ -3,6 +3,7 @@ import {
   KimiError,
   type AgentContextData,
   type KimiErrorCode,
+  type SupermoonModeTrigger,
   type SwarmModeTrigger,
 } from '@moonshot-ai/agent-core';
 
@@ -296,6 +297,21 @@ export class Session {
       await this.rpc.setSwarmMode({ sessionId: this.id, enabled: true, trigger });
     } else {
       await this.rpc.setSwarmMode({ sessionId: this.id, enabled: false });
+    }
+  }
+
+  async setSupermoonMode(enabled: boolean, trigger: SupermoonModeTrigger): Promise<void> {
+    this.ensureOpen();
+    if (typeof enabled !== 'boolean') {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Session supermoon mode must be a boolean',
+      );
+    }
+    if (enabled) {
+      await this.rpc.setSupermoonMode({ sessionId: this.id, enabled: true, trigger });
+    } else {
+      await this.rpc.setSupermoonMode({ sessionId: this.id, enabled: false });
     }
   }
 

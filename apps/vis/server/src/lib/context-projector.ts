@@ -69,6 +69,7 @@ export interface ContextProjection {
   planMode: { active: boolean; id?: string };
   goal: GoalSnapshot | null;
   swarm: { active: boolean; trigger?: string };
+  supermoon: { active: boolean; trigger?: string };
 }
 
 const ZERO: TokenUsage = { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 };
@@ -122,6 +123,7 @@ export function projectContext(
   let contextTokens = 0;
   let goal: GoalSnapshot | null = null;
   let swarm: { active: boolean; trigger?: string } = { active: false };
+  let supermoon: { active: boolean; trigger?: string } = { active: false };
   let microCutoff = 0;
   // Maps step.uuid → the assistant ProjectedMessage that step is filling in.
   // Cleared on context.clear / context.apply_compaction.
@@ -498,6 +500,12 @@ export function projectContext(
       case 'swarm_mode.exit':
         swarm = { active: false };
         break;
+      case 'supermoon_mode.enter':
+        supermoon = { active: true, trigger: rec.trigger };
+        break;
+      case 'supermoon_mode.exit':
+        supermoon = { active: false };
+        break;
       // Kinds that don't affect the projected timeline / derived state,
       // including the observability records (request trace — `llm.*`,
       // `mcp.tools_discovered`), which are never part of context state:
@@ -563,6 +571,7 @@ export function projectContext(
     planMode: { active: planActive, id: planId },
     goal,
     swarm,
+    supermoon,
   };
 }
 

@@ -590,6 +590,27 @@ export const WIRE_RENDERERS: RendererMap = {
     headline: () => ({ main: <Dim>swarm mode exited</Dim> }),
   },
 
+  'supermoon_mode.enter': {
+    tone: 'lifecycle',
+    label: 'supermoon+',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2">
+          <Pill tone="lifecycle" variant="soft">
+            enter
+          </Pill>
+          <Mono>{r.trigger}</Mono>
+        </span>
+      ),
+    }),
+  },
+
+  'supermoon_mode.exit': {
+    tone: 'lifecycle',
+    label: 'supermoon✓',
+    headline: () => ({ main: <Dim>supermoon mode exited</Dim> }),
+  },
+
   'goal.create': {
     tone: 'lifecycle',
     label: 'goal+',

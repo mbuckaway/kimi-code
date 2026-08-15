@@ -20,6 +20,9 @@ const DEFAULT_APPROVE_TOOLS = new Set([
   'GetGoal',
   'SetGoalBudget',
   'UpdateGoal',
+  // Mode toggles are state-only and mirror the plan-mode approval stance.
+  'EnterSupermoonMode',
+  'ExitSupermoonMode',
   // Loading a tool definition into context has no side effects on the world;
   // executing the loaded tool still goes through its own approval.
   'select_tools',
