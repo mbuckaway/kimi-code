@@ -100,6 +100,15 @@ describe('server-v2 /api/v1/config', () => {
     expect(after.yolo).toBe(false);
   });
 
+  it('POST { planning_model } persists and GET echoes it', async () => {
+    await boot();
+    const cfg = await patchConfig({ planning_model: 'kimi/k3' });
+    expect(cfg.planning_model).toBe('kimi/k3');
+
+    const after = await getConfig();
+    expect(after.planning_model).toBe('kimi/k3');
+  });
+
   it('POST { secondary_model } persists the subagent model pool and GET echoes it', async () => {
     await boot();
     const cfg = await patchConfig({

@@ -1,0 +1,1 @@
+Reports the model the agent is currently running on, its role (current / default / planning), and its context window. Use this when the user asks which model is active, when you need to reason about context-window limits before a long task, or before switching models.

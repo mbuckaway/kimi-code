@@ -678,6 +678,125 @@ async function performSecondaryModelSave(host: SlashCommandHost, alias: string):
   );
 }
 
+// ---------------------------------------------------------------------------
+// Planning model (`/planning-model`) — persists `planning_model`
+// ---------------------------------------------------------------------------
+
+function showPlanningModelPicker(
+  host: SlashCommandHost,
+  models: Record<string, ModelAlias>,
+  currentValue: string,
+): void {
+  host.mountEditorReplacement(
+    new TabbedModelSelectorComponent({
+      models,
+      currentValue,
+      currentThinkingEffort: 'off',
+      // The planning role binds no explicit thinking level, so the picker
+      // hides the Thinking footer instead of offering a no-op choice.
+      thinkingControl: false,
+      title: ' Select a planning model',
+      onSelect: ({ alias }) => {
+        host.restoreEditor();
+        void persistPlanningModel(host, alias);
+      },
+      onCancel: () => {
+        host.restoreEditor();
+      },
+    }),
+  );
+}
+
+/**
+ * Persists `planning_model` for the plan-mode model flip. The engine's flip
+ * guard requires the planning model's context window to match the default
+ * model's, so a mismatch is surfaced as a warning only — never a block.
+ */
+async function persistPlanningModel(host: SlashCommandHost, alias: string): Promise<void> {
+  const displayName = modelDisplayName(alias, host.state.appState.availableModels[alias]);
+  try {
+    await host.harness.setConfig({ planningModel: alias });
+  } catch (error) {
+    host.showError(`Failed to save planning model: ${formatErrorMessage(error)}`);
+    return;
+  }
+  const warning = await planningModelContextWarning(host, alias);
+  host.showStatus(
+    warning === undefined
+      ? `Planning model set to ${displayName}. Plan mode will use it.`
+      : `Planning model set to ${displayName}. ${warning}`,
+    warning === undefined ? 'success' : 'warning',
+  );
+}
+
+async function planningModelContextWarning(
+  host: SlashCommandHost,
+  alias: string,
+): Promise<string | undefined> {
+  const config = await host.harness.getConfig({ reload: true }).catch(() => null);
+  if (config === null) return undefined;
+  const planning = host.state.appState.availableModels[alias];
+  const defaultAlias = config.defaultModel ?? host.state.appState.model;
+  const current = host.state.appState.availableModels[defaultAlias];
+  if (planning === undefined || current === undefined) return undefined;
+  if (planning.maxContextSize === current.maxContextSize) return undefined;
+  return `Its context window (${planning.maxContextSize} tokens) differs from the default model's (${current.maxContextSize} tokens). The plan-mode flip guard requires matching windows.`;
+}
+
+async function clearPlanningModel(host: SlashCommandHost): Promise<void> {
+  const config = await host.harness.getConfig({ reload: true });
+  if (config.planningModel === undefined || config.planningModel === '') {
+    host.showStatus('No planning model is set.');
+    return;
+  }
+  try {
+    if (host.harness.supportsAtomicSectionReplace()) {
+      // v2 replaceSections: a section mapped to `undefined` is cleared.
+      await host.harness.replaceConfigSections({ planningModel: undefined });
+    } else {
+      // v1 setConfig deep-merges and cannot delete a scalar key: `undefined`
+      // is stripped and `null` is rejected by the patch schema. Writing an
+      // empty alias disables the plan-mode flip the same way an absent key
+      // does (the engine's resolve step skips unresolvable aliases).
+      await host.harness.setConfig({ planningModel: '' });
+    }
+  } catch (error) {
+    host.showError(`Failed to clear planning model: ${formatErrorMessage(error)}`);
+    return;
+  }
+  host.showStatus('Planning model cleared. Plan mode will use the default model.', 'success');
+}
+
+export async function handlePlanningModelCommand(
+  host: SlashCommandHost,
+  args: string,
+): Promise<void> {
+  const alias = args.trim();
+  if (alias.toLowerCase() === 'clear' || alias.toLowerCase() === 'unset') {
+    await clearPlanningModel(host);
+    return;
+  }
+  await refreshModelsForPicker(host);
+  const models = pickerModelsForHost(host);
+  if (Object.keys(models).length === 0) {
+    host.showNotice(
+      'No models configured',
+      'Run /login to sign in to Kimi, or /provider to add another provider from a model catalog.',
+    );
+    return;
+  }
+  if (alias.length > 0) {
+    if (models[alias] === undefined) {
+      host.showError(`Unknown model alias: ${alias}`);
+      return;
+    }
+    await persistPlanningModel(host, alias);
+    return;
+  }
+  const config = await host.harness.getConfig();
+  showPlanningModelPicker(host, models, config.planningModel ?? '');
+}
+
 function showThemePicker(host: SlashCommandHost): void {
   host.mountEditorReplacement(
     new ThemeSelectorComponent({

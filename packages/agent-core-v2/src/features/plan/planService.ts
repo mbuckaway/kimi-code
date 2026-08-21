@@ -4,12 +4,14 @@ import { dirname, join } from 'pathe';
 import { type IDisposable } from '#/_base/di/lifecycle';
 import { Service } from '#/_base/di/service';
 import { unwrapErrorCause } from '#/_base/errors/errors';
+import { ILogService } from '#/_base/log/log';
 import { Error2, ErrorCodes } from '#/errors';
 import { generateHeroSlug } from '#/_base/utils/hero-slug';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { PlanModeInjection } from '#/features/plan/injection/planModeInjection';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -20,8 +22,12 @@ import type {
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
+import { IConfigService } from '#/app/config/config';
+import { describeUnknownError } from '#/app/config/configPure';
 import { IEventBus } from '#/app/event/eventBus';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { DEFAULT_MODEL_SECTION, PLANNING_MODEL_SECTION } from '#/app/kosongConfig/configSection';
+import { IModelCatalog } from '#/kosong/model/catalog';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IBlobStore } from '#/persistence/interface/blobStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
@@ -29,6 +35,7 @@ import { IEventDispatcher } from '#/state/eventDispatcher';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
 import { ContextUndone } from '#/agent/undo/undoService';
 import type { ToolFileAccess } from '#/tool/toolContract';
+import { canSwitchModel } from '#/features/model/switchGuard';
 import {
   IAgentPlanService,
   type PlanData,
@@ -47,6 +54,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
   declare readonly _serviceBrand: undefined;
 
   private readonly review: ExitPlanModeReview;
+  private modelAtPlanEnter: string | undefined;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -63,6 +71,10 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     @IAgentPermissionModeService private readonly modeService: IAgentPermissionModeService,
     @ITelemetryService telemetry: ITelemetryService,
     @IAgentStateService private readonly agentState: IAgentStateService,
+    @IConfigService private readonly configService: IConfigService,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @ILogService private readonly log: ILogService,
   ) {
     super();
     this.agentState.contributeState(planKey);
@@ -171,20 +183,22 @@ export class AgentPlanService extends Service implements IAgentPlanService {
       await this.dispatcher.dispatch(new PlanModeEnter({ agentId: this.agentCtx.agentId, id }));
       this.telemetryContext.set({ mode: 'plan' });
       enterRecorded = true;
+      await this.maybeSwitchToPlanningModel();
       if (createFile) {
         await this.writeEmptyPlanFile(planFilePath);
       }
     } catch (error) {
       if (enterRecorded) {
-        this.cancel(id);
+        await this.cancel(id);
       }
       throw error;
     }
   }
 
-  cancel(id?: string): void {
+  async cancel(id?: string): Promise<void> {
     void this.dispatcher.dispatch(new PlanModeCancel({ agentId: this.agentCtx.agentId, id }));
     this.telemetryContext.set({ mode: 'agent' });
+    await this.restoreModelAfterPlan();
   }
 
   async clear(): Promise<void> {
@@ -193,9 +207,10 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     await this.writeEmptyPlanFile(path);
   }
 
-  exit(id?: string): void {
+  async exit(id?: string): Promise<void> {
     void this.dispatcher.dispatch(new PlanModeExit({ agentId: this.agentCtx.agentId, id }));
     this.telemetryContext.set({ mode: 'agent' });
+    await this.restoreModelAfterPlan();
   }
 
   async recordRevision(): Promise<void> {
@@ -239,6 +254,64 @@ export class AgentPlanService extends Service implements IAgentPlanService {
 
   private planFilePathFor(id: string): string {
     return join(this.sessionCtx.sessionDir, 'agents', this.agentCtx.agentId, 'plans', `${id}.md`);
+  }
+
+  private async maybeSwitchToPlanningModel(): Promise<void> {
+    const planningModel = this.configService.get<string>(PLANNING_MODEL_SECTION);
+    const modelAtEnter = this.profile.data().modelAlias;
+    if (planningModel === undefined || planningModel === modelAtEnter) return;
+    const currentId = this.profile.getModel();
+    if (currentId.length === 0) {
+      this.log.warn(
+        'plan mode: planning model is configured but no current model is bound; leaving the model unchanged',
+        { planningModel },
+      );
+      return;
+    }
+    try {
+      const target = this.modelCatalog.get(planningModel);
+      const current = this.modelCatalog.get(currentId);
+      if (!canSwitchModel(target.maxContextSize, current.maxContextSize)) {
+        this.log.warn(
+          'plan mode: planning model has a smaller context window than the current model; leaving the model unchanged',
+          { planningModel, currentModel: currentId },
+        );
+        return;
+      }
+      await this.profile.setModel(planningModel);
+      this.modelAtPlanEnter = modelAtEnter ?? currentId;
+      this.log.info('plan mode: switched to the configured planning model', { planningModel });
+    } catch (error) {
+      this.log.warn(
+        'plan mode: failed to switch to the planning model; leaving the model unchanged',
+        { planningModel, error: describeUnknownError(error) },
+      );
+    }
+  }
+
+  private async restoreModelAfterPlan(): Promise<void> {
+    const restoreTarget = this.configService.get<string>(DEFAULT_MODEL_SECTION) ?? this.modelAtPlanEnter;
+    if (restoreTarget === undefined) return;
+    const currentId = this.profile.getModel();
+    if (currentId.length === 0 || currentId === restoreTarget) return;
+    try {
+      const target = this.modelCatalog.get(restoreTarget);
+      const current = this.modelCatalog.get(currentId);
+      if (!canSwitchModel(target.maxContextSize, current.maxContextSize)) {
+        this.log.warn(
+          'plan mode: cannot restore the model because it has a smaller context window; leaving the current model',
+          { restoreTarget, currentModel: currentId },
+        );
+        return;
+      }
+      await this.profile.setModel(restoreTarget);
+      this.log.info('plan mode: restored the model after plan mode', { model: restoreTarget });
+    } catch (error) {
+      this.log.warn(
+        'plan mode: failed to restore the model after plan mode',
+        { restoreTarget, error: describeUnknownError(error) },
+      );
+    }
   }
 
   private async writeEmptyPlanFile(path: string): Promise<void> {

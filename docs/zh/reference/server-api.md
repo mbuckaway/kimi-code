@@ -228,6 +228,7 @@ HTTP 状态码几乎总是 200，业务结果以 `code` 为准。例外情况：
 | `providers` | object | 供应商 id → `{ type, base_url?, default_model?, has_api_key }` 的映射 |
 | `default_provider` | string | 全局默认供应商 id |
 | `default_model` | string | 全局默认模型别名 |
+| `planning_model` | string | 全局规划模型别名——Plan 模式激活时使用 |
 | `models` | object | 模型别名 → 模型记录的映射 |
 | `thinking` | object | Thinking 模式的默认参数 |
 | `plan_mode` | boolean | Plan 模式开关 |
@@ -258,6 +259,7 @@ HTTP 状态码几乎总是 200，业务结果以 `code` 为准。例外情况：
 | `providers` | body | object | 供应商 id → 供应商表的映射 |
 | `default_provider` | body | string | 全局默认供应商 id |
 | `default_model` | body | string | 全局默认模型别名 |
+| `planning_model` | body | string | 全局规划模型别名——Plan 模式激活时使用 |
 | `models` | body | object | 模型别名 → 模型记录的映射 |
 | `thinking` | body | object | Thinking 模式的默认参数 |
 | `plan_mode` | body | boolean | Plan 模式开关 |

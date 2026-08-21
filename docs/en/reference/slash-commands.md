@@ -17,6 +17,7 @@ Some commands are only available in the idle state. Executing these commands whi
 | `/provider` | — | Open the interactive provider manager to view, add, and remove configured providers. See [Platforms & Models — `/provider` and provider management](../configuration/providers.md#provider-—-interactive-provider-management) | Yes |
 | `/model` | — | Switch the LLM model used in the current session | Yes |
 | `/secondary-model` | `/subagent-model` | Pick the default model for subagents (writes `[secondary_model] default_model`; see the [subagent model pool](../configuration/config-files.md#subagent-model-pool)). Visible when the subagent model pool experiment is enabled | Yes |
+| `/planning-model` | — | Set the model used while Plan mode is active: a model alias as an argument sets it directly, no argument opens the model picker, and `clear`/`unset` removes it (writes `planning_model`; see [Configuration Files](../configuration/config-files.md#top-level-fields)) | Yes |
 | `/settings` | `/config` | Open the settings panel inside the TUI | Yes |
 | `/experiments` | `/experimental` | Open the experimental feature panel | Yes |
 | `/permission` | — | Select a permission mode | Yes |
