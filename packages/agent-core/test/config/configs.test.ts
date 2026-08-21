@@ -62,6 +62,7 @@ function expectKimiErrorCode(fn: () => unknown, code: string): void {
 
 const COMPLETE_TOML = `
 default_model = "kimi-code/kimi-for-coding"
+planning_model = "kimi/k3"
 default_permission_mode = "auto"
 default_plan_mode = false
 merge_all_available_skills = true
@@ -155,6 +156,7 @@ describe('harness config TOML loader', () => {
     const config = parseConfigString(COMPLETE_TOML, 'config.toml');
 
     expect(config.defaultModel).toBe('kimi-code/kimi-for-coding');
+    expect(config.planningModel).toBe('kimi/k3');
     expect(config.thinking?.enabled).toBe(true);
     expect(config.defaultPermissionMode).toBe('auto');
     expect(config.defaultPlanMode).toBe(false);
@@ -280,6 +282,24 @@ socket = "/tmp/kimi-acp.sock"
     expect(text).toContain('/tmp/kimi-acp.sock');
     const roundTripped = parseConfigString(text, configPath);
     expect(roundTripped.acp).toEqual({ socket: '/tmp/kimi-acp.sock' });
+  });
+
+  it('round-trips the planning_model scalar', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'planning-model-round-trip.toml');
+    const toml = `
+default_model = "kimi-code/kimi-for-coding"
+planning_model = "kimi/k3"
+`;
+    const config = parseConfigString(toml, configPath);
+    expect(config.planningModel).toBe('kimi/k3');
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('planning_model = "kimi/k3"');
+
+    const roundTripped = parseConfigString(text, configPath);
+    expect(roundTripped.planningModel).toBe('kimi/k3');
   });
 
   it('round-trips a custom registry source field on a provider', async () => {

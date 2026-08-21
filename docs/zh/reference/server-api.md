@@ -110,6 +110,69 @@ HTTP 状态码几乎总是 200，业务结果以 `code` 为准。例外情况：
 | `GET /api/v1/config` | 读取全局配置（密钥字段脱敏） |
 | `POST /api/v1/config` | 合并式更新配置，并广播 `event.config.changed` |
 
+#### `GET /api/v1/config`
+
+返回解析后的全局配置——`config.toml` 叠加覆盖层后的生效结果。密钥已脱敏：每个供应商只报告 `has_api_key`，绝不返回存储的密钥。
+
+成功时 `data` 为配置对象；其字段与 [顶层字段](../configuration/config-files.md#top-level-fields) 记录的顶层域一一对应：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `providers` | object | 供应商 id → `{ type, base_url?, default_model?, has_api_key }` 的映射 |
+| `default_provider` | string | 全局默认供应商 id |
+| `default_model` | string | 全局默认模型别名 |
+| `planning_model` | string | 全局规划模型别名——Plan 模式激活时使用 |
+| `models` | object | 模型别名 → 模型记录的映射 |
+| `thinking` | object | Thinking 模式的默认参数 |
+| `plan_mode` | boolean | Plan 模式开关 |
+| `yolo` | boolean | 派生值：`default_permission_mode` 为 `yolo` 时为 `true` |
+| `default_permission_mode` | string | 新会话的默认权限模式 |
+| `default_plan_mode` | boolean | 新会话是否以 Plan 模式启动 |
+| `permission` | object | 初始权限规则 |
+| `hooks` | array | 生命周期钩子 |
+| `services` | object | 内置外部服务配置 |
+| `merge_all_available_skills` | boolean | 是否合并所有可用目录中的 Agent Skills |
+| `extra_skill_dirs` | array | 额外的 Skill 搜索目录 |
+| `loop_control` | object | Agent 循环控制参数 |
+| `background` | object | 后台任务运行参数 |
+| `subagent` | object | subagent 配置 |
+| `secondary_model` | object | subagent 的次级模型池 |
+| `experimental` | object | 实验开关 id → 是否启用 |
+| `telemetry` | boolean | 是否启用匿名遥测 |
+| `raw` | object | 原始解析的 `config.toml` 内容，包含未建模字段 |
+
+#### `POST /api/v1/config`
+
+合并式更新全局配置：请求体中的每个顶层域被深合并进对应域，未出现在请求体中的域保持不动。把 `yolo` 设为 `true` 是 `default_permission_mode: "yolo"` 的简写。更新成功后，服务会广播全局 `event.config.changed` 事件，携带变更的字段名与完整的更新后配置；被拒绝的补丁（值非法或持久化失败）返回 `40001` 与底层错误信息。
+
+请求体是部分配置对象——上述响应域中除 `raw` 外的任意子集，均为可选：
+
+| 参数 | 位置 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `providers` | body | object | 供应商 id → 供应商表的映射 |
+| `default_provider` | body | string | 全局默认供应商 id |
+| `default_model` | body | string | 全局默认模型别名 |
+| `planning_model` | body | string | 全局规划模型别名——Plan 模式激活时使用 |
+| `models` | body | object | 模型别名 → 模型记录的映射 |
+| `thinking` | body | object | Thinking 模式的默认参数 |
+| `plan_mode` | body | boolean | Plan 模式开关 |
+| `yolo` | body | boolean | `true` 映射为 `default_permission_mode: "yolo"`；`false` 被忽略 |
+| `default_permission_mode` | body | string | `manual` / `yolo` / `auto` |
+| `default_plan_mode` | body | boolean | 新会话是否以 Plan 模式启动 |
+| `permission` | body | object | 初始权限规则 |
+| `hooks` | body | array | 生命周期钩子 |
+| `services` | body | object | 内置外部服务配置 |
+| `merge_all_available_skills` | body | boolean | 是否合并所有可用目录中的 Agent Skills |
+| `extra_skill_dirs` | body | array | 额外的 Skill 搜索目录 |
+| `loop_control` | body | object | Agent 循环控制参数 |
+| `background` | body | object | 后台任务运行参数 |
+| `subagent` | body | object | subagent 配置 |
+| `secondary_model` | body | object | subagent 的次级模型池 |
+| `experimental` | body | object | 实验开关 id → 是否启用 |
+| `telemetry` | body | boolean | 是否启用匿名遥测 |
+
+成功时 `data` 为完整的更新后配置，形态与 `GET /api/v1/config` 相同。
+
 ### 模型与供应商
 
 | 方法与路径 | 说明 |

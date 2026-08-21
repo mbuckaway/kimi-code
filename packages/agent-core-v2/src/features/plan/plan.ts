@@ -12,9 +12,9 @@ export interface IAgentPlanService {
   readonly _serviceBrand: undefined;
 
   enter(id?: string, createFile?: boolean): Promise<void>;
-  cancel(id?: string): void;
+  cancel(id?: string): Promise<void>;
   clear(): Promise<void>;
-  exit(id?: string): void;
+  exit(id?: string): Promise<void>;
   recordRevision(): Promise<void>;
   status(): Promise<PlanData>;
 }

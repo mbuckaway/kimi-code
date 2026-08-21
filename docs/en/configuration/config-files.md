@@ -101,6 +101,7 @@ Fields in the config file fall into two categories: **top-level scalars** that d
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `default_model` | `string` | — | Default model alias; must be defined in `models` |
+| `planning_model` | `string` | — | Model alias used while Plan mode is active; must be defined in `models` and have the same context window as `default_model` |
 | `default_permission_mode` | `string` | `manual` | Default permission mode for new sessions; one of `manual` (prompt each time), `yolo` (auto-approve tool actions, but the agent may still ask questions), or `auto` (fully autonomous — the agent decides everything without asking) |
 | `default_plan_mode` | `boolean` | `false` | Whether new sessions start in Plan mode (produce a plan before executing) by default |
 | `merge_all_available_skills` | `boolean` | `true` | Whether to merge Agent Skills from all available directories |
@@ -120,6 +121,8 @@ Fields in the config file fall into two categories: **top-level scalars** that d
 | `hooks` | `array<table>` | — | Lifecycle hooks; see [Hooks](../customization/hooks.md) |
 | `identity` | `table` | — | Custom agent identity → [`identity`](#identity) |
 | `language` | `table` | — | Model reply language → [`language`](#language) |
+
+`planning_model` is a sibling of `default_model`: it names the model the agent switches to while Plan mode is active, and on Plan-mode exit the agent reverts to `default_model`. Its context window must equal `default_model`'s — the switch guard only allows switching to a model whose context window is at least as large as the current model's, so the planning/default pair must match. You can set it in the TUI with [`/planning-model`](../reference/slash-commands.md) or via the web settings.
 
 The following sections cover each of the nested tables in turn: `providers`, `models`, `thinking`, `loop_control`, `background`, `tools`, `image`, `services`, and `permission`.
 

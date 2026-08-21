@@ -818,6 +818,9 @@ export class ToolManager {
         new b.ExitPlanModeTool(this.agent),
         new b.EnterSupermoonModeTool(this.agent),
         new b.ExitSupermoonModeTool(this.agent),
+        new b.ModelQueryTool(this.agent),
+        new b.ModelListTool(this.agent),
+        new b.ModelSetTool(this.agent),
         // Registered unconditionally: the tool-select flag can flip at runtime
         // (config reload calls setConfigOverrides) without this method
         // re-running, so registration must not depend on the gate — exposure

@@ -23,6 +23,14 @@ async function activePlanAgent(): Promise<{ agent: Agent; planMode: PlanMode }> 
     kaos: {
       mkdir: vi.fn().mockResolvedValue(undefined),
     },
+    // PlanMode now reads the active model alias to decide whether a
+    // configured planning model should take over on enter; this stub has no
+    // config, so expose an alias-less config surface.
+    config: {
+      get modelAlias() {
+        return undefined;
+      },
+    },
   } as unknown as Agent;
   const planMode = new PlanMode(agent);
   Object.assign(agent, { planMode });
