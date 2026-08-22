@@ -110,6 +110,69 @@ Endpoints are grouped by resource below. A `:{action}` suffix in a path is the a
 | `GET /api/v1/config` | Read the global config (secret fields redacted) |
 | `POST /api/v1/config` | Merge-patch the config; broadcasts `event.config.changed` |
 
+#### `GET /api/v1/config`
+
+Returns the resolved global configuration — the effective result of `config.toml` plus overlays. Secrets are redacted: each provider reports only `has_api_key`, never the stored key.
+
+On success, `data` is the config object; its fields mirror the top-level domains documented under [Top-level fields](../configuration/config-files.md#top-level-fields):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `providers` | object | Map of provider id → `{ type, base_url?, default_model?, has_api_key }` |
+| `default_provider` | string | Global default provider id |
+| `default_model` | string | Global default model alias |
+| `planning_model` | string | Global planning model alias — used while Plan mode is active |
+| `models` | object | Map of model alias → model record |
+| `thinking` | object | Default parameters for Thinking mode |
+| `plan_mode` | boolean | Plan mode flag |
+| `yolo` | boolean | Derived: `true` when `default_permission_mode` is `yolo` |
+| `default_permission_mode` | string | Default permission mode for new sessions |
+| `default_plan_mode` | boolean | Whether new sessions start in Plan mode |
+| `permission` | object | Initial permission rules |
+| `hooks` | array | Lifecycle hooks |
+| `services` | object | Built-in external service configuration |
+| `merge_all_available_skills` | boolean | Whether to merge Agent Skills from all available directories |
+| `extra_skill_dirs` | array | Extra skill search directories |
+| `loop_control` | object | Agent loop control parameters |
+| `background` | object | Background task runtime parameters |
+| `subagent` | object | Subagent configuration |
+| `secondary_model` | object | Secondary model pool for subagents |
+| `experimental` | object | Experimental flag id → enabled |
+| `telemetry` | boolean | Whether anonymous telemetry is enabled |
+| `raw` | object | Raw parsed `config.toml` content, unmodeled fields included |
+
+#### `POST /api/v1/config`
+
+Merge-patches the global configuration: each top-level domain in the body is deep-merged into that domain, and domains absent from the body are left untouched. Setting `yolo` to `true` is shorthand for `default_permission_mode: "yolo"`. After a successful update the server broadcasts the global `event.config.changed` event with the changed field names and the full updated config; a rejected patch (invalid value or persistence failure) returns `40001` with the underlying message.
+
+The body is a partial config object — any subset of the response domains above except `raw`, all optional:
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `providers` | body | object | Map of provider id → provider table |
+| `default_provider` | body | string | Global default provider id |
+| `default_model` | body | string | Global default model alias |
+| `planning_model` | body | string | Global planning model alias — used while Plan mode is active |
+| `models` | body | object | Map of model alias → model record |
+| `thinking` | body | object | Default parameters for Thinking mode |
+| `plan_mode` | body | boolean | Plan mode flag |
+| `yolo` | body | boolean | `true` maps to `default_permission_mode: "yolo"`; `false` is ignored |
+| `default_permission_mode` | body | string | `manual` / `yolo` / `auto` |
+| `default_plan_mode` | body | boolean | Whether new sessions start in Plan mode |
+| `permission` | body | object | Initial permission rules |
+| `hooks` | body | array | Lifecycle hooks |
+| `services` | body | object | Built-in external service configuration |
+| `merge_all_available_skills` | body | boolean | Whether to merge Agent Skills from all available directories |
+| `extra_skill_dirs` | body | array | Extra skill search directories |
+| `loop_control` | body | object | Agent loop control parameters |
+| `background` | body | object | Background task runtime parameters |
+| `subagent` | body | object | Subagent configuration |
+| `secondary_model` | body | object | Secondary model pool for subagents |
+| `experimental` | body | object | Experimental flag id → enabled |
+| `telemetry` | body | boolean | Whether anonymous telemetry is enabled |
+
+On success, `data` is the full updated config in the same shape as `GET /api/v1/config`.
+
 ### Models and providers
 
 | Method and path | Description |

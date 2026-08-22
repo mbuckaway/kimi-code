@@ -30,6 +30,9 @@ tools:
   - ExitPlanMode
   - EnterSupermoonMode
   - ExitSupermoonMode
+  - modelquery
+  - modellist
+  - modelset
   - CreateGoal
   - GetGoal
   - SetGoalBudget

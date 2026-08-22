@@ -1,6 +1,7 @@
 import type { ToolCall } from '@moonshot-ai/kosong';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { KimiConfig } from '../../src/config';
 import { createFakeKaos } from '../tools/fixtures/fake-kaos';
 import { createCommandKaos, testAgent } from './harness/agent';
 
@@ -34,6 +35,30 @@ describe('manual plan entry', () => {
     expect(writeText).not.toHaveBeenCalled();
     expect(ctx.allEvents.some((event) => event.event === 'turn.started')).toBe(false);
     expect(ctx.llmCalls).toHaveLength(0);
+  });
+
+  it('throws when entering plan mode while already active', async () => {
+    const ctx = testAgent({ kaos: createPlanKaos({}) });
+
+    await ctx.agent.planMode.enter('plan-a');
+    await expect(ctx.agent.planMode.enter('plan-b')).rejects.toThrow('Already in plan mode');
+    expect(ctx.agent.planMode.isActive).toBe(true);
+  });
+
+  it('resets plan state and cancels when the plan file cannot be written', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('disk full'));
+    const ctx = testAgent({ kaos: createPlanKaos({ writeText }) });
+
+    await expect(ctx.agent.planMode.enter('plan-a', true)).rejects.toThrow('disk full');
+    expect(ctx.agent.planMode.isActive).toBe(false);
+  });
+
+  it('resets plan state when the plan directory cannot be prepared', async () => {
+    const mkdir = vi.fn().mockRejectedValue(new Error('mkdir failed'));
+    const ctx = testAgent({ kaos: createPlanKaos({ mkdir }) });
+
+    await expect(ctx.agent.planMode.enter('plan-a', true)).rejects.toThrow('mkdir failed');
+    expect(ctx.agent.planMode.isActive).toBe(false);
   });
 
   it('derives the no-homedir plan path from cwd on enter and restore', async () => {
@@ -607,6 +632,127 @@ describe('plan mode injection cadence', () => {
     await ctx.agent.injection.inject();
 
     expect(lastUserText(ctx.agent.context.history)).toContain('Plan mode is active');
+  });
+});
+
+describe('plan mode model flip', () => {
+  const PLAN_FLIP_CONFIG: KimiConfig = {
+    providers: { p: { type: 'kimi', apiKey: 'test-key' } },
+    defaultModel: 'default-model',
+    planningModel: 'planning-model',
+    models: {
+      'default-model': { provider: 'p', model: 'default-model', maxContextSize: 1_000_000 },
+      'planning-model': { provider: 'p', model: 'planning-model', maxContextSize: 1_000_000 },
+    },
+  };
+
+  const PLAN_FLIP_NO_DEFAULT_CONFIG: KimiConfig = {
+    providers: { p: { type: 'kimi', apiKey: 'test-key' } },
+    planningModel: 'planning-model',
+    models: {
+      'work-model': { provider: 'p', model: 'work-model', maxContextSize: 1_000_000 },
+      'planning-model': { provider: 'p', model: 'planning-model', maxContextSize: 1_000_000 },
+    },
+  };
+
+  const PLAN_FLIP_SMALL_PLANNING_CONFIG: KimiConfig = {
+    providers: { p: { type: 'kimi', apiKey: 'test-key' } },
+    defaultModel: 'default-model',
+    planningModel: 'small-planning-model',
+    models: {
+      'default-model': { provider: 'p', model: 'default-model', maxContextSize: 1_000_000 },
+      'small-planning-model': {
+        provider: 'p',
+        model: 'small-planning-model',
+        maxContextSize: 128_000,
+      },
+    },
+  };
+
+  const PLAN_FLIP_NO_PLANNING_CONFIG: KimiConfig = {
+    providers: { p: { type: 'kimi', apiKey: 'test-key' } },
+    defaultModel: 'default-model',
+    models: {
+      'default-model': { provider: 'p', model: 'default-model', maxContextSize: 1_000_000 },
+    },
+  };
+
+  function makePlanFlipAgent(config: KimiConfig, currentAlias: string) {
+    const ctx = testAgent({ initialConfig: config, kaos: createPlanKaos() });
+    ctx.agent.config.update({
+      modelAlias: currentAlias,
+      thinkingEffort: 'off',
+      systemPrompt: 'test agent',
+    });
+    return ctx;
+  }
+
+  it('switches to the configured planning model on enter and restores the default on exit', async () => {
+    const ctx = makePlanFlipAgent(PLAN_FLIP_CONFIG, 'default-model');
+    expect(ctx.agent.config.modelAlias).toBe('default-model');
+
+    await ctx.agent.planMode.enter('flip-plan', false);
+    expect(ctx.agent.planMode.isActive).toBe(true);
+    expect(ctx.agent.config.modelAlias).toBe('planning-model');
+
+    ctx.agent.planMode.exit();
+    expect(ctx.agent.planMode.isActive).toBe(false);
+    expect(ctx.agent.config.modelAlias).toBe('default-model');
+  });
+
+  it('restores the enter-time model on exit when no default model is configured', async () => {
+    const ctx = makePlanFlipAgent(PLAN_FLIP_NO_DEFAULT_CONFIG, 'work-model');
+
+    await ctx.agent.planMode.enter('flip-plan', false);
+    expect(ctx.agent.config.modelAlias).toBe('planning-model');
+
+    ctx.agent.planMode.exit();
+    expect(ctx.agent.config.modelAlias).toBe('work-model');
+  });
+
+  it('restores the default model on cancel', async () => {
+    const ctx = makePlanFlipAgent(PLAN_FLIP_CONFIG, 'default-model');
+
+    await ctx.agent.planMode.enter('flip-plan', false);
+    expect(ctx.agent.config.modelAlias).toBe('planning-model');
+
+    ctx.agent.planMode.cancel();
+    expect(ctx.agent.planMode.isActive).toBe(false);
+    expect(ctx.agent.config.modelAlias).toBe('default-model');
+  });
+
+  it('does not switch when the planning model window is smaller than the current window', async () => {
+    const ctx = makePlanFlipAgent(PLAN_FLIP_SMALL_PLANNING_CONFIG, 'default-model');
+
+    await ctx.agent.planMode.enter('flip-plan', false);
+    expect(ctx.agent.planMode.isActive).toBe(true);
+    expect(ctx.agent.config.modelAlias).toBe('default-model');
+  });
+
+  it('leaves the model unchanged when no planning model is configured', async () => {
+    const ctx = makePlanFlipAgent(PLAN_FLIP_NO_PLANNING_CONFIG, 'default-model');
+
+    await ctx.agent.planMode.enter('flip-plan', false);
+    expect(ctx.agent.config.modelAlias).toBe('default-model');
+
+    ctx.agent.planMode.exit();
+    expect(ctx.agent.config.modelAlias).toBe('default-model');
+  });
+
+  it('still enters plan mode when the planning model cannot be resolved', async () => {
+    const config: KimiConfig = {
+      providers: { p: { type: 'kimi', apiKey: 'test-key' } },
+      defaultModel: 'default-model',
+      planningModel: 'missing-model',
+      models: {
+        'default-model': { provider: 'p', model: 'default-model', maxContextSize: 1_000_000 },
+      },
+    };
+    const ctx = makePlanFlipAgent(config, 'default-model');
+
+    await ctx.agent.planMode.enter('flip-plan', false);
+    expect(ctx.agent.planMode.isActive).toBe(true);
+    expect(ctx.agent.config.modelAlias).toBe('default-model');
   });
 });
 

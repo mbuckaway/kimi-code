@@ -680,3 +680,14 @@ export type { AgentToolContributionOptions } from '#/agent/toolRegistry/toolCont
 export * from '#/agent/userTool/userTool';
 export * from '#/agent/userTool/userToolOps';
 export * from '#/agent/userTool/userToolService';
+
+export * from '#/features/model/model';
+import '#/features/model/modelFeature';
+export * from '#/features/model/modelService';
+export * from '#/features/model/switchGuard';
+export * from '#/features/model/tools/modelquery/modelquery';
+import '#/features/model/tools/modelquery/modelQueryTool';
+export * from '#/features/model/tools/modellist/modellist';
+import '#/features/model/tools/modellist/modelListTool';
+export * from '#/features/model/tools/modelset/modelset';
+import '#/features/model/tools/modelset/modelSetTool';
