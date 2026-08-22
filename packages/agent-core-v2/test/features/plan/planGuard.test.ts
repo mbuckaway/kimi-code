@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
+import { ILogService } from '#/_base/log/log';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
@@ -12,7 +13,8 @@ import type {
   PermissionPolicyResult,
 } from '#/agent/permissionPolicy/types';
 import { IAgentPlanService } from '#/features/plan/plan';
-import { AgentPlanService } from '#/features/plan/planService';
+import { AgentPlanService, planModeWriteDeniedMessage } from '#/features/plan/planService';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -22,8 +24,11 @@ import type {
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
+import { IConfigService } from '#/app/config/config';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import type { ToolCall } from '#/kosong/contract/message';
+import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
+import { IModelCatalog } from '#/kosong/model/catalog';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ToolAccesses } from '#/tool/toolContract';
@@ -34,6 +39,9 @@ import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
 import { registerTestAgentWireServices } from '../../wire/stubs';
 import { stubPermissionModeService } from '../../agent/permissionMode/stubs';
 import { stubToolExecutorEvents, type ToolExecutorEventStubs } from '../../agent/toolExecutor/stubs';
+import { stubLog } from '../../_base/log/stubs';
+import { StubConfigService } from '../../kosong/stubs';
+import { stubModelCatalog } from '../model/stubs';
 
 const signal = new AbortController().signal;
 const SESSION_DIR = '/session';
@@ -149,7 +157,7 @@ describe('AgentPlanService plan-guard listener', () => {
       },
       requestToolApproval: async (_context, ask, origin) => {
         requests.push({ ask, origin });
-        return mapResolution(ask.resolveApproval?.(approvalResponse));
+        return mapResolution(await ask.resolveApproval?.(approvalResponse));
       },
       formatDenyMessage: (message: string) => formatDenyMessage(message),
       formatApprovalRejectionMessage: (toolName, result) =>
@@ -183,6 +191,19 @@ describe('AgentPlanService plan-guard listener', () => {
         reg.defineInstance(IAgentPermissionModeService, stubPermissionModeService(() => mode));
         reg.defineInstance(ITelemetryService, recordingTelemetry(records));
         reg.defineInstance(IAgentStateService, new AgentStateService());
+        reg.defineInstance(ILogService, stubLog());
+        reg.defineInstance(IConfigService, new StubConfigService({}));
+        reg.defineInstance(IModelCatalog, stubModelCatalog([]));
+        reg.definePartialInstance(IAgentProfileService, {
+          getModel: () => '',
+          setModel: async () => ({ model: '' }),
+          data: () => ({
+            modelAlias: undefined,
+            modelCapabilities: UNKNOWN_CAPABILITY,
+            thinkingLevel: 'off',
+            systemPrompt: '',
+          }),
+        });
         reg.define(IAgentPlanService, AgentPlanService);
       },
     });
@@ -279,6 +300,20 @@ describe('AgentPlanService plan-guard listener', () => {
         expect(decision?.veto?.isError).toBe(true);
       }
       expect(permissionRan).toBe(false);
+    });
+
+    it('blocks a Write with no accesses metadata while plan mode is active', async () => {
+      await enterPlan();
+      const decision = await run(hookContext('Write', { args: {} }));
+
+      expect(decision?.veto?.isError).toBe(true);
+      expect(decision?.veto?.output).toContain('current plan file');
+      expect(permissionRan).toBe(false);
+    });
+
+    it('formats the denied-write message with and without a plan path', () => {
+      expect(planModeWriteDeniedMessage(PLAN_PATH)).toContain(PLAN_PATH);
+      expect(planModeWriteDeniedMessage(null)).toContain('no plan file selected yet');
     });
 
     it('blocks mixed plan-file and non-plan-file write accesses', async () => {

@@ -24,9 +24,9 @@ function planService(): IAgentPlanService {
   return {
     _serviceBrand: undefined,
     enter: async () => {},
-    cancel: () => {},
+    cancel: vi.fn(async () => {}),
     clear: async () => {},
-    exit: vi.fn(),
+    exit: vi.fn(async () => {}),
     recordRevision: async () => {},
     status: async () =>
       ({

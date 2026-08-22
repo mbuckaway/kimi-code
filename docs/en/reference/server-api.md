@@ -228,6 +228,7 @@ On success, `data` is the config object; its fields mirror the top-level domains
 | `providers` | object | Map of provider id → `{ type, base_url?, default_model?, has_api_key }` |
 | `default_provider` | string | Global default provider id |
 | `default_model` | string | Global default model alias |
+| `planning_model` | string | Global planning model alias — used while Plan mode is active |
 | `models` | object | Map of model alias → model record |
 | `thinking` | object | Default parameters for Thinking mode |
 | `plan_mode` | boolean | Plan mode flag |
@@ -258,6 +259,7 @@ The body is a partial config object — any subset of the response domains above
 | `providers` | body | object | Map of provider id → provider table |
 | `default_provider` | body | string | Global default provider id |
 | `default_model` | body | string | Global default model alias |
+| `planning_model` | body | string | Global planning model alias — used while Plan mode is active |
 | `models` | body | object | Map of model alias → model record |
 | `thinking` | body | object | Default parameters for Thinking mode |
 | `plan_mode` | body | boolean | Plan mode flag |

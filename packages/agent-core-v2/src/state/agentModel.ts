@@ -59,7 +59,7 @@ export abstract class AgentModel<S> implements DomainResourceRuntime {
     return (window !== undefined ? window.draft : this.committedState) as Draft<S>;
   }
 
-  protected set state(value: S) {
+  protected set state(value: S | Draft<S>) {
     if (this.window === undefined) {
       throw new BugIndicatingError(
         `Model '${this.constructor.name}' can only replace state inside an applier`,

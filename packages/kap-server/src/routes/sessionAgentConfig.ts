@@ -43,7 +43,7 @@ export async function applySessionAgentConfig(
     const active = (await plan.status()) !== null;
     if (active !== agentConfig.plan_mode) {
       if (agentConfig.plan_mode) await plan.enter();
-      else plan.exit();
+      else await plan.exit();
     }
   }
   if (agentConfig.swarm_mode !== undefined) {

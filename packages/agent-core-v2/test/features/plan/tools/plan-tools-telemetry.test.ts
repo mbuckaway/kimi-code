@@ -81,9 +81,9 @@ function planService({
   return {
     _serviceBrand: undefined,
     enter: enter ?? vi.fn(async () => {}),
-    cancel: vi.fn(),
+    cancel: vi.fn(async () => {}),
     clear: vi.fn(async () => {}),
-    exit: exit ?? vi.fn(),
+    exit: exit ?? vi.fn(async () => {}),
     recordRevision: vi.fn(async () => {}),
     status: vi.fn(async () => status),
   };

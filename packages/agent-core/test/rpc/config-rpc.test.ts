@@ -29,6 +29,7 @@ function makeCore(home: string): KimiCore {
 
 const VALID_TOML = `
 default_model = "k2"
+planning_model = "kimi/k3"
 
 [providers.kimi]
 type = "kimi"
@@ -45,6 +46,7 @@ describe('KimiCore degraded config loading', () => {
     const core = makeCore(await makeHome(VALID_TOML));
     const config = await core.getKimiConfig({});
     expect(config.providers['kimi']).toBeDefined();
+    expect(config.planningModel).toBe('kimi/k3');
     await expect(core.getConfigDiagnostics({})).resolves.toEqual({ warnings: [] });
   });
 
