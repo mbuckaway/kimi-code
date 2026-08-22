@@ -245,8 +245,6 @@ describe('AgentPlanService plan/default model flip', () => {
 
     await plan().exit();
 
-    // enter flipped to the 300k planning model; the 200k default cannot be
-    // restored without truncating the conversation, so the model is left as-is.
     expect(profile.setModel).toHaveBeenCalledTimes(1);
     expect(profile.getModel()).toBe('p1/big');
   });
