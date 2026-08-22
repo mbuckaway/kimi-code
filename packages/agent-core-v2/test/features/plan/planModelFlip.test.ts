@@ -52,7 +52,10 @@ interface PlanFlipFakes {
   readonly config: StubConfigService;
 }
 
-function createStubProfile(initialModel: string): {
+function createStubProfile(
+  initialModel: string,
+  dataAlias: string | undefined,
+): {
   readonly getModel: () => string;
   readonly setModel: Mock<(next: string) => Promise<ProfileSetModelResult>>;
   readonly data: () => ProfileData;
@@ -68,7 +71,7 @@ function createStubProfile(initialModel: string): {
     getModel: () => model,
     setModel,
     data: (): ProfileData => ({
-      modelAlias: model,
+      modelAlias: dataAlias,
       modelCapabilities: UNKNOWN_CAPABILITY,
       thinkingLevel: 'off',
       systemPrompt: '',
@@ -91,9 +94,14 @@ describe('AgentPlanService plan/default model flip', () => {
   function setup(options: {
     readonly config?: Record<string, unknown>;
     readonly currentModel?: string;
+    readonly profileDataAlias?: string | undefined;
+    readonly hostFs?: Parameters<typeof createFakeHostFs>[0];
   }): PlanFlipFakes {
     config = new StubConfigService(options.config);
-    profile = createStubProfile(options.currentModel ?? '');
+    profile = createStubProfile(
+      options.currentModel ?? '',
+      'profileDataAlias' in options ? options.profileDataAlias : options.currentModel ?? '',
+    );
     ix = createServices(disposables, {
       additionalServices: (reg) => {
         registerTestAgentWireServices(reg);
@@ -116,6 +124,7 @@ describe('AgentPlanService plan/default model flip', () => {
             mkdir: vi.fn().mockResolvedValue(undefined),
             readText: vi.fn().mockResolvedValue(''),
             writeText: vi.fn().mockResolvedValue(undefined),
+            ...options.hostFs,
           }),
         );
         reg.definePartialInstance(IBlobStore, {});
@@ -261,6 +270,115 @@ describe('AgentPlanService plan/default model flip', () => {
     await plan().exit();
 
     expect(profile.setModel).not.toHaveBeenCalled();
+    expect(profile.getModel()).toBe('p1/current');
+  });
+
+  it('throws when entering plan mode while already active', async () => {
+    setup({ config: { planningModel: 'p1/planning' }, currentModel: 'p1/current' });
+    await plan().enter('flip-plan');
+
+    await expect(plan().enter('flip-plan-2')).rejects.toThrow('Already in plan mode');
+  });
+
+  it('clear is a no-op when no plan is active', async () => {
+    setup({ config: {} });
+
+    await expect(plan().clear()).resolves.toBeUndefined();
+  });
+
+  it('writes the plan file on enter when createFile is set', async () => {
+    setup({ config: { planningModel: 'p1/planning' }, currentModel: 'p1/current' });
+
+    await expect(plan().enter('flip-plan', true)).resolves.toBeUndefined();
+  });
+
+  it('rethrows and cleans up when writing the plan file fails', async () => {
+    setup({
+      config: { planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+      hostFs: { writeText: vi.fn().mockRejectedValue(new Error('disk full')) },
+    });
+
+    await expect(plan().enter('flip-plan', true)).rejects.toThrow('disk full');
+    expect(profile.getModel()).toBe('p1/current');
+  });
+
+  it('rethrows when the plan directory cannot be prepared', async () => {
+    setup({
+      config: { planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+      hostFs: { mkdir: vi.fn().mockRejectedValue(new Error('mkdir failed')) },
+    });
+
+    await expect(plan().enter('flip-plan')).rejects.toThrow('mkdir failed');
+  });
+
+  it('status tolerates a missing plan file', async () => {
+    setup({
+      config: { planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+      hostFs: {
+        readText: vi
+          .fn()
+          .mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOENT' })),
+      },
+    });
+    await plan().enter('flip-plan');
+
+    const data = await plan().status();
+
+    expect(data).not.toBeNull();
+    expect(data?.content).toBe('');
+  });
+
+  it('status rethrows a non-missing read error', async () => {
+    setup({
+      config: { planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+      hostFs: {
+        readText: vi
+          .fn()
+          .mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' })),
+      },
+    });
+    await plan().enter('flip-plan');
+
+    await expect(plan().status()).rejects.toThrow('denied');
+  });
+
+  it('status treats a non-object read error as non-missing', async () => {
+    setup({
+      config: { planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+      hostFs: { readText: vi.fn().mockRejectedValue('boom') },
+    });
+    await plan().enter('flip-plan');
+
+    await expect(plan().status()).rejects.toBe('boom');
+  });
+
+  it('status treats a null read error as non-missing', async () => {
+    setup({
+      config: { planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+      hostFs: { readText: vi.fn().mockRejectedValue(null) },
+    });
+    await plan().enter('flip-plan');
+
+    await expect(plan().status()).rejects.toBeNull();
+  });
+
+  it('remembers the resolved current model when the profile exposes no alias', async () => {
+    setup({
+      config: { planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+      profileDataAlias: undefined,
+    });
+    await plan().enter('flip-plan');
+
+    await plan().exit();
+
+    expect(profile.setModel).toHaveBeenLastCalledWith('p1/current');
     expect(profile.getModel()).toBe('p1/current');
   });
 });

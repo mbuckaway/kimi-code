@@ -13,7 +13,7 @@ import type {
   PermissionPolicyResult,
 } from '#/agent/permissionPolicy/types';
 import { IAgentPlanService } from '#/features/plan/plan';
-import { AgentPlanService } from '#/features/plan/planService';
+import { AgentPlanService, planModeWriteDeniedMessage } from '#/features/plan/planService';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
@@ -300,6 +300,20 @@ describe('AgentPlanService plan-guard listener', () => {
         expect(decision?.veto?.isError).toBe(true);
       }
       expect(permissionRan).toBe(false);
+    });
+
+    it('blocks a Write with no accesses metadata while plan mode is active', async () => {
+      await enterPlan();
+      const decision = await run(hookContext('Write', { args: {} }));
+
+      expect(decision?.veto?.isError).toBe(true);
+      expect(decision?.veto?.output).toContain('current plan file');
+      expect(permissionRan).toBe(false);
+    });
+
+    it('formats the denied-write message with and without a plan path', () => {
+      expect(planModeWriteDeniedMessage(PLAN_PATH)).toContain(PLAN_PATH);
+      expect(planModeWriteDeniedMessage(null)).toContain('no plan file selected yet');
     });
 
     it('blocks mixed plan-file and non-plan-file write accesses', async () => {
