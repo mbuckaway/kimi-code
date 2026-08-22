@@ -37,6 +37,30 @@ describe('manual plan entry', () => {
     expect(ctx.llmCalls).toHaveLength(0);
   });
 
+  it('throws when entering plan mode while already active', async () => {
+    const ctx = testAgent({ kaos: createPlanKaos({}) });
+
+    await ctx.agent.planMode.enter('plan-a');
+    await expect(ctx.agent.planMode.enter('plan-b')).rejects.toThrow('Already in plan mode');
+    expect(ctx.agent.planMode.isActive).toBe(true);
+  });
+
+  it('resets plan state and cancels when the plan file cannot be written', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('disk full'));
+    const ctx = testAgent({ kaos: createPlanKaos({ writeText }) });
+
+    await expect(ctx.agent.planMode.enter('plan-a', true)).rejects.toThrow('disk full');
+    expect(ctx.agent.planMode.isActive).toBe(false);
+  });
+
+  it('resets plan state when the plan directory cannot be prepared', async () => {
+    const mkdir = vi.fn().mockRejectedValue(new Error('mkdir failed'));
+    const ctx = testAgent({ kaos: createPlanKaos({ mkdir }) });
+
+    await expect(ctx.agent.planMode.enter('plan-a', true)).rejects.toThrow('mkdir failed');
+    expect(ctx.agent.planMode.isActive).toBe(false);
+  });
+
   it('derives the no-homedir plan path from cwd on enter and restore', async () => {
     const ctx = testAgent({
       kaos: createPlanKaos({

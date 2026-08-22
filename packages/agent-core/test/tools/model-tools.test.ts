@@ -11,6 +11,7 @@ import { ProviderManager } from '../../src/session/provider-manager';
 import { ModelListInputSchema, ModelListTool } from '../../src/tools/builtin/model/model-list';
 import { ModelQueryTool } from '../../src/tools/builtin/model/model-query';
 import { ModelSetInputSchema, ModelSetTool } from '../../src/tools/builtin/model/model-set';
+import { resolveModelInfo } from '../../src/tools/builtin/model/model-info';
 import {
   canSwitchModel,
   planningModelMatchesDefault,
@@ -94,6 +95,32 @@ describe('context-window switch guard', () => {
     expect(planningModelMatchesDefault(undefined, undefined)).toBe(true);
     expect(planningModelMatchesDefault('planning-model', undefined)).toBe(false);
     expect(planningModelMatchesDefault(undefined, 'default-model')).toBe(false);
+  });
+});
+
+describe('resolveModelInfo fallback', () => {
+  it('returns undefined when the provider resolver throws', () => {
+    const agent = {
+      kimiConfig: {},
+      modelProvider: {
+        resolveProviderConfig: () => {
+          throw new Error('boom');
+        },
+      },
+    } as unknown as Agent;
+
+    expect(resolveModelInfo(agent, 'x/y')).toBeUndefined();
+  });
+
+  it('returns undefined when the provider resolver yields nothing', () => {
+    const agent = {
+      kimiConfig: {},
+      modelProvider: {
+        resolveProviderConfig: () => undefined,
+      },
+    } as unknown as Agent;
+
+    expect(resolveModelInfo(agent, 'x/y')).toBeUndefined();
   });
 });
 
