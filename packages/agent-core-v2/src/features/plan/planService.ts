@@ -365,7 +365,7 @@ function writesOnlyPlanFile(
   return writeAccesses.every((access) => access.path === planFilePath);
 }
 
-function planModeWriteDeniedMessage(planFilePath: string | null): string {
+export function planModeWriteDeniedMessage(planFilePath: string | null): string {
   return (
     `Plan mode is active. You may only write to the current plan file: ${planFilePath ?? '(no plan file selected yet)'}. ` +
     'Call ExitPlanMode to exit plan mode before editing other files.'
