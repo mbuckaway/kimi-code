@@ -24,7 +24,6 @@ import { IModelCatalog } from '#/kosong/model/catalog';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IBlobStore } from '#/persistence/interface/blobStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { IEventDispatcher } from '#/state/eventDispatcher';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { AgentPlanService } from '#/features/plan/planService';
 

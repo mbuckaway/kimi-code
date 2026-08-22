@@ -271,7 +271,7 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           const active = (await resolved.plan.status()) !== null;
           if (active !== req.body.plan_mode) {
             if (req.body.plan_mode) await resolved.plan.enter();
-            else resolved.plan.exit();
+            else await resolved.plan.exit();
           }
         }
         // Swarm and supermoon apply-only-when-set like the plan_mode block: an
