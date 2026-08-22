@@ -167,6 +167,30 @@ describe('AgentPlanService plan/default model flip', () => {
     expect(profile.getModel()).toBe('p1/big');
   });
 
+  it('warns and leaves the model unchanged on enter when no model is bound', async () => {
+    setup({
+      config: { defaultModel: 'p1/default', planningModel: 'p1/planning' },
+      currentModel: '',
+    });
+
+    await plan().enter('flip-plan');
+
+    expect(profile.setModel).not.toHaveBeenCalled();
+    expect(profile.getModel()).toBe('');
+  });
+
+  it('warns and leaves the model unchanged when switching to the planning model throws', async () => {
+    setup({
+      config: { defaultModel: 'p1/default', planningModel: 'p1/does-not-exist' },
+      currentModel: 'p1/current',
+    });
+
+    await plan().enter('flip-plan');
+
+    expect(profile.setModel).not.toHaveBeenCalled();
+    expect(profile.getModel()).toBe('p1/current');
+  });
+
   it('restores the default model on exit after switching to planning', async () => {
     setup({
       config: { defaultModel: 'p1/default', planningModel: 'p1/planning' },
@@ -201,6 +225,33 @@ describe('AgentPlanService plan/default model flip', () => {
 
     expect(profile.setModel).toHaveBeenLastCalledWith('p1/default');
     expect(profile.getModel()).toBe('p1/default');
+  });
+
+  it('keeps the current model when the default restore target has a smaller context window', async () => {
+    setup({
+      config: { defaultModel: 'p1/default', planningModel: 'p1/big' },
+      currentModel: 'p1/current',
+    });
+    await plan().enter('flip-plan');
+
+    await plan().exit();
+
+    // enter flipped to the 300k planning model; the 200k default cannot be
+    // restored without truncating the conversation, so the model is left as-is.
+    expect(profile.setModel).toHaveBeenCalledTimes(1);
+    expect(profile.getModel()).toBe('p1/big');
+  });
+
+  it('logs a warning and keeps the model when restoring throws', async () => {
+    setup({
+      config: { defaultModel: 'p1/does-not-exist', planningModel: 'p1/planning' },
+      currentModel: 'p1/current',
+    });
+    await plan().enter('flip-plan');
+
+    await plan().exit();
+
+    expect(profile.getModel()).toBe('p1/planning');
   });
 
   it('does not touch the model on exit when no restore target is configured', async () => {

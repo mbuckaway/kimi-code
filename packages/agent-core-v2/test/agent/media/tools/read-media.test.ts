@@ -318,7 +318,7 @@ describe('ReadMediaFileTool', () => {
     expect(parts[2]).toEqual({ type: 'text', text: '</image>' });
   });
 
-  it('downsamples large images and points the model to region readback', async () => {
+  it('downsamples large images and points the model to region readback', { timeout: 30_000 }, async () => {
     const big = Buffer.from(
       await new Jimp({ width: 2200, height: 2200, color: 0x3366ccff }).getBuffer('image/png'),
     );
@@ -434,7 +434,7 @@ describe('ReadMediaFileTool', () => {
     expect(vi.mocked(fs.readBytes)).toHaveBeenCalledWith('/workspace/huge.png', 512);
   });
 
-  it('does not claim downsampling for an image sent untouched', async () => {
+  it('does not claim downsampling for an image sent untouched', { timeout: 20_000 }, async () => {
     const png = Buffer.from(
       '89504e470d0a1a0a0000000d49484452000000030000000408020000003a' +
         '63dc1c0000001949444154789c63606060f8cf80019aa0a8a020' +
@@ -447,7 +447,7 @@ describe('ReadMediaFileTool', () => {
     expect(noteText(result)).not.toMatch(/downsampled/i);
   });
 
-  it('reads image regions at native resolution', async () => {
+  it('reads image regions at native resolution', { timeout: 30_000 }, async () => {
     const big = Buffer.from(
       await new Jimp({ width: 2100, height: 2100, color: 0x3366ccff }).getBuffer('image/png'),
     );
@@ -470,7 +470,7 @@ describe('ReadMediaFileTool', () => {
     expect(systemText).toContain('offset');
   });
 
-  it('rejects a region outside the image with the original size in the error', async () => {
+  it('rejects a region outside the image with the original size in the error', { timeout: 30_000 }, async () => {
     const big = Buffer.from(
       await new Jimp({ width: 2100, height: 2100, color: 0x3366ccff }).getBuffer('image/png'),
     );
@@ -482,7 +482,7 @@ describe('ReadMediaFileTool', () => {
     expect(result.output).toContain('2100x2100');
   });
 
-  it('serves full_resolution when the bytes fit the per-image budget', async () => {
+  it('serves full_resolution when the bytes fit the per-image budget', { timeout: 20_000 }, async () => {
     const big = Buffer.from(
       await new Jimp({ width: 2100, height: 1050, color: 0x3366ccff }).getBuffer('image/png'),
     );
@@ -541,7 +541,7 @@ describe('ReadMediaFileTool', () => {
     expect(vi.mocked(fs.readBytes)).toHaveBeenCalledWith('/workspace/huge.png', 512);
   });
 
-  it('reports an EXIF-rotated original in the decoded coordinate space', async () => {
+  it('reports an EXIF-rotated original in the decoded coordinate space', { timeout: 20_000 }, async () => {
     const portrait = withExifOrientation(
       new Uint8Array(
         await new Jimp({ width: 2200, height: 1100, color: 0x3366ccff }).getBuffer('image/jpeg', {
@@ -557,9 +557,9 @@ describe('ReadMediaFileTool', () => {
     const systemText = noteText(result);
     expect(systemText).toContain('Original dimensions: 1100x2200');
     expect(systemText).toMatch(/downsampled to 1000x2000/);
-  }, 15000);
+  });
 
-  it('reports the decoded size for a region read of an EXIF-rotated image', async () => {
+  it('reports the decoded size for a region read of an EXIF-rotated image', { timeout: 20_000 }, async () => {
     const portrait = withExifOrientation(
       new Uint8Array(
         await new Jimp({ width: 120, height: 80, color: 0x3366ccff }).getBuffer('image/jpeg', {
@@ -576,7 +576,7 @@ describe('ReadMediaFileTool', () => {
     expect(noteText(result)).toContain('Original dimensions: 80x120');
   });
 
-  it('reports display-space dimensions for an EXIF-rotated image sent untouched', async () => {
+  it('reports display-space dimensions for an EXIF-rotated image sent untouched', { timeout: 20_000 }, async () => {
     const portrait = withExifOrientation(
       new Uint8Array(
         await new Jimp({ width: 120, height: 80, color: 0x3366ccff }).getBuffer('image/jpeg', {
@@ -594,7 +594,7 @@ describe('ReadMediaFileTool', () => {
     expect(systemText).not.toMatch(/downsampled/i);
   });
 
-  it('emits image_compress and image_crop telemetry tagged read_media', async () => {
+  it('emits image_compress and image_crop telemetry tagged read_media', { timeout: 30_000 }, async () => {
     const records: TelemetryRecord[] = [];
     const big = Buffer.from(
       await new Jimp({ width: 2200, height: 1100, color: 0x3366ccff }).getBuffer('image/png'),

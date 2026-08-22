@@ -89,6 +89,40 @@ describe('modellist tool', () => {
     expect(list).toHaveBeenCalledWith('p1');
   });
 
+  it('renders planning and empty markers', async () => {
+    const list = vi.fn(async () => ({
+      ok: true,
+      data: [
+        {
+          id: 'p1/plan',
+          provider: 'p1',
+          model: 'plan',
+          displayName: 'Plan',
+          maxContextSize: 200_000,
+          isCurrent: false,
+          isDefault: false,
+          isPlanning: true,
+        },
+        {
+          id: 'p1/plain',
+          provider: 'p1',
+          model: 'plain',
+          displayName: 'Plain',
+          maxContextSize: 200_000,
+          isCurrent: false,
+          isDefault: false,
+          isPlanning: false,
+        },
+      ] as never[],
+    }));
+    const tool = new ModelListTool(stubModelTools({ list: list as never }));
+    const result = await executeTool(tool, toolContext({}));
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('p1/plan [planning]');
+    expect(result.output).toContain('p1/plain (p1, context 200000)');
+  });
+
   it('reports an empty catalog', async () => {
     const tool = new ModelListTool(stubModelTools({ list: async () => ({ ok: true, data: [] }) }));
     const result = await executeTool(tool, toolContext({}));

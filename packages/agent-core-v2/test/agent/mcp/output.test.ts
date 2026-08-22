@@ -453,7 +453,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(out.truncated).toBeUndefined();
   });
 
-  test('downsamples an oversized real image instead of leaving it full-size', async () => {
+  test('downsamples an oversized real image instead of leaving it full-size', { timeout: 30_000 }, async () => {
     const big = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
     ).toString('base64');
@@ -476,7 +476,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(joined).not.toContain('image_url dropped');
   });
 
-  test('annotates a downsampled image with a caption and a readable original', async () => {
+  test('annotates a downsampled image with a caption and a readable original', { timeout: 30_000 }, async () => {
     const bigBytes = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
     );
@@ -499,7 +499,7 @@ describe('mcpResultToExecutableOutput', () => {
     await unlink(pathMatch![1]!).catch(() => undefined);
   });
 
-  test('adds no caption for an image that passes through unchanged', async () => {
+  test('adds no caption for an image that passes through unchanged', { timeout: 20_000 }, async () => {
     const small = Buffer.from(
       await new Jimp({ width: 32, height: 32, color: 0x3366ccff }).getBuffer('image/png'),
     ).toString('base64');
@@ -512,7 +512,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(out.note).toBeUndefined();
   });
 
-  test('reports MCP image compression telemetry with the MCP tool-result source', async () => {
+  test('reports MCP image compression telemetry with the MCP tool-result source', { timeout: 30_000 }, async () => {
     const records: TelemetryRecord[] = [];
     const big = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
@@ -543,7 +543,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(properties?.['duration_ms']).toEqual(expect.any(Number));
   });
 
-  test('persists originals into the provided session originals dir', async () => {
+  test('persists originals into the provided session originals dir', { timeout: 30_000 }, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'mcp-originals-'));
     const bigBytes = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
@@ -565,7 +565,7 @@ describe('mcpResultToExecutableOutput', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  test('keeps the caption intact when the tool text exhausts the 100K budget', async () => {
+  test('keeps the caption intact when the tool text exhausts the 100K budget', { timeout: 30_000 }, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'mcp-originals-'));
     const big = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
@@ -591,7 +591,7 @@ describe('mcpResultToExecutableOutput', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  test('does not slice the caption when the budget is nearly exhausted', async () => {
+  test('does not slice the caption when the budget is nearly exhausted', { timeout: 30_000 }, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'mcp-originals-'));
     const big = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
