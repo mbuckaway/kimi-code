@@ -386,7 +386,7 @@ interface AgentRpcPassthroughAPI {
   setModel: (payload: SetModelPayload) => Promisable<SetModelResult>;
   getModel: (payload: EmptyPayload) => string;
   enterPlan: (payload: EmptyPayload) => Promisable<void>;
-  cancelPlan: (payload: CancelPlanPayload) => Promisable<void>;
+  cancelPlan: (payload: CancelPlanPayload) => void;
   clearPlan: (payload: EmptyPayload) => Promisable<void>;
   enterSwarm: (payload: EnterSwarmPayload) => void;
   exitSwarm: (payload: EmptyPayload) => void;

@@ -11,7 +11,6 @@ import {
   readConfigFile,
   writeConfigFile,
 } from '../../agent-core/src/config';
-import { resolvedConfigToKimiConfig } from '../src/v2/config-mapper';
 import { TEST_IDENTITY } from './test-identity';
 
 // node-sdk/agent-core normalize paths to forward slashes (pathe). Mirror that
@@ -257,13 +256,6 @@ maxRunningTasks = 2
     const rawModels = config.raw?.['models'] as Record<string, Record<string, unknown>>;
     expect(rawProviders['local']?.['unsupported_provider_field']).toBe('raw-only');
     expect(rawModels['camel-model']?.['custom_model_field']).toBe('raw-only');
-  });
-});
-
-describe('v2 config mapper', () => {
-  it('projects planningModel from the resolved v2 config view', () => {
-    const config = resolvedConfigToKimiConfig({ planningModel: 'kimi/k3' });
-    expect(config.planningModel).toBe('kimi/k3');
   });
 });
 

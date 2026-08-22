@@ -216,14 +216,6 @@ describe('built-in slash command registry', () => {
     expect(resolveSlashCommandAvailability(command!, '')).toBe('always');
   });
 
-  it('registers planning-model always visible without an experiment gate', () => {
-    const command = findBuiltInSlashCommand('planning-model');
-    expect(command).toBeDefined();
-    expect((command as KimiSlashCommand).experimentalFlag).toBeUndefined();
-    expect(resolveSlashCommandAvailability(command!, '')).toBe('always');
-    expect(resolveSlashCommandAvailability(command!, 'clear')).toBe('always');
-  });
-
   it('gates tower behind the tower experiment and the v2 engine', () => {
     const command = findBuiltInSlashCommand('tower');
     expect(command).toBeDefined();

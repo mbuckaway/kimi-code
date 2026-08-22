@@ -28,9 +28,6 @@ tools:
   - AskUserQuestion
   - EnterPlanMode
   - ExitPlanMode
-  - modelquery
-  - modellist
-  - modelset
   - CreateGoal
   - GetGoal
   - SetGoalBudget

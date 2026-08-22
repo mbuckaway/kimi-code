@@ -54,10 +54,7 @@ export type PermissionPolicyResult =
       readonly reason?: PermissionDecisionReason;
       readonly resolveApproval?: (
         result: ApprovalResponse,
-      ) =>
-        | PermissionPolicyResolution
-        | Promise<PermissionPolicyResolution | undefined>
-        | undefined;
+      ) => PermissionPolicyResolution | undefined;
       readonly resolveError?: (error: unknown) => PermissionPolicyResolution | undefined;
     };
 

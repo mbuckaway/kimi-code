@@ -207,7 +207,7 @@ describe('Plan service', () => {
         time: expect.any(Number),
       });
 
-      await plan.exit();
+      plan.exit();
       await ctx.dispatch({
         type: 'plan_mode.enter',
         id: 'stable-plan',
@@ -888,7 +888,7 @@ describe('Plan service', () => {
       await plan.enter('test-plan', false);
       await injectDynamic();
 
-      await plan.exit();
+      plan.exit();
       await injectDynamic();
       const afterExit = context.get().length;
       expect(lastUserText(context.get())).toContain('Plan mode is no longer active');

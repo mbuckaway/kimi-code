@@ -70,22 +70,6 @@ Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只�
 
 **`ExitPlanMode`** 读取当前计划文件内容，将计划呈现给用户审批后退出 Plan 模式。可选参数 `options` 允许 Agent 提供 1–3 个备选方案（每项含 `label` 与 `description`，`label` 最长 80 字符），供用户在审批时选择；`label` 不能重复，也不能使用 `Approve`、`Reject`、`Reject and Exit`、`Revise` 等保留词。
 
-## 模型类
-
-模型工具负责查看和切换 Agent 运行的模型，包括 Plan 模式激活期间使用的模型（[`planning_model`](../configuration/config-files.md#顶层字段)）。
-
-| 工具 | 默认审批 | 说明 |
-| --- | --- | --- |
-| `modelquery` | 需审批 | 报告当前生效的模型 |
-| `modellist` | 需审批 | 列出已配置模型及其上下文窗口 |
-| `modelset` | 需审批 | 切换当前生效模型，或持久化默认 / 规划模型 |
-
-**`modelquery`** 不接受任何参数，报告当前会话正在使用的模型：别名、供应商、模型 ID、显示名称和上下文窗口。
-
-**`modellist`** 列出当前会话已配置的模型。每个条目显示别名、供应商、模型 ID、显示名称和上下文窗口，并标记哪些别名是当前模型、配置的默认模型和配置的规划模型。可选参数 `provider` 可将列表过滤为单个供应商。
-
-**`modelset`** 接受 `model`（要选择的模型别名）和可选的 `role`（`current` / `default` / `planning`，默认 `current`）。默认角色下切换当前会话的生效模型——切换在下一轮次生效，并受上下文窗口守卫约束，只有上下文窗口不小于当前模型的模型才能被选中。`default` 和 `planning` 角色会把选择持久化到 `config.toml`（`default_model` / `planning_model`；规划模型必须与默认模型有相同的上下文窗口）——仅在 v2 引擎和 web 设置中可用；旧版（v1）引擎只支持 `current`，会拒绝持久化角色。
-
 ## 状态管理
 
 | 工具 | 默认审批 | 说明 |

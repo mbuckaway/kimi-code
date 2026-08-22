@@ -98,7 +98,6 @@ timeout = 5
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `default_model` | `string` | — | 默认模型别名，必须在 `models` 中定义 |
-| `planning_model` | `string` | — | Plan 模式激活时使用的模型别名，必须在 `models` 中定义，且上下文窗口需与 `default_model` 相同 |
 | `default_permission_mode` | `string` | `manual` | 新会话的默认权限模式，可选 `manual`（逐次询问）、`yolo`（自动批准工具操作，Agent 仍可能提问）、`auto`（完全自主，Agent 自己做决定，不再提问） |
 | `default_plan_mode` | `boolean` | `false` | 新会话是否默认以 Plan 模式（先出计划再执行）启动 |
 | `merge_all_available_skills` | `boolean` | `true` | 是否合并所有目录中的 Agent Skills |
@@ -117,8 +116,6 @@ timeout = 5
 | `permission` | `table` | — | 初始权限规则 → [`permission`](#permission) |
 | `hooks` | `array<table>` | — | 生命周期 hook，详见 [Hooks](../customization/hooks.md) |
 | `identity` | `table` | — | 自定义 Agent 身份 → [`identity`](#identity) |
-
-`planning_model` 是 `default_model` 的姊妹字段：它指定 Agent 在 Plan 模式激活时切换到的模型，退出 Plan 模式后恢复为 `default_model`。其上下文窗口必须与 `default_model` 相同——切换保护只允许切换到上下文窗口不小于当前模型的模型，因此规划/默认这一对模型必须匹配。可以在 TUI 中用 [`/planning-model`](../reference/slash-commands.md) 命令或 Web 设置里配置。
 
 以下各节对 `providers`、`models`、`thinking`、`loop_control`、`background`、`image`、`services`、`permission` 等嵌套表逐一展开。
 

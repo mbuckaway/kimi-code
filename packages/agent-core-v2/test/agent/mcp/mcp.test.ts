@@ -1098,7 +1098,7 @@ describe('AgentMcpService', () => {
     ]);
   });
 
-  it('reports MCP image compression telemetry through the wrapped tool path', { timeout: 30_000 }, async () => {
+  it('reports MCP image compression telemetry through the wrapped tool path', async () => {
     const manager = new FakeMcpManager();
     const image = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),

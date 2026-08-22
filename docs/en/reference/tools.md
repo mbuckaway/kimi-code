@@ -70,22 +70,6 @@ Plan mode is a constrained working state: once entered, `Write` and `Edit` are r
 
 **`ExitPlanMode`** reads the current plan file, presents the plan to the user for approval, then exits Plan mode. The optional `options` parameter lets the Agent offer 1–3 alternative approaches (each with a `label` and `description`; `label` max 80 characters) for the user to choose from during approval. Labels must be unique and cannot use reserved words such as `Approve`, `Reject`, `Reject and Exit`, or `Revise`.
 
-## Model Tools
-
-Model tools report on and change the model the Agent runs on, including the model used while Plan mode is active ([`planning_model`](../configuration/config-files.md#top-level-fields)).
-
-| Tool | Default Approval | Description |
-| --- | --- | --- |
-| `modelquery` | Requires approval | Report the currently active model |
-| `modellist` | Requires approval | List configured models with their context windows |
-| `modelset` | Requires approval | Switch the active model, or persist the default / planning model |
-
-**`modelquery`** accepts no parameters and reports the model currently powering the session: alias, provider, model id, display name, and context window.
-
-**`modellist`** lists the models configured for the session. Each entry shows the alias, provider, model id, display name, and context window, and marks which aliases are the current model, the configured default model, and the configured planning model. The optional `provider` parameter narrows the list to a single provider.
-
-**`modelset`** accepts `model` (the alias to select) and an optional `role` (`current` / `default` / `planning`; defaults to `current`). With the default role it switches the active model — the change takes effect on the next turn and is gated by the context-window guard, which only allows selecting a model whose context window is at least as large as the current one. The `default` and `planning` roles persist the choice in `config.toml` (`default_model` / `planning_model`; the planning model must have the same context window as the default model) — available in the v2 engine and the web settings; the legacy (v1) engine supports only `current` and rejects the persisting roles.
-
 ## State Management
 
 | Tool | Default Approval | Description |

@@ -107,7 +107,7 @@ describe('PlanModeService dynamic injection content', () => {
     await enterPlan(plan);
 
     await injectDynamic(injector);
-    await plan.exit();
+    plan.exit();
     await injectDynamic(injector);
 
     expect(planReminderMessages(context)).toHaveLength(2);

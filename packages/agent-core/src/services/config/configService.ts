@@ -53,7 +53,6 @@ function toConfigResponse(config: KimiConfig): ConfigResponse {
     providers,
     default_provider: config.defaultProvider,
     default_model: config.defaultModel,
-    planning_model: config.planningModel,
     models: config.models,
     thinking: config.thinking,
     plan_mode: config.planMode,

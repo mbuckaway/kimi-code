@@ -82,7 +82,7 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
       has_options: args.options !== undefined && args.options.length >= 2,
     });
 
-    const failed = await this.exitPlanMode();
+    const failed = this.exitPlanMode();
     if (failed !== undefined) return failed;
 
     if (this.permissionMode.mode === 'auto') {
@@ -104,9 +104,9 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
     };
   }
 
-  private async exitPlanMode(): Promise<ExecutableToolResult | undefined> {
+  private exitPlanMode(): ExecutableToolResult | undefined {
     try {
-      await this.planMode.exit();
+      this.planMode.exit();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to exit plan mode.';
       return {

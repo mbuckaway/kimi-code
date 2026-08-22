@@ -753,7 +753,7 @@ describe('ReadMediaFileTool', () => {
     );
   });
 
-  it('downsamples an oversized image but reports original dimensions', { timeout: 30_000 }, async () => {
+  it('downsamples an oversized image but reports original dimensions', async () => {
     const big = Buffer.from(
       await new Jimp({ width: 2200, height: 2200, color: 0x3366ccff }).getBuffer('image/png'),
     );
@@ -786,7 +786,7 @@ describe('ReadMediaFileTool', () => {
     expect(systemText).toContain(`${String(big.length)} bytes`);
   });
 
-  it('reports an EXIF-rotated original in the decoded coordinate space', { timeout: 30_000 }, async () => {
+  it('reports an EXIF-rotated original in the decoded coordinate space', async () => {
     // Orientation 6 (rotate 90° CW): the header says 2200x1100, but jimp
     // decodes to 1100x2200 — the space the sent image and any region
     // readback live in. The note's original size must match that space,
@@ -816,7 +816,7 @@ describe('ReadMediaFileTool', () => {
     expect(systemText).toMatch(/downsampled to 1000x2000/);
   });
 
-  it('reports the decoded size for a region read of an EXIF-rotated image', { timeout: 30_000 }, async () => {
+  it('reports the decoded size for a region read of an EXIF-rotated image', async () => {
     // Region coordinates live in the decoded (rotated) space; the note's
     // original size must agree with it even when the header sniff succeeds.
     const portrait = withExifOrientation(
@@ -871,7 +871,7 @@ describe('ReadMediaFileTool', () => {
     expect(systemText).not.toMatch(/downsampled/i);
   });
 
-  it('emits image_compress and image_crop telemetry tagged read_media', { timeout: 30_000 }, async () => {
+  it('emits image_compress and image_crop telemetry tagged read_media', async () => {
     const events: { event: string; props: Record<string, unknown> }[] = [];
     const telemetry: TelemetryClient = {
       track: (event, props) => events.push({ event, props: props ?? {} }),
@@ -947,7 +947,7 @@ describe('ReadMediaFileTool', () => {
       ).toBe(false);
     });
 
-    it('announces a downsampled delivery and the region readback in the <system> block', { timeout: 30_000 }, async () => {
+    it('announces a downsampled delivery and the region readback in the <system> block', async () => {
       const big = await bigPng(2200, 2200);
       const result = await executeTool(toolFor(big), {
         turnId: 't1',
@@ -985,7 +985,7 @@ describe('ReadMediaFileTool', () => {
       expect(systemText).not.toMatch(/downsampled/i);
     });
 
-    it('reads a region crop at native resolution', { timeout: 30_000 }, async () => {
+    it('reads a region crop at native resolution', async () => {
       // Over the 2000px edge cap on purpose: region reads must crop from the
       // original coordinate space, which a sub-cap fixture cannot distinguish
       // from cropping the downsampled delivery.
@@ -1010,7 +1010,7 @@ describe('ReadMediaFileTool', () => {
       expect(systemText).toContain('offset');
     });
 
-    it('rejects a region outside the image with the original size in the error', { timeout: 30_000 }, async () => {
+    it('rejects a region outside the image with the original size in the error', async () => {
       // Over the edge cap so "original size" is distinguishable from any
       // downsampled delivery size.
       const big = await bigPng(2100, 2100);
@@ -1325,7 +1325,6 @@ describe('ReadMediaFileTool', () => {
 
     it(
       'compresses a default read to fit the configured read budget',
-      { timeout: 30_000 },
       async () => {
         const budget = 64 * 1024;
         const limits = new ImageLimits(process.env, { readByteBudget: budget });
@@ -1343,6 +1342,7 @@ describe('ReadMediaFileTool', () => {
         expect(sentBytes(result).length).toBeLessThanOrEqual(budget);
         expect(noteText(result)).toMatch(/downsampled/);
       },
+      15_000,
     );
 
     it('returns shrink guidance without attaching the original when a decode guard blocks compression', async () => {
@@ -1472,7 +1472,6 @@ describe('ReadMediaFileTool', () => {
 
     it(
       'region reads ignore the read budget so detail readback stays full-fidelity',
-      { timeout: 30_000 },
       async () => {
         const limits = new ImageLimits(process.env, { readByteBudget: 16 * 1024 });
         const data = await noisePng(500, 500);
@@ -1489,11 +1488,11 @@ describe('ReadMediaFileTool', () => {
         // it must still be delivered under the provider-scale budget.
         expect(sentBytes(result).length).toBeGreaterThan(16 * 1024);
       },
+      15_000,
     );
 
     it(
       'two tools honor their own limits independently (no shared process state)',
-      { timeout: 30_000 },
       async () => {
         const data = await noisePng(512, 512);
         const tight = toolFor(data, new ImageLimits(process.env, { readByteBudget: 48 * 1024 }));
@@ -1517,6 +1516,7 @@ describe('ReadMediaFileTool', () => {
         // its output is far larger than the tight tool's budget.
         expect(sentBytes(roomyResult).length).toBeGreaterThan(48 * 1024);
       },
+      15_000,
     );
   });
 });

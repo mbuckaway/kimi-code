@@ -24,7 +24,6 @@ const KIMI_CONFIG_DOMAINS = [
   'providers',
   'defaultProvider',
   'defaultModel',
-  'planningModel',
   'models',
   'thinking',
   'planMode',

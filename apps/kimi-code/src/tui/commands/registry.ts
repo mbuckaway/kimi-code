@@ -224,13 +224,6 @@ export const BUILTIN_SLASH_COMMANDS = [
     experimentalFlag: 'secondary-model',
   },
   {
-    name: 'planning-model',
-    aliases: [],
-    description: 'Set the model used in plan mode',
-    priority: 90,
-    availability: 'always',
-  },
-  {
     name: 'effort',
     aliases: ['thinking'],
     description: 'Switch thinking effort',

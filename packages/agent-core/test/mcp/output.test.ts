@@ -227,7 +227,7 @@ describe('mcpResultToExecutableOutput', () => {
     return { content, isError };
   }
 
-  test('emits image_compress telemetry tagged mcp_tool_result', { timeout: 30_000 }, async () => {
+  test('emits image_compress telemetry tagged mcp_tool_result', async () => {
     const events: { event: string; props: Record<string, unknown> }[] = [];
     const telemetry: TelemetryClient = {
       track: (event, props) => events.push({ event, props: props ?? {} }),
@@ -581,7 +581,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(out.truncated).toBeUndefined();
   });
 
-  test('downsamples an oversized real image instead of leaving it full-size', { timeout: 30_000 }, async () => {
+  test('downsamples an oversized real image instead of leaving it full-size', async () => {
     const big = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
     ).toString('base64');
@@ -605,7 +605,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(joined).not.toContain('image_url dropped');
   });
 
-  test('annotates a downsampled image with a caption note and a readable original', { timeout: 30_000 }, async () => {
+  test('annotates a downsampled image with a caption note and a readable original', async () => {
     const bigBytes = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
     );
@@ -650,7 +650,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(joined).not.toContain('Image compressed');
   });
 
-  test('persists originals into the provided session originals dir', { timeout: 30_000 }, async () => {
+  test('persists originals into the provided session originals dir', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'mcp-originals-'));
     const bigBytes = Buffer.from(
       await new Jimp({ width: 3600, height: 1800, color: 0x3366ccff }).getBuffer('image/png'),
@@ -671,7 +671,7 @@ describe('mcpResultToExecutableOutput', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  test('keeps the caption intact when the tool text exhausts the 100K budget', { timeout: 30_000 }, async () => {
+  test('keeps the caption intact when the tool text exhausts the 100K budget', async () => {
     // The caption must never compete with the tool's own text for the budget:
     // a chatty tool (page text + screenshot) would otherwise silently evict
     // it, reintroducing exactly the silent downsampling the caption exists
@@ -731,7 +731,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(joined).toContain(quoted);
   });
 
-  test('separates a real compression caption from quoted caption text', { timeout: 30_000 }, async () => {
+  test('separates a real compression caption from quoted caption text', async () => {
     const quoted =
       '<system>Image compressed to fit model limits: original 100x100 image/png (1.0 MB) -> ' +
       'sent 50x50 image/jpeg (100 KB). Fine detail may be lost. ' +
@@ -757,7 +757,7 @@ describe('mcpResultToExecutableOutput', () => {
     expect(joined).toContain('100x100');
   });
 
-  test('does not slice the caption when the budget is nearly exhausted', { timeout: 30_000 }, async () => {
+  test('does not slice the caption when the budget is nearly exhausted', async () => {
     // 99,900 chars of tool text fit the budget on their own; the caption
     // must not be charged the remaining 100 chars and sliced mid-string
     // into an unclosed <system> fragment.

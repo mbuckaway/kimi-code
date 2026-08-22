@@ -141,8 +141,6 @@ export const MODELS_SECTION = 'models';
 
 export const DEFAULT_MODEL_SECTION = 'defaultModel';
 
-export const PLANNING_MODEL_SECTION = 'planningModel';
-
 const ModelBaseSchema = z.object({
   providerId: z.string().optional(),
 

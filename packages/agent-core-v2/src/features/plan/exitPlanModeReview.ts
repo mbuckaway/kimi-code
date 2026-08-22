@@ -45,16 +45,16 @@ export class ExitPlanModeReview {
     );
   }
 
-  private async approvalResult(
+  private approvalResult(
     result: ApprovalResponse,
     display: PlanReviewDisplay,
-  ): Promise<PermissionPolicyResolution | undefined> {
+  ): PermissionPolicyResolution | undefined {
     if (result.decision !== 'approved') {
       return this.rejectedApprovalResult(result);
     }
 
     const selected = selectedExitPlanModeOption(display.options, result.selectedLabel);
-    await this.plan.exit();
+    this.plan.exit();
 
     if (result.selectedLabel !== undefined && result.selectedLabel.length > 0) {
       this.trackPlanTelemetry('plan_resolved', {
@@ -80,9 +80,7 @@ export class ExitPlanModeReview {
     };
   }
 
-  private async rejectedApprovalResult(
-    result: ApprovalResponse,
-  ): Promise<PermissionPolicyResolution | undefined> {
+  private rejectedApprovalResult(result: ApprovalResponse): PermissionPolicyResolution {
     this.trackRejectedPlanResolution(result);
 
     if (result.decision === 'cancelled') {
@@ -96,7 +94,7 @@ export class ExitPlanModeReview {
     }
 
     if (result.selectedLabel === 'Reject and Exit') {
-      await this.plan.exit();
+      this.plan.exit();
       return {
         kind: 'result',
         result: {

@@ -1,1 +1,0 @@
-Lists the models available to the agent, marking which one is the current model, the default model, and the planning model. Pass `provider` to narrow the list to one provider. Use this before `modelset` to confirm a target model id, or when the user asks which models are available.

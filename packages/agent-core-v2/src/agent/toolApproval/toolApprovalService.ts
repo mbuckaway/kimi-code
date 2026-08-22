@@ -209,7 +209,7 @@ export class AgentToolApprovalService extends Service implements IAgentToolAppro
       trace_id: context.trace?.traceId,
     });
 
-    const resolved = await result.resolveApproval?.(response);
+    const resolved = result.resolveApproval?.(response);
     if (resolved !== undefined) {
       return this.resolvePermissionResolution(resolved, context, origin);
     }
