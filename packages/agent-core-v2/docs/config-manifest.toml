@@ -8,7 +8,7 @@
 # commented "# field: type" lines describe the remaining schema fields.
 # Values resolve as: default -> config.toml -> env overlay -> memory.
 
-# Index (26 sections · 2 overlay(s))
+# Index (27 sections · 2 overlay(s))
 #   background               src/agent/task/configSection.ts
 #   builtinProductSkills     src/app/skillCatalog/configSection.ts
 #   cron                     src/app/cron/configSection.ts
@@ -27,6 +27,7 @@
 #   modelCatalog             src/app/kosongConfig/configSection.ts
 #   models                   src/app/kosongConfig/configSection.ts
 #   permission               src/agent/permissionRules/configSection.ts
+#   planningModel            src/app/kosongConfig/configSection.ts
 #   providers                src/app/kosongConfig/configSection.ts
 #   secondaryModel           src/session/subagent/configSection.ts
 #   services                 src/app/auth/configSection.ts
@@ -299,6 +300,14 @@ merge_all_available_skills = true
   # scope: "turn-override" | "session-runtime" | "project" | "user" (default: "user")
   # pattern: string
   # reason: string
+
+# ##########################################################################
+# planningModel (config.toml: planning_model)
+#   owner: src/app/kosongConfig/configSection.ts
+#   scope: core
+# ##########################################################################
+
+# planning_model: string
 
 # ##########################################################################
 # providers
