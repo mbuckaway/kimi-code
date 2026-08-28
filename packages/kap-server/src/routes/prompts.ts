@@ -302,19 +302,12 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           resolved.profile.setThinking(req.body.thinking);
         if (req.body.permission_mode !== undefined) resolved.permissionMode.setMode(req.body.permission_mode);
         if (req.body.plan_mode !== undefined) {
-          // Apply-only-when-set, idempotent like the agent_config dispatch:
-          // plan state changes only when it differs from the request, and an
-          // omitted field never touches it. The first prompt of a new Web
-          // session can therefore enter plan mode before its turn is enqueued.
           const active = (await resolved.plan.status()) !== null;
           if (active !== req.body.plan_mode) {
             if (req.body.plan_mode) await resolved.plan.enter();
             else await resolved.plan.exit();
           }
         }
-        // Swarm and supermoon apply-only-when-set like the plan_mode block: an
-        // omitted field never touches state, so the first prompt of a new Web
-        // session can enter (or exit) a mode before its turn is enqueued.
         if (req.body.swarm_mode !== undefined) {
           if (resolved.swarm.isActive !== req.body.swarm_mode) {
             if (req.body.swarm_mode) resolved.swarm.enter('manual');

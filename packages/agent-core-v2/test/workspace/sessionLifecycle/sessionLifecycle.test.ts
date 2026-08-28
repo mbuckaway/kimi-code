@@ -881,9 +881,6 @@ describe('SessionLifecycleService', () => {
       stubPair(IFlagService, secondaryModelFlagStub(true)),
     ]);
 
-    // A cold bootstrap can reach create before the kosong registries finish
-    // hydrating: the pre-flight must hold, not fail the valid pool against an
-    // empty registry.
     let settled = false;
     const pending = svc.create({ sessionId: 's-race', workDir: '/tmp/proj' }).then((created) => {
       settled = true;
@@ -1219,8 +1216,6 @@ describe('SessionLifecycleService', () => {
   });
 
   it('restore re-creates the main agent for a cold empty session, then unarchives', async () => {
-    // The registration itself is non-touching (pinned at the SessionMetadata
-    // level), so restore only needs the plain unarchive write.
     const calls: string[] = [];
     const agent = agentContextStub(MAIN_AGENT_ID);
     const svc = await build([
@@ -1470,9 +1465,6 @@ describe('SessionLifecycleService', () => {
       stubPair(IWorkspaceMcpService, workspaceMcpServiceStub(mcpReady)),
     ]);
 
-    // Create resolves while the workspace MCP initial connect is still
-    // pending; the seeded handle carries the readiness promise so the agent's
-    // LLM steps can wait on it instead.
     const handle = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
     expect(handle.accessor.get(ISessionMcpHandle).ready).toBe(mcpReady);
 
@@ -1541,9 +1533,6 @@ describe('SessionLifecycleService', () => {
       event.contributeSeed(ISessionMcpHandle, contributed);
     });
 
-    // Create resolves while the contributed handle's readiness is still
-    // pending; the seeded handle carries the readiness promise so the agent's
-    // LLM steps can wait on it instead.
     const handle = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
     expect(handle.accessor.get(ISessionMcpHandle).ready).toBe(ready);
 
@@ -1585,8 +1574,6 @@ describe('SessionLifecycleService', () => {
     await svc.close('s1');
     expect(onTeardown).toHaveBeenCalledTimes(1);
 
-    // Host teardown disposes the workspace (and therefore session) container
-    // directly; the attached teardown has already run and must not run again.
     host?.dispose();
     await Promise.resolve();
     expect(onTeardown).toHaveBeenCalledTimes(1);
@@ -1600,8 +1587,6 @@ describe('SessionLifecycleService', () => {
     });
     await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
 
-    // No close: app/workspace teardown disposes the session scope directly,
-    // and the attached teardown runs with it.
     host?.dispose();
     await Promise.resolve();
     expect(onTeardown).toHaveBeenCalledTimes(1);
@@ -1617,8 +1602,6 @@ describe('SessionLifecycleService', () => {
     const handle = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
 
     expect(seen).toEqual([{}]);
-    // No participant contributed a handle: the session reads the workspace
-    // projection provided by the seed adapter.
     expect(handle.accessor.get(ISessionMcpHandle).isBaselineServer('any')).toBe(true);
     await svc.close('s1');
   });
@@ -1886,8 +1869,6 @@ describe('SessionLifecycleService', () => {
       const updates: { readonly updatedAt?: unknown }[] = [];
       const metaStub: ISessionMetadata = {
         ...metadataStub(),
-        // A cold legacy/v1 document read from disk can still carry an ISO
-        // string — the fork must not persist it as the v2 updatedAt.
         read: () =>
           Promise.resolve({ updatedAt: '2026-08-10T23:00:00.000Z', agents: {} } as never),
         update: (patch) => {
@@ -1928,8 +1909,6 @@ describe('SessionLifecycleService', () => {
         stubPair(IAgentLifecycleService, {
           ...agentLifecycleStub(),
           create: async () => {
-            // Mirror the real doCreate: recreation registers the agent, which
-            // is an ordinary metadata write (it bumps updatedAt).
             await metaStub.registerAgent('main', {});
             return agent;
           },

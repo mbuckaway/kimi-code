@@ -1799,8 +1799,6 @@ describe('FullCompaction', () => {
         return textResult('Stale compacted summary.');
       }
       if (llmCallCount === 2) {
-        // Realistic usage keeps the measured anchor at the full context size
-        // so afterStep re-triggers compaction on the current context.
         return {
           ...textResult('Turn reply after the raced compaction.'),
           usage: { inputOther: 900_000, output: 1, inputCacheRead: 0, inputCacheCreation: 0 },
@@ -1829,23 +1827,16 @@ describe('FullCompaction', () => {
       },
       tools: SNAPSHOT_VISIBLE_TOOLS,
     });
-    // 900k of a 1M window: above the 0.85 block floor even though the trigger
-    // is 0.6, so the first step head starts auto compaction AND blocks on it.
     ctx.appendExchange(1, 'old user one', 'old assistant one', 900_000);
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Answer after compacting' }] });
     await compactionRequested.promise;
-    // Simulate the commit-time race: an assistant exchange lands while the
-    // auto compaction is in flight, so historySafeToCompact fails at commit.
     ctx.appendExchange(2, 'new user while compacting', 'new assistant while compacting', 60_000);
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     releaseCompaction.resolve();
     const events = await ctx.untilTurnEnd();
 
-    // The raced round is cancelled, but the turn survives and the compaction
-    // retries at the next opportunity instead of killing the turn with an
-    // internal abort.
     expect(countEvents(events, 'full_compaction.cancel')).toBe(1);
     expect(events).toContainEqual(
       expect.objectContaining({

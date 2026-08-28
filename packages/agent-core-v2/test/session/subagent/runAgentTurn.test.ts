@@ -1,14 +1,3 @@
-/**
- * `subagent` domain — `runAgentTurn` turn-failure classification.
- *
- * Locks the two halves of the failed-turn contract. A usage-limit-coded
- * failure reaches the caller untouched — same instance, `provider.usage_limit`
- * code intact — even though its wording matches the rate-limit fallback, so
- * the swarm requeue/suspend loop never sees it as retryable. A rate-limit
- * coded failure the wording fallback cannot recognize is still re-minted as an
- * `APIProviderRateLimitError` carrying the payload's requestId.
- */
-
 import { describe, expect, it, vi } from 'vitest';
 
 import { type IAgentScopeHandle } from '#/_base/di/scope';
@@ -66,8 +55,6 @@ async function runFailure(error: unknown): Promise<unknown> {
 
 describe('runAgentTurn failed-turn classification', () => {
   it('passes a usage-limit-coded failure through without rate-limit reclassification', async () => {
-    // The wording still matches the rate-limit fallback; the wire code must
-    // win, because requeueing cannot help until the quota window resets.
     const failure = new Error2(
       ErrorCodes.PROVIDER_USAGE_LIMIT,
       'Too many requests: reached your usage limit for this billing cycle',

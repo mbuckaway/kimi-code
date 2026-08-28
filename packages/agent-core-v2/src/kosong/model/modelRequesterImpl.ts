@@ -196,8 +196,6 @@ export class ModelRequesterImpl implements ModelRequester {
 
 function isUnauthorizedStatusError(error: unknown): error is APIStatusError {
   if (!(error instanceof APIStatusError) || error.statusCode !== 401) return false;
-  // A message-matched context-limit 401 is a context-window rejection, not a
-  // stale token — refreshing OAuth cannot help (issue #2613).
   return !(error instanceof APIContextOverflowError);
 }
 

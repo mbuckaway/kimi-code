@@ -443,7 +443,6 @@ describe('server-v2 /api/v1 prompts', () => {
       `/api/v1/sessions/${id}/status`,
     );
     expect(status.body.code).toBe(0);
-    // The default false stays false — an omitted field never enters a mode.
     expect(status.body.data.swarm_mode).toBe(false);
     expect(status.body.data.supermoon_mode).toBe(false);
   });

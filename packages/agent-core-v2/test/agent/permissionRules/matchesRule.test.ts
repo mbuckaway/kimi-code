@@ -315,8 +315,6 @@ describe('tools/bash/matchesDecomposedCommandRule', () => {
   });
 
   it('denies a single-part compound whose wrapper hides the sub-command', () => {
-    // A `deny Bash(rm *)` rule must still fire when the dangerous command is
-    // wrapped so the whole string no longer starts with `rm`.
     expect(matchCommand('rm *', '(rm y)', 'deny')).toBe(true);
     expect(matchCommand('rm *', '{ rm y; }', 'deny')).toBe(true);
     expect(matchCommand('rm *', 'x=1; rm y', 'deny')).toBe(true);
@@ -338,9 +336,6 @@ describe('tools/bash/matchesDecomposedCommandRule', () => {
   });
 
   it('does not auto-allow when the command cannot be parsed', () => {
-    // Budget exhaustion / parse errors must fail closed for allow, never fall
-    // back to whole-string wildcard approval. The arithmetic node bomb
-    // exceeds the parse node budget and returns `aborted`.
     const bomb = `echo $((1+${'1+'.repeat(60_000)}1))`;
     expect(matchCommand('git *', bomb, 'allow')).toBe(false);
     expect(matchCommand('git *', 'if [ -f x', 'allow')).toBe(false);
@@ -351,7 +346,6 @@ describe('tools/bash/matchesDecomposedCommandRule', () => {
   });
 
   it('does not auto-allow when a chained test command is unmatched', () => {
-    // `[[ ... ]]` / `[ ... ]` are executable units; an allow rule must see them.
     expect(matchCommand('git *', 'git status && [[ -f ~/.ssh/id_rsa ]]', 'allow')).toBe(false);
     expect(matchCommand('git *', 'git status && [ -f secret ]', 'allow')).toBe(false);
   });

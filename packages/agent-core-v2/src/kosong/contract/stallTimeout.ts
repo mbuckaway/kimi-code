@@ -1,18 +1,3 @@
-/**
- * `kosong/contract` domain — the stream idle-stall watchdog.
- *
- * Bounds the shared stream-iteration layer (`generate.ts`) against provider
- * streams that silently stall (connection open, no bytes, no terminal event):
- * awaiting the next part is raced against an idle window that resets on every
- * received chunk, and an expired window cancels the stream and rejects the
- * iteration with the standard abort DOMException — so the existing
- * abort/interruption path classifies a stall like a cancellation instead of a
- * provider failure. The window resolves from the per-call option first
- * (`GenerateOptions.stallTimeoutMs`, where `0` disables the watchdog), then the
- * `KIMI_CODE_STREAM_STALL_TIMEOUT_MS` env binding, then a sane default.
- * Also exports the shared stream-cancel helper.
- */
-
 import { createAbortError } from './errors';
 import type { StreamedMessagePart } from './message';
 import type { StreamedMessage } from './provider';

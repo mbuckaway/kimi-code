@@ -842,9 +842,6 @@ describe('AgentLLMRequesterService trace id', () => {
   });
 
   it('computes retryable from the unwrapped cause of a coded provider failure', async () => {
-    // The requester boundary throws translateProviderError's Error2 wrapping
-    // the raw status error; the telemetry must read retryability from the
-    // wrapped cause, or a retryable 429 reports retryable: false.
     const requester = createTracedRequester(null);
     Object.defineProperty(requester, 'request', {
       value: async function* () {

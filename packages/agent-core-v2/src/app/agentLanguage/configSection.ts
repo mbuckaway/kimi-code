@@ -1,14 +1,3 @@
-/**
- * `agentLanguage` domain — the `[language]` config section.
- *
- * Owns the `reply_language` preference: which language the agent replies in.
- * Binds to `KIMI_CODE_REPLY_LANGUAGE` so a container or CI run can set a
- * language without writing `config.toml`; an env override never persists back
- * into the file. Leaving the section unset means English.
- *
- * Self-registered at module load via `registerConfigSection`.
- */
-
 import { z } from 'zod';
 
 import {

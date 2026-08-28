@@ -94,8 +94,6 @@ const QUOTA_MESSAGE =
 const TOKEN_QUOTA_MESSAGE =
   'You exceeded your current token quota: <org-0123456789abcdef> 31275, please check your account balance';
 
-// The managed Kimi subscription's usage limit, observed in
-// https://github.com/MoonshotAI/kimi-code/issues/2121.
 const USAGE_LIMIT_403_MESSAGE =
   "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.";
 
@@ -149,14 +147,11 @@ describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
     const error = classifyKimiQuotaError(moonshotError403(USAGE_LIMIT_403_MESSAGE));
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(error)).toBe(false);
-    // The reported status is the provider's own 403, not a hardcoded 429.
     expect(error?.statusCode).toBe(403);
     expect(error?.details).toMatchObject({ statusCode: 403 });
   });
 
   it('accepts a 429 carrying only usage-limit wording and keeps its 429 status', () => {
-    // No structured quota code and no billing wording: the usage-limit
-    // wording alone promotes the 429 out of the retryable rate-limit class.
     const error = classifyKimiQuotaError(moonshotQuota429(USAGE_LIMIT_403_MESSAGE));
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(error)).toBe(false);
@@ -178,8 +173,6 @@ describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
     TOKEN_QUOTA_MESSAGE,
     'Your account is suspended due to insufficient balance, please recharge your account',
   ])('answers undefined for a 403 without usage-limit wording "%s"', (message) => {
-    // Billing wordings stay 429-only: on a 403 they read as auth/permission
-    // failures, not quota exhaustion.
     expect(classifyKimiQuotaError(moonshotError403(message))).toBeUndefined();
   });
 
@@ -247,7 +240,6 @@ describe('convertError hook consult at the OpenAI boundary', () => {
     const error = convertOpenAIError(source, hooks?.convertError);
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(error)).toBe(false);
-    // Without the Kimi trait hook the same 403 stays a plain status error.
     expect(convertOpenAIError(source)).not.toBeInstanceOf(APIProviderQuotaExhaustedError);
   });
 

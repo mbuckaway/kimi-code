@@ -410,9 +410,6 @@ describe('AgentRunBatch scheduling contract', () => {
       });
       await vi.advanceTimersByTimeAsync(0);
 
-      // The Error2 carries the usage-limit wire code while its message still
-      // matches the rate-limit wording fallback; task 3 is still unfinished,
-      // so a misread rate limit would requeue task 2 and suspend the batch.
       attempts[1]!.outcome.resolve({ type: 'usage_limited', agentId: 'agent-2' });
       await vi.advanceTimersByTimeAsync(0);
 
@@ -1289,9 +1286,6 @@ describe('SessionSwarmService metadata compatibility', () => {
       return {
         agentId,
         turn: {} as never,
-        // The Error2 carries the usage-limit wire code while its message
-        // still matches the rate-limit wording fallback — the suppression
-        // must key on the code, not the wording.
         completion: Promise.reject(
           new Error2(
             ProtocolErrors.codes.PROVIDER_USAGE_LIMIT,
@@ -1688,9 +1682,6 @@ function completionFromMockAgentRunOutcome<T>(
           return;
         }
         if (isMockAgentRunUsageLimitOutcome(result)) {
-          // The wire-round-tripped shape a usage-limit failure has at the
-          // batch decision point: a coded Error2 whose message still matches
-          // the rate-limit wording fallback.
           reject(
             new Error2(
               ProtocolErrors.codes.PROVIDER_USAGE_LIMIT,

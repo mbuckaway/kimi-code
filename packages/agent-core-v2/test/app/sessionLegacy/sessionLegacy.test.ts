@@ -204,8 +204,6 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentPlanService, { status: () => Promise.resolve(null) }],
         [IAgentSwarmService, { isActive: false }],
         [IAgentSupermoonService, { isActive: false }],
-        // Unbound: assembleStatus resolves the default model's context cap,
-        // which asks the model service first — no default model here.
         [IAgentTowerService, { isActive: false }],
         [IModelService, { getDefaultModel: () => undefined }],
         [

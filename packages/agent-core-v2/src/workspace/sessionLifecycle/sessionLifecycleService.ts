@@ -398,9 +398,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       await this.indexMirror.drain();
       await drainLogCloses();
     } finally {
-      // An agent removal failure (e.g. the wire flush in
-      // `AgentLifecycleService.remove`) must not leak the live scope or skip
-      // the close announcement — dispose always runs.
       void handle.dispose();
       this._onDidCloseSession.fire({ sessionId });
     }

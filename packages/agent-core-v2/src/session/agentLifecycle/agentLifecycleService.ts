@@ -452,10 +452,6 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     await managed.runtimeSet.close();
     managed.killSpace();
     try {
-      // `ContextModel` (and peers) dehydrate blobs asynchronously, so the
-      // tail `content.part` / `turn.ended` records may still be queued on
-      // `WireService.persistQueue`. Flush before dispose or the last records
-      // of a closed session are dropped (Refs #2727).
       await handle.accessor.get(IWireService).flush();
     } finally {
       await handle.dispose();

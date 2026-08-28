@@ -851,8 +851,6 @@ describe('quota-exhausted classification through the real composition (behavior 
     expect(isRetryableGenerateError(caught)).toBe(true);
   });
 
-  // The managed subscription's usage limit arrives as a 403, observed in
-  // https://github.com/MoonshotAI/kimi-code/issues/2121.
   const USAGE_LIMIT_403_MESSAGE =
     "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.";
 
@@ -886,7 +884,6 @@ describe('quota-exhausted classification through the real composition (behavior 
       () => undefined,
       (error: unknown) => error,
     );
-    // Raw 403 → quota-exhausted contract error → provider.usage_limit wire code.
     expect(caught).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(caught)).toBe(false);
     expect(translateProviderError(caught).code).toBe('provider.usage_limit');

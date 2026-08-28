@@ -19,9 +19,7 @@ export function makeHookRunner(
       reason: string | undefined,
       durationMs: number,
     ) => void;
-    /** Emit when the backing config gains/loses hook sections (mirrors `IConfigService.onDidChangeConfiguration`). */
     onDidChangeConfiguration?: Event<void>;
-    /** Override the plugin hook source (e.g. to make a rebuild fail). */
     enabledHooks?: () => Promise<readonly HookDef[]>;
   } = {},
 ): ExternalHooksRunnerService {

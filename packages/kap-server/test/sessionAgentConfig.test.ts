@@ -1,13 +1,3 @@
-/**
- * `applySessionAgentConfig` supermoon dispatch scenarios.
- *
- * The fork carries `supermoon_mode` in the agent_config patch for
- * `POST /sessions/{session_id}/profile`; upstream's edge module knows only
- * swarm, so the supermoon branch is a fork delta on top of the upstream
- * sync. These scenarios pin its apply-only-when-set / idempotency
- * semantics against stubbed DI scopes.
- */
-
 import { describe, expect, it, vi } from 'vitest';
 
 import {

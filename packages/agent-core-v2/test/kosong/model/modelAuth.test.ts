@@ -112,8 +112,6 @@ describe('resolveModelAuthMaterial', () => {
   });
 
   it('prefers a configured env-bag key over an ambient key declared earlier in the chain', () => {
-    // google-genai declares VERTEXAI_API_KEY ahead of GOOGLE_API_KEY, so an
-    // ambient Vertex key must not outrank the Gemini key the user configured.
     vi.stubEnv('VERTEXAI_API_KEY', 'ambient-vertex-key');
     expect(
       authMaterial({

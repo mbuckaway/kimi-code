@@ -1,24 +1,3 @@
-/**
- * Scenario: agent language resolution.
- *
- * Asserts the language the agent uses for replies, resolved from the
- * `[language]` config section and frozen once config first loads — plus the
- * freeze itself: a `[language]` edit after the freeze changes nothing until the
- * next start, and a synchronous read before the freeze fails loudly instead of
- * serving a pre-config value. The `reply_language` field defaults to `"en"` and
- * blank / whitespace values fall back to the default.
- *
- * The env override is asserted on the exported domain surface:
- * `KIMI_CODE_REPLY_LANGUAGE` binds `reply_language` through a parse that trims
- * padding and rejects blank values, and `stripLanguageEnv` keeps an env-set
- * field out of persisted writes so the env read path keeps applying.
- *
- * Runs the real `AgentLanguageService` over a stub config service; nothing else
- * is wired. Run with
- * `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
- * test/app/agentLanguage/agentLanguage.test.ts`.
- */
-
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createScopedTestHost } from '#/_base/di/test';
@@ -123,8 +102,6 @@ describe('AgentLanguageService freeze', () => {
 
   it('serves the synchronous read once the freeze has delivered', async () => {
     const { language } = createLanguage({ reply_language: 'zh' });
-    // Config is already ready synchronously with the stub, so this resolves
-    // immediately.
     await (language as AgentLanguageService).resolved?.();
     expect(language.current()).toBe('zh');
   });
@@ -136,9 +113,6 @@ describe('DEFAULT_LANGUAGE', () => {
   });
 });
 
-// `languageEnvBindings` is typed as the `EnvBindings<LanguageConfig>` union;
-// the section binds exactly one leaf field, so narrow the exported object to
-// that leaf's `{ env, parse }` shape to inspect the env-override contract.
 type LanguageEnvBinding = {
   readonly env: string;
   readonly parse: (raw: string) => string | undefined;

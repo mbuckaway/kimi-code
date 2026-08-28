@@ -88,12 +88,6 @@ export function translateProviderError(error: unknown): Error2 {
   return new Error2(CoreErrors.codes.INTERNAL, String(error), { cause: error });
 }
 
-/**
- * Whether the error carries the `provider.usage_limit` wire code. Usage-limit
- * reactions must key on the code, not the message: the text can still match
- * the rate-limit wording fallback, but retrying/requeueing cannot help until
- * the quota window resets.
- */
 export function isProviderUsageLimitError(error: unknown): boolean {
   return isError2(error) && error.code === ProtocolErrors.codes.PROVIDER_USAGE_LIMIT;
 }

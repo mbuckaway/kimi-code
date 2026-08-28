@@ -131,7 +131,6 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
         emit,
         onUnexpectedError,
       );
-      // FSEventStream creation is synchronous — the watch is armed on return.
       this.readiness.resolve();
       return;
     }

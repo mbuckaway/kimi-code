@@ -774,8 +774,6 @@ describe('ModelCatalog inspect', () => {
   });
 
   it('attributes the definition defaultBaseUrl to builtin and reports missing credentials', () => {
-    // The kimi definition's apiKeyEnv is KIMI_API_KEY, so an ambient key from
-    // the runner environment must not leak into the "no credential" verdict.
     vi.stubEnv('KIMI_API_KEY', '');
     const { host, catalog } = createHost({
       providers: { kimi: { type: 'kimi' } },

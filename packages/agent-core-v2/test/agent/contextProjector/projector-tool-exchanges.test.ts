@@ -614,10 +614,6 @@ describe('projector tool-exchange normalization', () => {
     });
 
     it('drops a thinking-only assistant sealed after an interrupted step (ESC cancel)', () => {
-      // A step cancelled mid-stream (ESC) seals a partial assistant that holds
-      // only a thinking fragment; projecting it into the request would produce
-      // an assistant message with neither content nor tool_calls and trip the
-      // provider's "content or tool_calls must be set" validation.
       const history = [
         user('u1'),
         thinkingAssistant([{ type: 'think', think: 'partial reasoning before cancel' }]),
