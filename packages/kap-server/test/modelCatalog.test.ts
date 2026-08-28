@@ -64,9 +64,6 @@ describe('server-v2 /api/v1 model/provider catalog', () => {
 
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-model-catalog-'));
-    // Disable the background refresh scheduler so its startup refresh never
-    // races the route-level assertions below (it shares the IProviderDiscoveryService
-    // binding that the stub tests override).
     process.env['KIMI_CODE_MODEL_CATALOG_REFRESH_ON_START'] = '0';
     process.env['KIMI_CODE_MODEL_CATALOG_REFRESH_INTERVAL_MS'] = '0';
   });
@@ -201,7 +198,6 @@ describe('server-v2 /api/v1 model/provider catalog', () => {
       has_api_key: true,
       status: 'connected',
       models: ['k2', 'turbo'],
-      // The single GET reveals the stored key; the list above never does.
       api_key: 'sk-test',
     });
 
@@ -210,7 +206,7 @@ describe('server-v2 /api/v1 model/provider catalog', () => {
     expect(noKey.body.data).not.toHaveProperty('api_key');
   });
 
-  it('sets the global default model and reflects it in /auth', async () => {
+  it('sets the global default model and reflects it in /config', async () => {
     await boot(CATALOG_TOML);
     const { body } = await postJson<unknown>('/api/v1/models/turbo:set_default', {});
     expect(body.code).toBe(0);
@@ -224,9 +220,9 @@ describe('server-v2 /api/v1 model/provider catalog', () => {
       },
     });
 
-    const auth = await getJson<{ default_model: string | null }>('/api/v1/auth');
-    expect(auth.body.code).toBe(0);
-    expect(auth.body.data.default_model).toBe('turbo');
+    const config = await getJson<{ default_model: string | null }>('/api/v1/config');
+    expect(config.body.code).toBe(0);
+    expect(config.body.data.default_model).toBe('turbo');
   });
 
   it('maps unknown provider and model ids to catalog not-found codes', async () => {
@@ -316,6 +312,7 @@ describe('server-v2 /api/v1 model/provider catalog', () => {
       getManagedUserInfo: async () => ({ kind: 'error' as const, message: 'unused' }),
       resolveTokenProvider: () => undefined,
       getCachedAccessToken: async () => undefined,
+      getRegion: () => 'mainland-cn',
     };
   }
 

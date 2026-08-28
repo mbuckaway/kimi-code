@@ -1,12 +1,3 @@
-/**
- * `agentLifecycle` domain — builtin agent profile contributions.
- *
- * Registers the default `agent` profile plus the `coder` / `explore` task-agent
- * profiles. Each profile is self-contained: its structured `renderSystemPrompt`
- * merges the shared base template with its own role text at call time, so a
- * child agent no longer inherits the parent's prompt through a runtime overlay.
- */
-
 import { collectGitContext } from './gitContext';
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import {
@@ -28,6 +19,7 @@ const AGENT_TOOLS = [
   'TaskList',
   'TaskOutput',
   'TaskStop',
+  'WaitFor',
   'CronCreate',
   'CronList',
   'CronDelete',
@@ -50,6 +42,9 @@ const AGENT_TOOLS = [
   'GetGoal',
   'SetGoalBudget',
   'UpdateGoal',
+  'TowerInit',
+  'TowerStatus',
+  'TowerTeardown',
   'mcp__*',
 ] as const;
 
@@ -72,6 +67,7 @@ const CODER_TOOLS = [
   'TaskOutput',
   'TaskStop',
   'TodoList',
+  'WaitFor',
   'WebSearch',
   'FetchURL',
   'Write',
@@ -106,6 +102,7 @@ registerAgentProfile({
   name: 'agent',
   description: 'Default agent',
   tools: AGENT_TOOLS,
+  subagents: ['coder', 'explore', 'plan'],
   renderSystemPrompt: (context) =>
     renderSystemPromptResult('', context, { skillActive: skillActiveFor(AGENT_TOOLS) }),
 });
@@ -130,9 +127,9 @@ registerAgentProfile({
   tools: EXPLORE_TOOLS,
   renderSystemPrompt: (context) =>
     renderSystemPromptResult(EXPLORE_ROLE, context, { skillActive: skillActiveFor(EXPLORE_TOOLS) }),
-  promptPrefix: async ({ cwd, runner, log }) => {
+  promptPrefix: async ({ cwd, process, log }) => {
     try {
-      return await collectGitContext(runner, cwd, log);
+      return await collectGitContext(process, cwd, log);
     } catch {
       return '';
     }

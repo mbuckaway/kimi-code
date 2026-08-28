@@ -1,24 +1,3 @@
-/**
- * `subagent` domain — helper that runs one prompt (or retry) turn on
- * an agent and distills a summary from its context once the turn ends.
- *
- * Not a Service: `runAgentTurn` is a pure function that borrows
- * `IAgentPromptService`, `IAgentContextMemoryService`, `IAgentUsageService`,
- * and `IEventBus` from the target agent's scope. It has no notion of a caller:
- * it emits no record signals, runs no hooks, and tracks no telemetry.
- *
- * The lifecycle is imperative — the caller awaits the returned `completion`
- * promise. Turn hooks are not used because there is exactly one observer (the
- * caller who requested the run); a hook indirection would only obscure the
- * flow.
- *
- * A failed turn is classified before any summary work: a usage-limit-coded
- * failure is rethrown with its wire code intact — never re-minted as a rate
- * limit by the message fallback, since requeueing cannot help until the
- * account's quota window resets — while a rate-limit-coded failure the
- * fallback cannot recognize is re-minted as an `APIProviderRateLimitError`.
- */
-
 import { APIProviderRateLimitError, isProviderRateLimitError } from '#/kosong/contract/errors';
 import { isProviderUsageLimitError } from '#/kosong/protocol/errors';
 import { type TokenUsage } from '#/kosong/contract/usage';
@@ -30,7 +9,8 @@ import type { ContextMessage, PromptOrigin } from '#/agent/contextMemory/types';
 import { Error2, ErrorCodes, toKimiErrorPayload, type KimiErrorPayload } from '#/errors';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
 import { IAgentLoopService, type Turn, type TurnResult } from '#/agent/loop/loop';
-import { IAgentUsageService } from '#/agent/usage/usage';
+import { agentContextOf } from '#/agent/scopeContext/scopeContext';
+import { ISessionUsageService } from '#/session/usage/sessionUsage';
 import type { AgentProfileSummaryPolicy } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 import type { AgentRunHandle, AgentRunRequest } from './subagent';
@@ -99,7 +79,7 @@ async function awaitRun(
       },
       cancelTurn,
     );
-    const usage = target.accessor.get(IAgentUsageService)?.status().total;
+    const usage = target.accessor.get(ISessionUsageService)?.status(agentContextOf(target)).total;
     return { summary, usage };
   } finally {
     unlink();
