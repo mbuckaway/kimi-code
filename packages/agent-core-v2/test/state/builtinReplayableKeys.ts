@@ -20,6 +20,7 @@ import { taskKey } from '#/agent/task/taskOps';
 import { taskNotificationDeliveryKey } from '#/agent/task/taskService';
 import { userToolKey } from '#/agent/userTool/userToolOps';
 import { planKey } from '#/features/plan/planOps';
+import { supermoonKey } from '#/agent/supermoon/supermoonOps';
 import { swarmKey } from '#/features/swarm/swarmOps';
 import { towerKey, towerOwnerKey } from '#/features/tower/towerOps';
 
@@ -43,6 +44,7 @@ export const BUILTIN_REPLAYABLE_STATE_KEYS: readonly ReplayableStateKey<any>[] =
   taskNotificationDeliveryKey,
   userToolKey,
   planKey,
+  supermoonKey,
   swarmKey,
   towerKey,
   towerOwnerKey,

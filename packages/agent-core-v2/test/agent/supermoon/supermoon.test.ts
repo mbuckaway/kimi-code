@@ -6,21 +6,35 @@ import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
-import { AgentSystemReminderService } from '#/agent/systemReminder/systemReminderService';
+import { AgentContextMemoryService } from '#/agent/contextMemory/contextMemoryService';
+import { TurnEnded } from '#/agent/loop/turnOps';
+import type { AgentRuntimeContext } from '#/agent/runtime/agentRuntime';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentSupermoonService } from '#/agent/supermoon/supermoon';
 import { AgentSupermoonService } from '#/agent/supermoon/supermoonService';
-import { SupermoonModel } from '#/agent/supermoon/supermoonOps';
-import { type DomainEvent, IEventBus } from '#/app/event/eventBus';
+import { supermoonKey } from '#/agent/supermoon/supermoonOps';
+import { type Event2 } from '#/app/event/event2';
+import { IEventBus, type ISessionEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
+import { noopTelemetryService } from '#/app/telemetry/telemetry';
+import { ReminderRuntime } from '#/features/reminder/reminderAgentRuntime';
+import { lifecycleWithReminder } from '../../features/reminder/stubs';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 
-import { stubContextMemory, type StubContextMemory } from '../contextMemory/stubs';
-import { registerTestAgentWire, restoreTestAgentWire, testWireScope } from '../../wire/stubs';
+import {
+  noopLogger,
+  registerTestAgentWire,
+  registerTestEventDispatcher,
+  restoreTestEventDispatcher,
+  testWireScope,
+} from '../../wire/stubs';
 
 const ENTER_REMINDER_PATH = new URL(
   '../../../src/agent/supermoon/enter-reminder.md',
@@ -31,6 +45,14 @@ const EXIT_REMINDER_PATH = new URL(
   import.meta.url,
 );
 
+function reminderRuntime(ix: TestInstantiationService): ReminderRuntime {
+  const runtime = {
+    get: (id: unknown) =>
+      id === IAgentContextMemoryService ? ix.get(IAgentContextMemoryService) : undefined,
+  } as unknown as AgentRuntimeContext<null>;
+  return new ReminderRuntime(runtime);
+}
+
 describe('AgentSupermoonService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -38,26 +60,39 @@ describe('AgentSupermoonService', () => {
   beforeEach(() => {
     disposables = new DisposableStore();
     ix = disposables.add(new TestInstantiationService());
-    ix.stub(IAgentContextMemoryService, stubContextMemory());
+    ix.set(IEventBus, new SyncDescriptor(EventBusService));
+    ix.stub(ISessionTokenCountingService, {
+      estimateText: () => 0,
+      estimateMessage: () => 0,
+      estimateMessages: () => 0,
+      recordTruncation: () => {},
+    } as unknown as ISessionTokenCountingService);
+    ix.set(IAgentContextMemoryService, new SyncDescriptor(AgentContextMemoryService));
     ix.stub(IFileSystemStorageService, new InMemoryStorageService());
     ix.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
-    ix.set(IEventBus, new SyncDescriptor(EventBusService));
     registerTestAgentWire(ix, testWireScope('wire', 'supermoon-test'), {
       log: ix.get(IAppendLogStore),
       eventBus: ix.get(IEventBus),
+      logger: noopLogger,
+      telemetry: noopTelemetryService,
     });
-    ix.set(IAgentSystemReminderService, new SyncDescriptor(AgentSystemReminderService));
+    registerTestEventDispatcher(ix);
+    ix.stub(IAgentLifecycleService, lifecycleWithReminder(reminderRuntime(ix)));
     ix.set(IAgentSupermoonService, new SyncDescriptor(AgentSupermoonService));
   });
   afterEach(() => disposables.dispose());
 
   function publishTurnEnded(): void {
-    ix.get(IEventBus).publish({ type: 'turn.ended', turnId: 1, reason: 'completed' });
+    const bus = ix.get(IEventBus) as ISessionEventBus;
+    bus.publish(
+      new TurnEnded({ agentId: 'test-agent', turnId: 1, reason: 'completed' }),
+      ix.get(IAgentScopeContext).agentContext,
+    );
   }
 
   it('enter / exit toggle isActive and emit agent.status.updated via wire', () => {
     const supermoon = ix.get(IAgentSupermoonService);
-    const events: DomainEvent[] = [];
+    const events: Event2[] = [];
     disposables.add(ix.get(IEventBus).subscribe((e) => events.push(e)));
 
     expect(supermoon.isActive).toBe(false);
@@ -67,9 +102,38 @@ describe('AgentSupermoonService', () => {
     expect(supermoon.isActive).toBe(false);
 
     expect(events).toEqual([
-      { type: 'agent.status.updated', supermoonMode: true },
-      { type: 'agent.status.updated', supermoonMode: false },
-      { type: 'context.spliced', start: 0, deleteCount: 1, messages: [] },
+      {
+        type: 'agent.status.updated',
+        agentId: 'test-agent',
+        supermoonMode: true,
+        time: expect.any(Number),
+      },
+      {
+        type: 'context.spliced',
+        agentId: 'test-agent',
+        start: 0,
+        deleteCount: 0,
+        messages: [
+          expect.objectContaining({
+            origin: { kind: 'injection', variant: 'supermoon_mode' },
+          }),
+        ],
+        time: expect.any(Number),
+      },
+      {
+        type: 'agent.status.updated',
+        agentId: 'test-agent',
+        supermoonMode: false,
+        time: expect.any(Number),
+      },
+      {
+        type: 'context.spliced',
+        agentId: 'test-agent',
+        start: 0,
+        deleteCount: 1,
+        messages: [],
+        time: expect.any(Number),
+      },
     ]);
   });
 
@@ -86,39 +150,57 @@ describe('AgentSupermoonService', () => {
       records.push(record);
     }
     expect(records).toEqual([
-      { type: 'supermoon_mode.enter', trigger: 'manual', time: expect.any(Number) },
+      {
+        type: 'supermoon_mode.enter',
+        agentId: 'test-agent',
+        trigger: 'manual',
+        time: expect.any(Number),
+      },
+      {
+        type: 'context.append_message',
+        agentId: 'test-agent',
+        message: expect.objectContaining({
+          origin: { kind: 'injection', variant: 'supermoon_mode' },
+        }),
+        time: expect.any(Number),
+      },
     ]);
 
     const ix2 = disposables.add(new TestInstantiationService());
     ix2.stub(IFileSystemStorageService, new InMemoryStorageService());
     ix2.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
-    const fresh = registerTestAgentWire(ix2, testWireScope('wire', 'supermoon-replay'), {
+    registerTestAgentWire(ix2, testWireScope('wire', 'supermoon-replay'), {
       log: ix2.get(IAppendLogStore),
+      logger: noopLogger,
+      telemetry: noopTelemetryService,
     });
-    await restoreTestAgentWire(
+    const fresh = registerTestEventDispatcher(ix2);
+    const freshState = ix2.get(IAgentStateService);
+    freshState.contributeState(supermoonKey);
+    await restoreTestEventDispatcher(
       fresh,
       ix2.get(IAppendLogStore),
       testWireScope('wire', 'supermoon-replay'),
-      records,
+      records.filter((record) => record.type === 'supermoon_mode.enter'),
     );
-    expect(fresh.getModel(SupermoonModel)).toBe('manual');
+    expect(freshState.get(supermoonKey)).toBe('manual');
   });
 
   it('enter appends the enter reminder for both manual and task triggers', () => {
     const supermoon = ix.get(IAgentSupermoonService);
-    const context = ix.get(IAgentContextMemoryService) as StubContextMemory;
+    const context = ix.get(IAgentContextMemoryService);
 
     supermoon.enter('manual');
-    expect(context.messages).toHaveLength(1);
-    expect(context.messages[0]).toMatchObject({
+    expect(context.get()).toHaveLength(1);
+    expect(context.get()[0]).toMatchObject({
       role: 'user',
       origin: { kind: 'injection', variant: 'supermoon_mode' },
     });
 
     supermoon.exit();
     supermoon.enter('task');
-    expect(context.messages).toHaveLength(2);
-    expect(context.messages[1]).toMatchObject({
+    expect(context.get()).toHaveLength(1);
+    expect(context.get()[0]).toMatchObject({
       origin: { kind: 'injection', variant: 'supermoon_mode' },
     });
   });
@@ -127,15 +209,17 @@ describe('AgentSupermoonService', () => {
     const supermoon = ix.get(IAgentSupermoonService);
     supermoon.enter('manual');
 
-    const events: DomainEvent[] = [];
+    const events: Event2[] = [];
     disposables.add(ix.get(IEventBus).subscribe((e) => events.push(e)));
     supermoon.exit();
 
     expect(events).toContainEqual({
       type: 'context.spliced',
+      agentId: 'test-agent',
       start: 0,
       deleteCount: 1,
       messages: [],
+      time: expect.any(Number),
     });
     expect(events).not.toContainEqual(
       expect.objectContaining({ type: 'context.spliced', deleteCount: 0 }),
@@ -144,7 +228,7 @@ describe('AgentSupermoonService', () => {
 
   it('exit appends the exit reminder when the enter reminder is not the last message', () => {
     const supermoon = ix.get(IAgentSupermoonService);
-    const context = ix.get(IAgentContextMemoryService) as StubContextMemory;
+    const context = ix.get(IAgentContextMemoryService);
     supermoon.enter('manual');
     context.append({
       role: 'user',
@@ -155,8 +239,8 @@ describe('AgentSupermoonService', () => {
 
     supermoon.exit();
 
-    expect(context.messages).toHaveLength(3);
-    expect(context.messages[2]).toMatchObject({
+    expect(context.get()).toHaveLength(3);
+    expect(context.get()[2]).toMatchObject({
       origin: { kind: 'injection', variant: 'supermoon_mode_exit' },
     });
   });
@@ -199,13 +283,13 @@ describe('AgentSupermoonService', () => {
 
   it('is a no-op when entering while already active', () => {
     const supermoon = ix.get(IAgentSupermoonService);
-    const context = ix.get(IAgentContextMemoryService) as StubContextMemory;
+    const context = ix.get(IAgentContextMemoryService);
     supermoon.enter('task');
 
     supermoon.enter('manual');
 
-    expect(context.messages).toHaveLength(1);
-    expect(context.messages[0]).toMatchObject({
+    expect(context.get()).toHaveLength(1);
+    expect(context.get()[0]).toMatchObject({
       origin: { kind: 'injection', variant: 'supermoon_mode' },
     });
   });

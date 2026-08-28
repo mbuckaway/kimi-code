@@ -7,6 +7,7 @@ export interface AgentStatusUpdatedPayload {
   readonly agentId: string;
   usage?: UsageStatus;
   swarmMode?: boolean;
+  supermoonMode?: boolean;
   towerMode?: boolean;
   planMode?: boolean;
   model?: string;

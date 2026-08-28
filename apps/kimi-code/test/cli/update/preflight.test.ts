@@ -538,7 +538,6 @@ describe('runUpdatePreflight', () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
       const { stdout, options } = captureOutput();
-      const { stdout, options } = captureOutput();
       await expect(runUpdatePreflight('0.4.0', options)).resolves.toBe('exit');
       expect(mocks.spawn).toHaveBeenCalledWith(
         process.execPath,

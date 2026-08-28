@@ -36,7 +36,7 @@ import {
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { LifecycleScope } from '#/app/scopes';
-import { registerScopedService } from '#/_base/di/scope';
+import { overrideScopedService } from '#/_base/di/scope';
 
 import { stubBootstrap } from '../bootstrap/stubs';
 import { StubConfigService } from '../../kosong/stubs';
@@ -50,7 +50,7 @@ afterEach(() => {
 function createLanguage(
   section: Record<string, unknown> | undefined,
 ): { language: IAgentLanguage; config: StubConfigService } {
-  registerScopedService(LifecycleScope.App, IAgentLanguage, AgentLanguageService);
+  overrideScopedService(LifecycleScope.App, IAgentLanguage, AgentLanguageService);
   const config = new StubConfigService(
     section === undefined ? {} : { [LANGUAGE_SECTION]: section },
   );

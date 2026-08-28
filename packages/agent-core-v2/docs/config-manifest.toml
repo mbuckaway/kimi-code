@@ -8,22 +8,22 @@
 # commented "# field: type" lines describe the remaining schema fields.
 # Values resolve as: default -> config.toml -> env overlay -> memory.
 
-# Index (27 sections · 2 overlay(s))
+# Index (28 sections · 2 overlay(s))
 #   background               src/agent/task/configSection.ts
-#   builtinProductSkills     src/app/skillCatalog/configSection.ts
-#   cron                     src/app/cron/configSection.ts
+#   builtinProductSkills     src/features/skill/catalog/configSection.ts
+#   cron                     src/features/cron/configSection.ts
 #   defaultPermissionMode    src/agent/permissionMode/configSection.ts
 #   defaultPlanMode          src/features/plan/configSection.ts
 #   experimental             src/app/flag/flag.ts
 #   extraAgentDirs           src/workspace/workspaceAgentProfileLoader/configSection.ts
-#   extraSkillDirs           src/app/skillCatalog/configSection.ts
-#   hooks                    src/agent/externalHooks/configSection.ts
+#   extraSkillDirs           src/features/skill/catalog/configSection.ts
+#   hooks                    src/features/externalHooks/configSection.ts
 #   identity                 src/app/agentIdentity/configSection.ts
 #   image                    src/agent/media/configSection.ts
 #   language                 src/app/agentLanguage/configSection.ts
 #   loopControl              src/agent/loop/configSection.ts
 #   mcp                      src/app/mcpConfig/configSection.ts
-#   mergeAllAvailableSkills  src/app/skillCatalog/configSection.ts
+#   mergeAllAvailableSkills  src/features/skill/catalog/configSection.ts
 #   modelCatalog             src/app/kosongConfig/configSection.ts
 #   models                   src/app/kosongConfig/configSection.ts
 #   permission               src/agent/permissionRules/configSection.ts
@@ -32,6 +32,7 @@
 #   secondaryModel           src/session/subagent/configSection.ts
 #   services                 src/app/auth/configSection.ts
 #   subagent                 src/session/subagent/configSection.ts
+#   swarm                    src/features/swarm/configSection.ts
 #   task                     src/agent/task/configSection.ts
 #   thinking                 src/app/kosongConfig/configSection.ts
 #   tokenCounting            src/agent/tokenCounting/configSection.ts
@@ -61,7 +62,7 @@
 
 # ##########################################################################
 # builtinProductSkills (config.toml: builtin_product_skills)
-#   owner: src/app/skillCatalog/configSection.ts
+#   owner: src/features/skill/catalog/configSection.ts
 #   scope: core
 #   hooks: stripEnv
 #   env:
@@ -72,7 +73,7 @@ builtin_product_skills = true
 
 # ##########################################################################
 # cron
-#   owner: src/app/cron/configSection.ts
+#   owner: src/features/cron/configSection.ts
 #   scope: core
 #   hooks: stripEnv
 #   env:
@@ -129,7 +130,7 @@ extra_agent_dirs = []
 
 # ##########################################################################
 # extraSkillDirs (config.toml: extra_skill_dirs)
-#   owner: src/app/skillCatalog/configSection.ts
+#   owner: src/features/skill/catalog/configSection.ts
 #   scope: core
 # ##########################################################################
 
@@ -137,7 +138,7 @@ extra_skill_dirs = []
 
 # ##########################################################################
 # hooks
-#   owner: src/agent/externalHooks/configSection.ts
+#   owner: src/features/externalHooks/configSection.ts
 #   scope: core
 #   hooks: custom fromToml · custom toToml
 # ##########################################################################
@@ -225,7 +226,7 @@ reply_language = "en"
 
 # ##########################################################################
 # mergeAllAvailableSkills (config.toml: merge_all_available_skills)
-#   owner: src/app/skillCatalog/configSection.ts
+#   owner: src/features/skill/catalog/configSection.ts
 #   scope: core
 # ##########################################################################
 
@@ -401,6 +402,18 @@ merge_all_available_skills = true
 # ##########################################################################
 
 [subagent]
+timeout_ms = 7200000
+
+# ##########################################################################
+# swarm
+#   owner: src/features/swarm/configSection.ts
+#   scope: core
+#   hooks: stripEnv
+#   env:
+#     timeout_ms <- KIMI_CODE_SWARM_TIMEOUT_MS (custom parse)
+# ##########################################################################
+
+[swarm]
 timeout_ms = 7200000
 
 # ##########################################################################

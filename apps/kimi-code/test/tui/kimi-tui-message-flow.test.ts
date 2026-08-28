@@ -9070,7 +9070,9 @@ describe('KimiTUI wire-journal staleness', () => {
       await vi.waitFor(() => {
         expect(session.prompt).toHaveBeenCalledTimes(2);
       });
-      expect(session.prompt).toHaveBeenLastCalledWith('second message');
+      expect(session.prompt).toHaveBeenLastCalledWith('second message', {
+        promptId: undefined,
+      });
       expect(renderTranscript(driver)).not.toContain('Session was modified outside this terminal');
     } finally {
       await rm(dir, { recursive: true, force: true });

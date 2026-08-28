@@ -66,6 +66,7 @@ import { BugIndicatingError } from '#/_base/errors/errors';
 import { AgentRuntimeContributionPoint } from '#/agent/runtime/agentRuntime';
 import { AgentTodo, todoAgentRuntimeProvider } from '#/features/todo/todoAgentRuntime';
 import '#/agent/toolDedupe/toolDedupeService';
+import { IAgentLanguage } from '#/app/agentLanguage/agentLanguage';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { ISessionEventBus } from '#/app/event/eventBus';
@@ -262,6 +263,10 @@ describe('AgentLifecycleService', () => {
       homeDir: '/tmp/kimi-agentLifecycle-home',
       cwd: '/tmp/kimi-agentLifecycle-home',
     } as unknown as IBootstrapService);
+    ix.stub(IAgentLanguage, {
+      _serviceBrand: undefined,
+      current: () => 'en',
+    } satisfies IAgentLanguage);
     ix.stub(ISessionWorkspaceContext, {
       _serviceBrand: undefined,
       workDir: '/tmp/kimi-agentLifecycle-work',
@@ -778,7 +783,7 @@ describe('AgentLifecycleService', () => {
 
   it('remove waits for the agent wire to flush before completing', async () => {
     const svc = ix.get(IAgentLifecycleService);
-    const handle = await svc.create({ agentId: 'main' });
+    const main = await svc.create({ agentId: 'main' });
     let markFlushStarted!: () => void;
     const flushStarted = new Promise<void>((resolve) => {
       markFlushStarted = resolve;
@@ -788,14 +793,14 @@ describe('AgentLifecycleService', () => {
       releaseFlush = resolve;
     });
     const flush = vi
-      .spyOn(handle.accessor.get(IWireService), 'flush')
+      .spyOn(svc.handleOf('main')!.accessor.get(IWireService), 'flush')
       .mockImplementation(async () => {
         markFlushStarted();
         await flushReleased;
       });
 
     let removed = false;
-    const removal = svc.remove('main').then(() => {
+    const removal = svc.remove(main).then(() => {
       removed = true;
     });
     await flushStarted;
@@ -809,13 +814,14 @@ describe('AgentLifecycleService', () => {
 
   it('remove still disposes the agent when the wire flush rejects', async () => {
     const svc = ix.get(IAgentLifecycleService);
-    const handle = await svc.create({ agentId: 'main' });
+    const main = await svc.create({ agentId: 'main' });
+    const handle = svc.handleOf('main')!;
     const flushError = new Error('wire flush failed');
     vi.spyOn(handle.accessor.get(IWireService), 'flush').mockRejectedValueOnce(flushError);
     const disposed: string[] = [];
-    disposables.add(svc.onDidDispose((id) => disposed.push(id)));
+    disposables.add(svc.onDidClose((agent) => disposed.push(agent.agentId)));
 
-    await expect(svc.remove('main')).rejects.toBe(flushError);
+    await expect(svc.remove(main)).rejects.toBe(flushError);
 
     expect(svc.get('main')).toBeUndefined();
     expect(disposed).toEqual(['main']);

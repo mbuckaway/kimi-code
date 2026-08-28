@@ -192,7 +192,7 @@ export async function runAcpServerWithStream(
     resolvePermissionMode: (sessionId) => {
       const sessionHandle = getLiveSessionById(core.accessor, sessionId);
       if (sessionHandle === undefined) return undefined;
-      const agentHandle = sessionHandle.accessor.get(IAgentLifecycleService).get('main');
+      const agentHandle = sessionHandle.accessor.get(IAgentLifecycleService).handleOf('main');
       if (agentHandle === undefined) return undefined;
       return agentHandle.accessor.get(IAgentPermissionModeService).mode;
     },

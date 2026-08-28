@@ -151,11 +151,13 @@ import {
   type KimiErrorCode,
 } from '@moonshot-ai/agent-core';
 import { encodeWorkDirKey } from '@moonshot-ai/agent-core-v2/_base/utils/workdir-slug';
+import { agentProfileFromFile } from '@moonshot-ai/agent-core-v2/workspace/workspaceAgentProfileLoader/internal/agentProfileFromFile';
 import { McpConnectionManager } from '@moonshot-ai/agent-core-v2/mcpCore/connection-manager';
 import { loadMcpServers } from '@moonshot-ai/agent-core-v2/app/mcpConfig/configLoader';
 import { IAppendLogStore } from '@moonshot-ai/agent-core-v2/persistence/interface/appendLogStore';
 import type { McpServerConfig as WorkspaceMcpServerConfig } from '@moonshot-ai/agent-core-v2/mcpCore/config-schema';
 import {
+  AGENT_PROFILE_SOURCE_PRIORITY,
   bootstrap,
   DEFAULT_AGENT_PROFILE_NAME,
   drainLogCloses,
@@ -177,6 +179,7 @@ import {
   IAgentPermissionModeService,
   IAgentPermissionRulesService,
   IAgentPluginCommandService,
+  IAgentProfileRegistry,
   IAgentProfileService,
   AgentSkill,
   IAgentSwarmService,
@@ -187,9 +190,9 @@ import {
   IAgentToolRegistryService,
   IAgentTowerService,
   IBootstrapService,
+  IBuiltinAgentProfileLoader,
   IConfigService,
   IEventService,
-  IExplicitAgentProfileLoader,
   IHostEnvironment,
   IHostFileSystem,
   IMcpManagementService,
@@ -222,6 +225,7 @@ import {
   workspacePersistenceScope,
   logSeed,
   MAIN_AGENT_ID,
+  parseAgentFileText as parseAgentFileTextV2,
   prepareSystemPromptContext,
   PRINT_MAX_TURNS_DEFAULT,
   PRINT_WAIT_CEILING_S_DEFAULT,
@@ -235,6 +239,8 @@ import {
   resolveLoggingConfig,
   resolvePrintBackgroundMode,
   summarizeSkill,
+  type AgentProfile,
+  type AgentProfileContext,
   type IAgentScopeHandle,
   type IDisposable,
   type ISessionScopeHandle,
@@ -409,14 +415,12 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   private readonly printSteerStates = new Map<string, { deadline?: number; turns: number }>();
   /**
-   * The explicit agent files this client was constructed with
-   * (`SDKRpcClientV2Options.agentFiles`), kept as the base of the engine's
-   * `agentFiles` channel: a `createSession` with its own `agentFiles` overrides
-   * the channel for that session, and the next session without files restores
-   * this base — so a per-session file never leaks into later sessions while
-   * the launch-level registration survives.
+   * Per-workspace `IAgentProfileRegistry` registrations for per-session
+   * `--agent-file` overrides (see {@link registerExplicitAgentFiles}), keyed
+   * by workspace id and replaced on the next session create so a per-session
+   * file never leaks into later sessions of the workspace.
    */
-  private readonly baseAgentFiles: readonly string[] | undefined;
+  private readonly explicitAgentFileRegistrations = new Map<string, IDisposable>();
   /**
    * The model/provider registries (`IModelService` / `IProviderService`)
    * share the config service's ready trap: their `get`/`list` reads are
@@ -460,7 +464,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     });
     ensureKimiHome(this.homeDir);
     this.telemetry = options.telemetry ?? noopTelemetryClient;
-    this.baseAgentFiles = options.agentFiles;
     this.auth = new KimiAuthFacade({
       homeDir: this.homeDir,
       configPath: this.configPath,
@@ -541,6 +544,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     for (const subscription of this.appSubscriptions) {
       subscription.dispose();
     }
+    for (const registration of this.explicitAgentFileRegistrations.values()) {
+      registration.dispose();
+    }
+    this.explicitAgentFileRegistrations.clear();
     await this.klient.close();
     // Same shutdown order as kap-server: drain the session-index mirror while
     // the query store is still open, then await the asynchronous closes that
@@ -1302,26 +1309,19 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     // `agentFiles` entry contributes the profile under its frontmatter `name`.
     const agentProfileName = await this.resolveStartupAgentProfile(input, workDir);
     // Register the session's `--agent-file` files with the engine before the
-    // main agent binds: the workspace explicit loader reads only
-    // `IBootstrapService.args.agentFiles` (seeded from the client option), so
-    // a file supplied solely through this session's `agentFiles` would
-    // otherwise be absent from the session catalog and `profile.bind` would
-    // reject it as an unknown profile. The next session without files restores
-    // the client's base, so a per-session file does not leak into later
-    // sessions of this client.
-    const bootstrapService = this.engineAccessor.get(IBootstrapService);
-    // `bootstrap.args` is the plain object this client seeded at bootstrap;
-    // the `HostArgs` fields are typed `readonly`, but nothing re-derives
-    // them after construction, so the session's files ride the same channel
-    // the client option seeds.
-    const hostArgs = bootstrapService.args as { agentFiles?: readonly string[] };
-    // Only touch the channel when this session has files or a previous session
-    // (or the client option) seeded it — restoring the base on the no-file
-    // path stops a prior session's files leaking into later sessions.
-    if (input.agentFiles !== undefined || hostArgs.agentFiles !== undefined) {
-      hostArgs.agentFiles = input.agentFiles ?? this.baseAgentFiles;
-      await handler.accessor.get(IExplicitAgentProfileLoader).reload();
-    }
+    // main agent binds. The 0.39.1 sync dropped the Workspace DI scope, so the
+    // workspace explicit loader is no longer reachable through an accessor and
+    // `IBootstrapService.args.agentFiles` can no longer be re-read on demand; a
+    // file supplied solely through this session's `agentFiles` is contributed
+    // straight into the App-scope profile registry with the same source /
+    // priority / workspaceKey the explicit loader would use, so `profile.bind`
+    // finds it in the session catalog. The next session without files disposes
+    // the registration, so a per-session file does not leak into later
+    // sessions of the workspace (the client-level `agentFiles` option keeps
+    // riding the bootstrap channel, which the workspace loader reads at
+    // materialization).
+    const workspaceId = handle.accessor.get(ISessionContext).workspaceId;
+    await this.registerExplicitAgentFiles(workspaceId, workDir, input.agentFiles);
     if (
       agentProfileName !== undefined ||
       input.model !== undefined ||
@@ -1635,6 +1635,64 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   // default profile bound (v1's eager equivalent); any other agent must
   // already exist (v1's `AGENT_NOT_FOUND`).
   // -----------------------------------------------------------------------
+
+  /**
+   * The engine's Workspace DI scope was removed by the 0.39.1 sync, so the
+   * workspace explicit loader is not DI-reachable and `Program` exposes only
+   * the workspace-root loader (`agentProfiles`). A per-session `--agent-file`
+   * override can therefore no longer ride `IBootstrapService.args.agentFiles`
+   * plus a reload; the session's files are contributed straight into the
+   * App-scope `IAgentProfileRegistry` with the exact source / priority /
+   * workspaceKey the explicit loader would use, and the previous registration
+   * is disposed on the next session create so a per-session file never leaks
+   * into later sessions of the workspace. The client-level `agentFiles` option
+   * is untouched: it keeps flowing through the bootstrap channel and the
+   * workspace loader reads it at materialization.
+   */
+  private async registerExplicitAgentFiles(
+    workspaceId: string,
+    workDir: string,
+    files: readonly string[] | undefined,
+  ): Promise<void> {
+    if (files === undefined || files.length === 0) {
+      const previous = this.explicitAgentFileRegistrations.get(workspaceId);
+      previous?.dispose();
+      this.explicitAgentFileRegistrations.delete(workspaceId);
+      return;
+    }
+    const bootstrapService = this.engineAccessor.get(IBootstrapService);
+    const fs = this.engineAccessor.get(IHostFileSystem);
+    const basePrompt = (context: AgentProfileContext) =>
+      this.engineAccessor
+        .get(IBuiltinAgentProfileLoader)
+        .getDefault()
+        .renderSystemPrompt(context);
+    const profiles: AgentProfile[] = [];
+    for (const file of files) {
+      const filePath = resolveAgentPath(file, workDir, bootstrapService.osHomeDir);
+      const text = await fs.readText(filePath);
+      profiles.push(
+        agentProfileFromFile(
+          parseAgentFileTextV2({ path: filePath, source: 'explicit', text }),
+          basePrompt,
+        ),
+      );
+    }
+    // The registry key is [sourceId, workspaceKey], so registering the new
+    // contribution replaces the previous one in place; disposing the stale
+    // disposer afterwards is a no-op (it no longer owns the key), which keeps
+    // the previous registration alive when a read fails above — the same
+    // failure semantics as the engine's explicit loader.
+    const registration = this.engineAccessor.get(IAgentProfileRegistry).register({
+      sourceId: 'explicit',
+      priority: AGENT_PROFILE_SOURCE_PRIORITY.explicit,
+      workspaceKey: workspaceId,
+      contribution: { profiles },
+    });
+    const previous = this.explicitAgentFileRegistrations.get(workspaceId);
+    this.explicitAgentFileRegistrations.set(workspaceId, registration);
+    previous?.dispose();
+  }
 
   /**
    * The session's materialized main agent with v1's eager default binding

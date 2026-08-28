@@ -1740,7 +1740,6 @@ describe('AuthSummaryService', () => {
     await expect(createSummary().ensureReady()).resolves.toBeUndefined();
     expect(getCachedAccessToken).not.toHaveBeenCalled();
   });
-  });
 
   it('ensureReady accepts cached oauth tokens', async () => {
     getCachedAccessToken.mockResolvedValue('access-token');

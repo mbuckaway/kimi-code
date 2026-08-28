@@ -1,36 +1,50 @@
-/**
- * `supermoon` domain — wire Model (`SupermoonModel`) and the
- * `supermoon_mode.enter` / `supermoon_mode.exit` Ops (`supermoonEnter` /
- * `supermoonExit`) for the agent's supermoon mode.
- *
- * Declares supermoon mode as a `SupermoonModeTrigger | null` wire Model (the
- * trigger is retained, not collapsed to a boolean, so `shouldAutoExit` can
- * still distinguish `task` / `manual`) plus the two Ops that set and clear it.
- */
-
+/* oxlint-disable typescript-eslint/no-unsafe-declaration-merging, eslint-plugin-import/namespace -- Event2 class+payload-interface declaration merging is the sanctioned event-declaration idiom. */
 import { z } from 'zod';
 
-import { defineModel } from '#/wire/model';
+import { contextMemoryKey, popSupermoonModeReminder } from '#/agent/contextMemory/contextOps';
+import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
+import { AgentEvent2 } from '#/app/event/event2';
+import { defineState } from '#/state/state';
 
 import type { SupermoonModeTrigger } from './supermoon';
 
-export const SupermoonModel = defineModel<SupermoonModeTrigger | null>('supermoon', () => null);
+const supermoonModeEnterSchema = z.object({
+  agentId: z.string(),
+  trigger: z.custom<SupermoonModeTrigger>(),
+});
 
-declare module '#/wire/types' {
-  interface PersistedOpMap {
-    'supermoon_mode.enter': typeof supermoonEnter;
-    'supermoon_mode.exit': typeof supermoonExit;
-  }
+export class SupermoonModeEnter extends AgentEvent2<z.infer<typeof supermoonModeEnterSchema>> {
+  static override readonly type = 'supermoon_mode.enter';
+  static override readonly durable = true;
+  static override readonly schema = supermoonModeEnterSchema;
+}
+export interface SupermoonModeEnter {
+  readonly agentId: string;
+  readonly trigger: SupermoonModeTrigger;
 }
 
-export const supermoonEnter = SupermoonModel.defineOp('supermoon_mode.enter', {
-  schema: z.object({ trigger: z.custom<SupermoonModeTrigger>() }),
-  apply: (_s, p) => p.trigger,
-  toEvent: () => ({ type: 'agent.status.updated' as const, supermoonMode: true }),
-});
+const supermoonModeExitSchema = z.object({ agentId: z.string() });
 
-export const supermoonExit = SupermoonModel.defineOp('supermoon_mode.exit', {
-  schema: z.object({}),
-  apply: () => null,
-  toEvent: () => ({ type: 'agent.status.updated' as const, supermoonMode: false }),
-});
+export class SupermoonModeExit extends AgentEvent2<z.infer<typeof supermoonModeExitSchema>> {
+  static override readonly type = 'supermoon_mode.exit';
+  static override readonly durable = true;
+  static override readonly schema = supermoonModeExitSchema;
+}
+export interface SupermoonModeExit {
+  readonly agentId: string;
+}
+
+export const supermoonKey = defineState('supermoon', (): SupermoonModeTrigger | null => null)
+  .replayable({
+    schema: z.custom<SupermoonModeTrigger | null>(),
+  })
+  .on(SupermoonModeEnter, (_s, e, ctx) => {
+    ctx.emit(new AgentStatusUpdated({ agentId: e.agentId, supermoonMode: true }));
+    return e.trigger;
+  })
+  .on(SupermoonModeExit, (_s, e, ctx) => {
+    ctx.emit(new AgentStatusUpdated({ agentId: e.agentId, supermoonMode: false }));
+    return null;
+  });
+
+contextMemoryKey.on(SupermoonModeExit, (s) => popSupermoonModeReminder(s));

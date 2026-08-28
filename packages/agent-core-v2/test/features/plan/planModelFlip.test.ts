@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { ILogService } from '#/_base/log/log';
-import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import {
@@ -23,6 +22,7 @@ import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IBlobStore } from '#/persistence/interface/blobStore';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { AgentPlanService } from '#/features/plan/planService';
@@ -113,9 +113,10 @@ describe('AgentPlanService plan/default model flip', () => {
           sessionDir: SESSION_DIR,
         });
         reg.definePartialInstance(IAgentContextMemoryService, {});
-        reg.definePartialInstance(IAgentContextInjectorService, {
-          register: () => ({ dispose: () => {} }),
-        });
+        reg.defineInstance(IAgentLifecycleService, {
+          onDidCreateScope: () => ({ dispose: () => {} }),
+          handleOf: () => undefined,
+        } as unknown as IAgentLifecycleService);
         reg.definePartialInstance(IAgentTelemetryContextService, { set: () => {} });
         reg.defineInstance(
           IHostFileSystem,

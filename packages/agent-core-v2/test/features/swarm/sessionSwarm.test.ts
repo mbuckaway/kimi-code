@@ -6,6 +6,7 @@ import { LifecycleScope } from '#/app/scopes';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { Error2 } from '#/_base/errors/errors';
 import { Event } from '#/_base/event';
 import type { AgentContext } from '#/agent/agentContext/agentContext';
 import { userCancellationReason } from '#/_base/utils/abort';
@@ -1278,12 +1279,13 @@ describe('SessionSwarmService metadata compatibility', () => {
       labels: { parentAgentId: 'main' },
     };
     handles.set('agent-usage', agentHandle('agent-usage', lifecycle, eventBus));
-    const published: DomainEvent[] = [];
-    (eventBus.publish as ReturnType<typeof vi.fn>).mockImplementation((event: DomainEvent) => {
+    const published: Event2[] = [];
+    (eventBus.publish as ReturnType<typeof vi.fn>).mockImplementation((event: Event2) => {
       published.push(event);
     });
-    runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+    runAgent.mockImplementation((agent: AgentContext, _request: unknown, options: { onReady?: () => void } | undefined) => {
       options?.onReady?.();
+      const agentId = agent.agentId;
       return {
         agentId,
         turn: {} as never,
@@ -1316,14 +1318,14 @@ describe('SessionSwarmService metadata compatibility', () => {
       labels: { parentAgentId: 'main' },
     };
     handles.set('agent-rate', agentHandle('agent-rate', lifecycle, eventBus));
-    const published: DomainEvent[] = [];
-    (eventBus.publish as ReturnType<typeof vi.fn>).mockImplementation((event: DomainEvent) => {
+    const published: Event2[] = [];
+    (eventBus.publish as ReturnType<typeof vi.fn>).mockImplementation((event: Event2) => {
       published.push(event);
     });
-    runAgent.mockImplementation((agentId: string, _request: unknown, options: { onReady?: () => void } | undefined) => {
+    runAgent.mockImplementation((agent: AgentContext, _request: unknown, options: { onReady?: () => void } | undefined) => {
       options?.onReady?.();
       return {
-        agentId,
+        agentId: agent.agentId,
         turn: {} as never,
         completion: Promise.reject(new APIProviderRateLimitError('Rate limited')),
       };

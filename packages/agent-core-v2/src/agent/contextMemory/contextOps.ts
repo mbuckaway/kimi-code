@@ -112,7 +112,7 @@ export function popSwarmModeReminder(state: ContextMessage[]): ContextMessage[] 
   return resetFold(state.slice(0, -1)) as ContextMessage[];
 }
 
-export function popSupermoonModeReminder(state: ContextMessage[], _payload: unknown): ContextMessage[] {
+export function popSupermoonModeReminder(state: ContextMessage[]): ContextMessage[] {
   const last = state[state.length - 1];
   if (last === undefined) return state;
   const origin = last.origin;

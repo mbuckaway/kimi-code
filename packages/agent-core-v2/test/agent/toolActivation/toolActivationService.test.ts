@@ -520,13 +520,6 @@ describe('AgentToolActivationService', () => {
       );
       registerScopedService(
         LifecycleScope.Agent,
-        IDisclosureTool,
-        DisclosureTool,
-        ScopeActivation.OnDemand,
-        'toolActivation',
-      );
-      registerScopedService(
-        LifecycleScope.Agent,
         IDynamicToolProvider,
         DynamicToolProvider,
         ScopeActivation.OnDemand,
@@ -538,7 +531,6 @@ describe('AgentToolActivationService', () => {
       return [
         [IAgentProfileService, { data: () => profileData as ProfileData }],
         [IEventBus, { subscribe: () => toDisposable(() => {}) }],
-        [
         [
           IAgentToolSelectService,
           {
@@ -559,7 +551,6 @@ describe('AgentToolActivationService', () => {
             isAvailable: (required: readonly RuntimeCapability[] = []) =>
               runtimeData.available && required.every((capability) => runtimeData.capabilities.has(capability)),
           },
-        ],
         ],
         ...extra,
       ];

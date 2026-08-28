@@ -571,7 +571,7 @@ describe('acp-server internal-turn event forwarding', () => {
   /** The main agent's live event bus (to publish synthetic turn events). */
   function mainAgentBus(sessionId: string): { publish(event: unknown): void } {
     const session = getLiveSessionById(client!.server.core.accessor, sessionId);
-    const agentHandle = session?.accessor.get(IAgentLifecycleService).get('main');
+    const agentHandle = session?.accessor.get(IAgentLifecycleService).handleOf('main');
     const bus = agentHandle?.accessor.get(IEventBus);
     expect(bus).toBeDefined();
     return { publish: (event) => bus!.publish(event as never) };

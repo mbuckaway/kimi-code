@@ -1645,6 +1645,10 @@ async function mainAgentProfileData(rpc: SDKRpcClientV2, sessionId: string): Pro
   if (session === undefined) {
     throw new Error(`live session "${sessionId}" not found`);
   }
-  const agent = await ensureMainAgent(session);
+  const context = await ensureMainAgent(session);
+  const agent = session.accessor.get(IAgentLifecycleService).handleOf(context.agentId);
+  if (agent === undefined) {
+    throw new Error('Main agent was not found');
+  }
   return agent.accessor.get(IAgentProfileService).data();
 }
