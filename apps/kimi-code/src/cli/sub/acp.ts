@@ -47,7 +47,7 @@ import { buildSkillSlashCommands } from '#/tui/commands/skills';
 
 import { isLegacyEnabled } from '../experimental-v2';
 import { registerNativeAcpCommand } from './acp-native';
-import { runLoginFlow } from './login-flow';
+import { parseRegionFlag, runLoginFlow } from './login-flow';
 
 export function registerAcpCommand(parent: Command): void {
   if (!isLegacyEnabled()) {
@@ -67,9 +67,12 @@ export function registerAcpCommand(parent: Command): void {
       '--socket <path>',
       'Listen on a Unix domain socket (macOS/Linux) or Windows named pipe (\\\\.\\pipe\\...) instead of stdio.',
     )
-    .action(async (opts: { login?: boolean; socket?: string }) => {
+    .option('--region <region>', 'Login region used together with --login: "mainland-cn" (kimi.com) or "global" (kimi.ai).')
+    .action(async (opts: { login?: boolean; socket?: string; region?: string }) => {
       if (opts.login === true) {
-        await runLoginFlow();
+        await runLoginFlow({
+          region: opts.region === undefined ? undefined : parseRegionFlag(opts.region),
+        });
         return;
       }
       const identity = createKimiCodeHostIdentity();

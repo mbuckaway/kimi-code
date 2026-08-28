@@ -1,30 +1,3 @@
-/**
- * `hostFsWatch` domain — macOS `fsevents` backend.
- *
- * Loads the darwin-only native `fsevents` module lazily through
- * `createRequire` (it is an optional dependency, absent on other platforms)
- * and runs one `FSEventStream` per watched tree, so watching a large
- * workspace costs O(1) file descriptors instead of one `fs.watch` handle per
- * file. Raw flags are first classified by the pure `mapFsEventsFlags`, then
- * reconciled against per-path state to match chokidar semantics:
- * `ignoreInitial` is emulated by suppressing events whose mtime predates the
- * watch start (FSEvents delivers a stale event for paths written just before
- * stream start), the sticky `ItemCreated` bit FSEvents keeps setting on
- * later writes degrades to `change`, and a coalesced created+removed pair is
- * a deletion when the path was already reported, a transient file otherwise.
- * FSEvents only streams from existing directories, so a file target (or a
- * not-yet-existing path) is served by streaming the nearest existing ancestor
- * directory and keeping only events for the target itself, matching chokidar.
- * Event paths are rewritten from the kernel-reported real path back to the
- * caller-given root (macOS `/var` vs `/private/var`). The per-path state is a
- * bounded set that evicts the oldest path once the cap is reached, so a
- * long-lived watch cannot grow without limit, and the lazily required native
- * module is shape-checked before it is used. Note: an active
- * `fsevents` watch keeps the Node process alive (the native handle cannot be
- * unref'd). Used by `hostFsWatchService` on macOS; chokidar remains the
- * backend elsewhere.
- */
-
 import { lstatSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';

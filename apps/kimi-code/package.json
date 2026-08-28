@@ -1,6 +1,6 @@
 {
   "name": "@mbuckaway/kimi-code",
-  "version": "0.36.0-MB.1.26",
+  "version": "0.39.1-MB.1.26",
   "description": "The Starting Point for Next-Gen Agents",
   "license": "MIT",
   "author": "Moonshot AI",
@@ -95,7 +95,9 @@
     "@moonshot-ai/pi-tui": "workspace:^",
     "@moonshot-ai/vis-server": "workspace:^",
     "@moonshot-ai/vis-web": "workspace:*",
+    "@types/qrcode": "^1.5.6",
     "@types/semver": "^7.7.0",
+    "@types/ws": "^8.18.0",
     "@types/yazl": "^2.4.6",
     "chalk": "^5.4.1",
     "cli-highlight": "^2.1.11",
@@ -111,5 +113,9 @@
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.3"
   }
 }

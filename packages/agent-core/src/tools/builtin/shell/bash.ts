@@ -22,7 +22,7 @@
  *     foreground runs pass a callback to collect chunks for this call.
  */
 
-import type { Kaos, KaosProcess } from '@moonshot-ai/kaos';
+import { getShellPathBridge, type Kaos, type KaosProcess } from '@moonshot-ai/kaos';
 import { parse } from '@moonshot-ai/tree-sitter-bash';
 import { z } from 'zod';
 
@@ -275,7 +275,7 @@ export class BashTool implements BuiltinTool<BashInput> {
   }
 
   private spawn(effectiveCwd: string, command: string): Promise<KaosProcess> {
-    const shellCwd = this.isWindowsBash ? windowsPathToPosixPath(effectiveCwd) : effectiveCwd;
+    const shellCwd = getShellPathBridge(this.kaos.osEnv).toShellPath(effectiveCwd);
     const shellArgs = [
       this.kaos.osEnv.shellPath,
       '-c',
@@ -609,21 +609,6 @@ async function killSpawnedProcess(proc: KaosProcess): Promise<void> {
 
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
-}
-
-function windowsPathToPosixPath(path: string): string {
-  if (path.startsWith('\\\\')) {
-    return path.replaceAll('\\', '/');
-  }
-
-  const driveMatch = /^([A-Za-z]):(?:[\\/]|$)/.exec(path);
-  if (driveMatch !== null) {
-    const drive = driveMatch[1]!.toLowerCase();
-    const rest = path.slice(2).replaceAll('\\', '/');
-    return `/${drive}${rest.startsWith('/') ? rest : `/${rest}`}`;
-  }
-
-  return path.replaceAll('\\', '/');
 }
 
 const WINDOWS_NUL_REDIRECT = /(\d?&?>+\s*)[Nn][Uu][Ll](?=\s|$|[|&;)\n])/g;

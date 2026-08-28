@@ -1,12 +1,3 @@
-/**
- * `supermoon` domain — `IExitSupermoonModeTool` contract.
- *
- * Public contract of the ExitSupermoonMode tool — the supermoon-mode exit tool
- * the LLM calls to leave supermoon mode directly: the (empty) input schema and
- * the Agent-scope identifier used to resolve the implementation through the
- * container. Bound at Agent scope.
- */
-
 import { z } from 'zod';
 
 import { createDecorator } from '#/_base/di/instantiation';

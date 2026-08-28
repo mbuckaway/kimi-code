@@ -1,25 +1,3 @@
-/**
- * `kosong/model` domain — `ModelRequesterImpl`, the request executor.
- *
- * This is the ONLY production code that calls
- * `IProtocolAdapterRegistry.createChatProvider`: it lazily composes exactly
- * one immutable ChatProvider per Model (on first use) and caches it for the
- * Model's lifetime; every per-turn variation arrives as `ModelRequestParams` and
- * is mapped onto `GenerateOptions` (overlay order inside the bases:
- * `cacheKey → sampling → thinking → maxCompletionTokens`).
- *
- * The driver itself turns per-turn input (systemPrompt / tools / messages)
- * into the `ModelRequestEvent` stream via the contract's `generate(...)`, measures
- * stream timing (`buildStreamTiming`), and owns the auth-refresh replay: a
- * 401 against a refreshable (OAuth) auth provider triggers one forced token
- * refresh and exactly one replay; a 401 that survives the replay means the
- * provider rejected the account itself, so it is surfaced through
- * `translateProviderError` as `provider.auth_error` carrying the provider's
- * message instead of a misleading re-login prompt.
- *
- * Constructed by `ModelCatalog` — plain constructor args, no DI.
- */
-
 import { AsyncEventQueue } from '#/_base/asyncEventQueue';
 import type { VideoURLPart } from '#/kosong/contract/message';
 import {
@@ -218,8 +196,6 @@ export class ModelRequesterImpl implements ModelRequester {
 
 function isUnauthorizedStatusError(error: unknown): error is APIStatusError {
   if (!(error instanceof APIStatusError) || error.statusCode !== 401) return false;
-  // A message-matched context-limit 401 is a context-window rejection, not a
-  // stale token — refreshing OAuth cannot help (issue #2613).
   return !(error instanceof APIContextOverflowError);
 }
 

@@ -1,11 +1,3 @@
-/**
- * `supermoon` domain — `IEnterSupermoonModeTool` implementation.
- *
- * Enters supermoon mode through the supermoon service (`supermoon`), reporting
- * an error when supermoon mode is already active, and walks the model through
- * the supermoon-mode behavior in the result message. Bound at Agent scope.
- */
-
 import type { ToolExecution } from '#/tool/toolContract';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import { IAgentSupermoonService } from '#/agent/supermoon/supermoon';

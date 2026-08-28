@@ -1,29 +1,3 @@
-/**
- * `kosong/provider` abort-classification probes (probe 3) — a user
- * cancellation must never be converted into (or returned as) a retryable
- * provider error:
- *
- *  - `convertOpenAIError` / `convertAnthropicError` THROW the standard abort
- *    DOMException for every abort shape (the standard DOMException, a bare
- *    `Error` named `AbortError`, an SDK `APIUserAbortError`) — the guard is a
- *    throw at the front of the classification chain, not a return;
- *  - non-abort errors still classify normally;
- *  - `isRetryableGenerateError` is false for the abort shape.
- *
- * Also probes quota-exhausted classification at the provider boundary. The
- * base converters stay vendor-neutral (only OpenAI's own documented
- * `insufficient_quota` code fails fast there); Moonshot's quota signals are
- * declared on the Kimi traits via the `convertError` hook, composed with
- * last-declarer-wins semantics and consulted — after the abort guard — with
- * the raw failure at every catch seam, including the Responses in-stream
- * error-event path.
- *
- * The Google GenAI converter coverage checks the recovery of the
- * server-directed retry delay from the wire body's `google.rpc.RetryInfo`
- * detail — the SDK's `ApiError` drops response headers, so the body detail
- * is the only carrier of that wait time.
- */
-
 import { APIError as AnthropicAPIError } from '@anthropic-ai/sdk';
 import { ApiError as GoogleApiError } from '@google/genai';
 import { APIError as OpenAIAPIError } from 'openai';
@@ -120,8 +94,6 @@ const QUOTA_MESSAGE =
 const TOKEN_QUOTA_MESSAGE =
   'You exceeded your current token quota: <org-0123456789abcdef> 31275, please check your account balance';
 
-// The managed Kimi subscription's usage limit, observed in
-// https://github.com/MoonshotAI/kimi-code/issues/2121.
 const USAGE_LIMIT_403_MESSAGE =
   "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan.";
 
@@ -175,14 +147,11 @@ describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
     const error = classifyKimiQuotaError(moonshotError403(USAGE_LIMIT_403_MESSAGE));
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(error)).toBe(false);
-    // The reported status is the provider's own 403, not a hardcoded 429.
     expect(error?.statusCode).toBe(403);
     expect(error?.details).toMatchObject({ statusCode: 403 });
   });
 
   it('accepts a 429 carrying only usage-limit wording and keeps its 429 status', () => {
-    // No structured quota code and no billing wording: the usage-limit
-    // wording alone promotes the 429 out of the retryable rate-limit class.
     const error = classifyKimiQuotaError(moonshotQuota429(USAGE_LIMIT_403_MESSAGE));
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(error)).toBe(false);
@@ -204,8 +173,6 @@ describe('classifyKimiQuotaError (Kimi trait classifier)', () => {
     TOKEN_QUOTA_MESSAGE,
     'Your account is suspended due to insufficient balance, please recharge your account',
   ])('answers undefined for a 403 without usage-limit wording "%s"', (message) => {
-    // Billing wordings stay 429-only: on a 403 they read as auth/permission
-    // failures, not quota exhaustion.
     expect(classifyKimiQuotaError(moonshotError403(message))).toBeUndefined();
   });
 
@@ -273,7 +240,6 @@ describe('convertError hook consult at the OpenAI boundary', () => {
     const error = convertOpenAIError(source, hooks?.convertError);
     expect(error).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(error)).toBe(false);
-    // Without the Kimi trait hook the same 403 stays a plain status error.
     expect(convertOpenAIError(source)).not.toBeInstanceOf(APIProviderQuotaExhaustedError);
   });
 

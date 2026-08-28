@@ -1,22 +1,10 @@
-/**
- * `applySessionAgentConfig` supermoon dispatch scenarios.
- *
- * The fork carries `supermoon_mode` in the agent_config patch for
- * `POST /sessions/{session_id}/profile`; upstream's edge module knows only
- * swarm, so the supermoon branch is a fork delta on top of the upstream
- * sync. These scenarios pin its apply-only-when-set / idempotency
- * semantics against stubbed DI scopes.
- */
-
 import { describe, expect, it, vi } from 'vitest';
 
 import {
   IAgentLifecycleService,
   IAgentProfileService,
   IAgentSupermoonService,
-  ISessionIndex,
-  ISessionLifecycleService,
-  IWorkspaceLifecycleService,
+  ISessionManager,
 } from '@moonshot-ai/agent-core-v2';
 
 import { applySessionAgentConfig } from '../src/routes/sessionAgentConfig';
@@ -53,26 +41,19 @@ function stubChain(supermoon: {
   const session = {
     id: 'session-test',
     kind: 'session',
-    accessor: accessor([[IAgentLifecycleService, { create: () => Promise.resolve(agent) }]]),
-    dispose: () => {},
-  };
-  const handler = {
-    id: 'wd',
-    kind: 'workspace',
-    accessor: accessor([[ISessionLifecycleService, { resume: () => Promise.resolve(session) }]]),
+    accessor: accessor([
+      [
+        IAgentLifecycleService,
+        {
+          create: () => Promise.resolve({ agentId: 'main', generation: 1 }),
+          handleOf: (agentId: string) => (agentId === 'main' ? agent : undefined),
+        },
+      ],
+    ]),
     dispose: () => {},
   };
   return {
-    accessor: accessor([
-      [
-        ISessionIndex,
-        {
-          get: () =>
-            Promise.resolve({ id: 'session-test', workspaceId: 'wd', cwd: '/workspace' }),
-        },
-      ],
-      [IWorkspaceLifecycleService, { handlerFor: () => Promise.resolve(handler) }],
-    ]),
+    accessor: accessor([[ISessionManager, { resume: () => Promise.resolve(session) }]]),
   } as unknown as ApplyAgentConfigCore;
 }
 

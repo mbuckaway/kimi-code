@@ -1,29 +1,3 @@
-/**
- * `tools` domain — Bash command decomposition for permission-rule matching.
- *
- * Splits a parsed bash command into the executable unit texts — commands and
- * test commands (with their redirections attached, and leading env-prefix
- * assignments such as `DEBUG=1` stripped so the rule judges the command that
- * actually runs), standalone variable assignments, redirected groups, and the
- * payloads of command / process substitutions at any depth — so rule
- * evaluation can judge a compound command per unit instead of as one opaque
- * string. A `deny`/`ask` rule matches when the whole command or any unit
- * matches. An `allow` rule auto-matches only when the command parses cleanly
- * and every unit matches, or the pattern is the escaped literal of the whole
- * command (the session-approval shape, which re-approves a previously
- * approved compound command without letting a wildcard span operators) —
- * parse failure or budget exhaustion must not fall back to whole-string
- * globbing, since both are exactly the over-match being closed. An unknown
- * (undefined) decision never expands into per-part matching, since that
- * expansion is only sound once the allow/deny direction is known. Quoted
- * operators and heredoc bodies are data, not units — extraction trusts the
- * grammar, which only surfaces substitution nodes where bash would execute
- * them. The tree walk is iterative because in-budget trees can still be
- * thousands of levels deep. Collaborators: parses through `bashParser`,
- * matches through `rule-match`. Pure functions plus a memoizing provider; no
- * scoped service.
- */
-
 import type { BashSyntaxNode, IBashParserService } from '#/app/bashParser/bashParser';
 import { escapeRuleSubjectLiteral, matchesGlobRuleSubject } from '#/tool/rule-match';
 import type { RuleMatchDecision } from '#/tool/toolContract';

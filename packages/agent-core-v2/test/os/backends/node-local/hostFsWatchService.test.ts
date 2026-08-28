@@ -1,17 +1,3 @@
-/**
- * Scenario: precise host watches and coarse native signal watches.
- * Responsibilities: event delivery, filtering, recovery, disposal, the
- * macOS descriptor bound, backend selection, the once-per-service warning
- * about a missing `fsevents` module, the bounded known-path set, the
- * `fsevents` module shape guard, and the `fsevents` flag mapping. Wiring:
- * real temporary files for integration, an injected native-watch boundary
- * with a manual retry scheduler for recovery, an injected `fsevents` loader
- * plus a recording `ILogService` for the fallback warning, and a stubbed
- * `fsevents` module for the fsevents unit tests.
- * Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
- * test/os/backends/node-local/hostFsWatchService.test.ts`.
- */
-
 import { readdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

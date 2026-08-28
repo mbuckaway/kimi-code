@@ -76,18 +76,6 @@ describe('ExitPlanModeTool', () => {
         options: { type: 'array' },
       },
     });
-    const optionsSchema = (tool.parameters['properties'] as Record<string, unknown>)[
-      'options'
-    ] as {
-      description?: string;
-      items?: {
-        properties?: Record<string, { description?: string }>;
-      };
-    };
-    expect(optionsSchema.description).toContain('up to 3 options');
-    expect(optionsSchema.description).toContain('single option');
-    expect(optionsSchema.items?.properties?.['label']?.description).toContain('(Recommended)');
-    expect(optionsSchema.items?.properties?.['description']?.description).toContain('trade-offs');
     expect((tool.parameters['properties'] as Record<string, unknown>)['plan']).toBeUndefined();
   });
 

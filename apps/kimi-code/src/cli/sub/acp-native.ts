@@ -31,7 +31,7 @@ import { getVersion } from '#/cli/version';
 import { KIMI_CODE_HOME_ENV } from '#/constant/app';
 import { getDataDir } from '#/utils/paths';
 
-import { runLoginFlow } from './login-flow';
+import { parseRegionFlag, runLoginFlow } from './login-flow';
 
 export function registerNativeAcpCommand(parent: Command): void {
   parent
@@ -46,9 +46,12 @@ export function registerNativeAcpCommand(parent: Command): void {
       '--socket <path>',
       'Listen on a Unix domain socket (macOS/Linux) or Windows named pipe (\\\\.\\pipe\\...) instead of stdio.',
     )
-    .action(async (opts: { login?: boolean; socket?: string }) => {
+    .option('--region <region>', 'Login region used together with --login: "mainland-cn" (kimi.com) or "global" (kimi.ai).')
+    .action(async (opts: { login?: boolean; socket?: string; region?: string }) => {
       if (opts.login === true) {
-        await runLoginFlow();
+        await runLoginFlow({
+          region: opts.region === undefined ? undefined : parseRegionFlag(opts.region),
+        });
         return;
       }
       // Forward `KIMI_CODE_HOME` (if set) into `authMethods[0].env` so the

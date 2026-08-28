@@ -1,43 +1,34 @@
-/**
- * `supermoon` domain — `IAgentSupermoonService` implementation.
- *
- * Tracks supermoon-mode enter/exit in the `wire` `SupermoonModel` (mutated only
- * through the `supermoon_mode.enter` / `supermoon_mode.exit` Ops, read through
- * `wire.getModel`), mirrors it into `systemReminder` as live-only side effects,
- * derives `agent.status.updated` from the Ops' `toEvent`, and auto-exits on
- * turn end via `turn` when entered with the `task` trigger (`manual` and `tool`
- * persist until explicitly exited). The enter-reminder removal on exit is a
- * cross-model fold on `ContextModel`: dispatching `supermoon_mode.exit` pops
- * the reminder when it is the last message, both live and on replay. The
- * service only publishes the live-only `context.spliced` event for that pop (so
- * injector bookkeeping stays in step) and appends the exit reminder when
- * nothing was popped. Bound at Agent scope.
- */
-
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
+import { TurnEnded } from '#/agent/loop/turnOps';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentStateService } from '#/agent/state/agentState';
 import { IEventBus } from '#/app/event/eventBus';
-import { IWireService } from '#/wire/wire';
+import { AgentReminder, type ReminderRuntime } from '#/features/reminder/reminderAgentRuntime';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IEventDispatcher } from '#/state/eventDispatcher';
 import SUPERMOON_MODE_ENTER_REMINDER from './enter-reminder.md?raw';
 import SUPERMOON_MODE_EXIT_REMINDER from './exit-reminder.md?raw';
 import { IAgentSupermoonService, type SupermoonModeTrigger } from './supermoon';
-import { supermoonEnter, supermoonExit, SupermoonModel } from './supermoonOps';
+import { SupermoonModeEnter, SupermoonModeExit, supermoonKey } from './supermoonOps';
 
 export class AgentSupermoonService extends Service implements IAgentSupermoonService {
   declare readonly _serviceBrand: undefined;
 
   constructor(
-    @IWireService private readonly wire: IWireService,
-    @IAgentSystemReminderService private readonly reminders: IAgentSystemReminderService,
+    @IEventDispatcher private readonly dispatcher: IEventDispatcher,
+    @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
+    @IAgentScopeContext private readonly agentCtx: IAgentScopeContext,
+    @IEventBus eventBus: IEventBus,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
-    @IEventBus private readonly eventBus: IEventBus,
+    @IAgentStateService private readonly agentState: IAgentStateService,
   ) {
     super();
+    this.agentState.contributeState(supermoonKey);
     this._register(
-      this.eventBus.subscribe('turn.ended', () => {
+      eventBus.subscribe(TurnEnded, () => {
         if (this.shouldAutoExit) {
           this.exit();
         }
@@ -46,43 +37,32 @@ export class AgentSupermoonService extends Service implements IAgentSupermoonSer
   }
 
   enter(trigger: SupermoonModeTrigger): void {
-    if (this.wire.getModel(SupermoonModel) !== null) return;
-    this.wire.dispatch(supermoonEnter({ trigger }));
-    this.reminders.appendSystemReminder(SUPERMOON_MODE_ENTER_REMINDER, {
-      kind: 'injection',
-      variant: 'supermoon_mode',
-    });
+    if (this.agentState.get(supermoonKey) !== null) return;
+    void this.dispatcher.dispatch(
+      new SupermoonModeEnter({ agentId: this.agentCtx.agentId, trigger }),
+    );
+    this.reminder().notify(SUPERMOON_MODE_ENTER_REMINDER, { variant: 'supermoon_mode' });
   }
 
   exit(): void {
-    const trigger = this.wire.getModel(SupermoonModel);
-    if (trigger === null) return;
+    if (this.agentState.get(supermoonKey) === null) return;
     const history = this.context.get();
-    const last = history[history.length - 1];
-    const willPop =
-      last?.origin?.kind === 'injection' && last.origin.variant === 'supermoon_mode';
-    this.wire.dispatch(supermoonExit({}));
-    if (willPop) {
-      this.eventBus.publish({
-        type: 'context.spliced',
-        start: history.length - 1,
-        deleteCount: 1,
-        messages: [],
-      });
-      return;
-    }
-    this.reminders.appendSystemReminder(SUPERMOON_MODE_EXIT_REMINDER, {
-      kind: 'injection',
-      variant: 'supermoon_mode_exit',
-    });
+    void this.dispatcher.dispatch(new SupermoonModeExit({ agentId: this.agentCtx.agentId }));
+    const popped = this.context.publishTrailingRemoval(history);
+    if (popped) return;
+    this.reminder().notify(SUPERMOON_MODE_EXIT_REMINDER, { variant: 'supermoon_mode_exit' });
   }
 
   get isActive(): boolean {
-    return this.wire.getModel(SupermoonModel) !== null;
+    return this.agentState.get(supermoonKey) !== null;
   }
 
   private get shouldAutoExit(): boolean {
-    return this.wire.getModel(SupermoonModel) === 'task';
+    return this.agentState.get(supermoonKey) === 'task';
+  }
+
+  private reminder(): ReminderRuntime {
+    return this.agentLifecycle.resolve(this.agentCtx.agentContext, AgentReminder);
   }
 }
 

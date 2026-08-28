@@ -506,6 +506,9 @@ export function projectContext(
       case 'supermoon_mode.exit':
         supermoon = { active: false };
         break;
+      case 'tower_mode.enter':
+      case 'tower_mode.exit':
+        break;
       // Kinds that don't affect the projected timeline / derived state,
       // including the observability records (request trace — `llm.*`,
       // `mcp.tools_discovered`), which are never part of context state:

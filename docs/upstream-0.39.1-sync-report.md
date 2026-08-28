@@ -119,9 +119,15 @@ and `protocol` (events/rest/*). Clean: `packages/transcript/**` (take upstream w
 
 ## Plan summary
 
-1. **Phase 1 (first):** complete + ship planning-model-switching (register `PLANNING_MODEL_SECTION`,
-   merge backend + web bundle atomically into `fork/main`, pass the release gate, cut a release).
-2. **Phase 2:** single-jump merge of upstream 0.39.1 tag `5efca0c31` into `fork/main`, re-porting
-   all fork patches.
-3. **Phase 3:** port the 0.37→0.39.1 web features into `kimi-code-web` and re-ship `dist-web`.
+Sync procedure (per `fork/README.md` + `.github/workflows/fork-sync.yml`): pull upstream into the
+`main` mirror first, then merge `main` into `fork/main` via a sync branch + PR.
+
+1. **Phase 1 (done):** planning-model switching completed and shipped (released 0.36.0-MB.1.25/1.26).
+2. **Phase 2 (this PR):** `main` mirror updated to upstream/main (`9d2304c`, post-0.39.1) via the
+   `fork-sync` CI `sync-main` job; `sync/upstream-0.39.1` merges `main` into `fork/main` with all
+   212 conflicts resolved: fork patches re-ported, supermoon migrated to the Event2 model,
+   planning-model preserved, `dist-web` kept fork-side, upstream search/cron/workspace-lifecycle
+   refactors adopted. Local Node 26 worker-test failures (minidb, kap-server search) are
+   environmental — CI pins Node 24.15 (`.nvmrc`).
+3. **Phase 3 (next):** port the 0.37→0.39.1 web features into `kimi-code-web` and re-ship `dist-web`.
 4. **Phase 4:** verification + release.

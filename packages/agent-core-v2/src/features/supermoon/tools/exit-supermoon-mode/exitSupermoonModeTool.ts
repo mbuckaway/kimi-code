@@ -1,10 +1,3 @@
-/**
- * `supermoon` domain — `IExitSupermoonModeTool` implementation.
- *
- * Exits supermoon mode through the supermoon service (`supermoon`), reporting
- * an error when supermoon mode is already inactive. Bound at Agent scope.
- */
-
 import type { ToolExecution } from '#/tool/toolContract';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import { IAgentSupermoonService } from '#/agent/supermoon/supermoon';

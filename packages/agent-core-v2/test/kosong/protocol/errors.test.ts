@@ -1,13 +1,3 @@
-/**
- * `kosong/protocol` errors — provider-error boundary translation.
- *
- * Locks the abort behavior fix: the `throwIfAbortError` guard runs FIRST in
- * `translateProviderError` and THROWS the standard abort DOMException for
- * every abort shape, so a user cancellation can never come back as a
- * retryable `provider.*` Error2. Also locks the status→code mapping, the
- * message sanitizer, and the domain's self-registration at import time.
- */
-
 import { describe, expect, it } from 'vitest';
 
 import { errorInfo, isErrorCode } from '#/_base/errors/codes';
@@ -54,8 +44,6 @@ describe('ProtocolErrors domain', () => {
   });
 
   it('marks provider.usage_limit public and non-retryable', () => {
-    // Retryable usage-limit codes would feed the swarm requeue/suspend loop,
-    // which cannot help until the quota window resets.
     expect(errorInfo('provider.usage_limit')).toMatchObject({
       title: 'Usage limit reached',
       retryable: false,
@@ -149,8 +137,6 @@ describe('translateProviderError — classification', () => {
   });
 
   it('maps a quota-exhausted error to the dedicated usage-limit code', () => {
-    // Not provider.rate_limit (retryable — would drive the swarm requeue
-    // loop) and not provider.api_error (too generic to branch on).
     const translated = translateProviderError(
       new APIProviderQuotaExhaustedError(
         "You've reached your usage limit for this billing cycle.",
@@ -162,8 +148,6 @@ describe('translateProviderError — classification', () => {
   });
 
   it('reports the provider status the quota-exhausted error was built from', () => {
-    // The managed subscription's usage limit arrives as a 403; reporting a
-    // hardcoded 429 would misattribute it in the wire details and telemetry.
     const error = new APIProviderQuotaExhaustedError(
       "You've reached your usage limit for this billing cycle.",
       'req-usage-403',

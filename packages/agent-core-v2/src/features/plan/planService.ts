@@ -1,27 +1,3 @@
-/**
- * `plan` domain — `IAgentPlanService` implementation.
- *
- * Manages plan-mode state through `wire`, injects plan-mode context through
- * `contextInjector`, writes optional plan files through `hostFileSystem`,
- * and tags mode telemetry through `telemetry`. Also snapshots submitted plan
- * revisions: `recordRevision` reads the current plan file, writes it
- * atomically through `IBlobStore` under the agent's own persistence scope
- * (`agentCtx.scope()`, i.e. the homeDir-relative
- * `sessions/<ws>/<sid>/agents/<agentId>` root) with the key
- * `plan/<id>/v<N>.md`, and dispatches a reference-only `plan.revision` op
- * carrying the homeDir-relative path, sha256 and byte length. N comes from
- * the Model's replayed per-id `revisionCount`, starting at 1. Also carries
- * the plan-mode Harness constraints as an `onBeforeExecuteTool` veto
- * listener: while a plan is active, Write/Edit calls targeting only the
- * current plan file are allowed outright (`allow()`, ending all other
- * adjudication), any other Write/Edit and every TaskStop/CronCreate/
- * CronDelete call is vetoed with a `toolApproval.formatDenyMessage`-
- * formatted reason, and an `ExitPlanMode` call outside `auto` mode defers
- * to a cold `waitUntil` factory running the `exitPlanModeReview` user
- * review. Bound at Agent scope — contributed into every Agent scope by
- * `PlanFeature` (`features/plan/planFeature`).
- */
-
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'pathe';
 
@@ -32,7 +8,8 @@ import { ILogService } from '#/_base/log/log';
 import { Error2, ErrorCodes } from '#/errors';
 import { generateHeroSlug } from '#/_base/utils/hero-slug';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
+import { activateReminderWhenReady } from '#/features/reminder/internal/reminderActivation';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { PlanModeInjection } from '#/features/plan/injection/planModeInjection';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -47,15 +24,17 @@ import type {
 } from '#/agent/toolExecutor/toolHooks';
 import { IConfigService } from '#/app/config/config';
 import { describeUnknownError } from '#/app/config/configPure';
-import { IEventBus } from '#/app/event/eventBus';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
+import { IEventBus } from '#/app/event/eventBus';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { DEFAULT_MODEL_SECTION, PLANNING_MODEL_SECTION } from '#/app/kosongConfig/configSection';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IBlobStore } from '#/persistence/interface/blobStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { IWireService } from '#/wire/wire';
+import { IEventDispatcher } from '#/state/eventDispatcher';
+import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
+import { ContextUndone } from '#/agent/undo/undoService';
 import type { ToolFileAccess } from '#/tool/toolContract';
 import { canSwitchModel } from '#/features/model/switchGuard';
 import {
@@ -65,11 +44,11 @@ import {
 } from './plan';
 import { ExitPlanModeReview } from './exitPlanModeReview';
 import {
-  PlanModel,
-  planModeCancel,
-  planModeEnter,
-  planModeExit,
-  planRevision,
+  PlanModeCancel,
+  PlanModeEnter,
+  PlanModeExit,
+  planKey,
+  PlanRevision,
 } from './planOps';
 
 export class AgentPlanService extends Service implements IAgentPlanService {
@@ -82,43 +61,47 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IHostFileSystem private readonly hostFs: IHostFileSystem,
     @IBlobStore private readonly blobs: IBlobStore,
-    @IAgentContextInjectorService injector: IAgentContextInjectorService,
+    @IAgentLifecycleService agentLifecycle: IAgentLifecycleService,
     @IAgentTelemetryContextService private readonly telemetryContext: IAgentTelemetryContextService,
     @IEventBus eventBus: IEventBus,
-    @IWireService private readonly wire: IWireService,
+    @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @ISessionContext private readonly sessionCtx: ISessionContext,
     @IAgentScopeContext private readonly agentCtx: IAgentScopeContext,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IAgentToolApprovalService private readonly toolApproval: IAgentToolApprovalService,
     @IAgentPermissionModeService private readonly modeService: IAgentPermissionModeService,
     @ITelemetryService telemetry: ITelemetryService,
-    @IAgentStateService states: IAgentStateService,
+    @IAgentStateService private readonly agentState: IAgentStateService,
     @IConfigService private readonly configService: IConfigService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @ILogService private readonly log: ILogService,
   ) {
     super();
+    this.agentState.contributeState(planKey);
 
     this.review = new ExitPlanModeReview(this, this.toolApproval, telemetry);
 
     this._register(
-      this.wire.hooks.onDidRestore.register('plan', async (_ctx, next) => {
+      this.dispatcher.hooks.onDidRestore.register('plan', async (_ctx, next) => {
         this.restoreTelemetryMode();
         await next();
       }),
     );
     this._register(
-      eventBus.subscribe('context.undone', () => {
+      eventBus.subscribe(ContextUndone, () => {
         this.restoreTelemetryMode();
-        eventBus.publish({
-          type: 'agent.status.updated',
-          planMode: this.isActive,
-        });
+        void this.dispatcher.dispatch(
+          new AgentStatusUpdated({ agentId: this.agentCtx.agentId, planMode: this.isActive }),
+        );
       }),
     );
 
-    this._register(new PlanModeInjection(injector, this, this.context, states));
+    this._register(
+      activateReminderWhenReady(agentLifecycle, this.agentCtx, (reminder) =>
+        new PlanModeInjection(reminder, this, this.context, agentState),
+      ),
+    );
     this._register(this.registerPlanGuard(toolExecutor));
   }
 
@@ -176,11 +159,11 @@ export class AgentPlanService extends Service implements IAgentPlanService {
   }
 
   private get isActive(): boolean {
-    return this.wire.getModel(PlanModel).current.active;
+    return this.agentState.get(planKey).active;
   }
 
   private currentPlanFilePath(): PlanFilePath {
-    const state = this.wire.getModel(PlanModel).current;
+    const state = this.agentState.get(planKey);
     if (!state.active || state.id === undefined) return null;
     return this.planFilePathFor(state.id);
   }
@@ -202,7 +185,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     let enterRecorded = false;
     try {
       await this.ensurePlanDirectory(planFilePath);
-      this.wire.dispatch(planModeEnter({ id }));
+      await this.dispatcher.dispatch(new PlanModeEnter({ agentId: this.agentCtx.agentId, id }));
       this.telemetryContext.set({ mode: 'plan' });
       enterRecorded = true;
       await this.maybeSwitchToPlanningModel();
@@ -218,7 +201,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
   }
 
   async cancel(id?: string): Promise<void> {
-    this.wire.dispatch(planModeCancel({ id }));
+    void this.dispatcher.dispatch(new PlanModeCancel({ agentId: this.agentCtx.agentId, id }));
     this.telemetryContext.set({ mode: 'agent' });
     await this.restoreModelAfterPlan();
   }
@@ -230,13 +213,13 @@ export class AgentPlanService extends Service implements IAgentPlanService {
   }
 
   async exit(id?: string): Promise<void> {
-    this.wire.dispatch(planModeExit({ id }));
+    void this.dispatcher.dispatch(new PlanModeExit({ agentId: this.agentCtx.agentId, id }));
     this.telemetryContext.set({ mode: 'agent' });
     await this.restoreModelAfterPlan();
   }
 
   async recordRevision(): Promise<void> {
-    const state = this.wire.getModel(PlanModel).current;
+    const state = this.agentState.get(planKey);
     if (!state.active || state.id === undefined) return;
     const id = state.id;
     const content = await this.hostFs.readText(this.planFilePathFor(id));
@@ -245,8 +228,9 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     const scope = this.agentCtx.scope();
     const key = `plan/${id}/v${version}.md`;
     await this.blobs.put(scope, key, bytes);
-    this.wire.dispatch(
-      planRevision({
+    await this.dispatcher.dispatch(
+      new PlanRevision({
+        agentId: this.agentCtx.agentId,
         id,
         version,
         path: `${scope}/${key}`,
@@ -257,7 +241,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
   }
 
   async status(): Promise<PlanData> {
-    const state = this.wire.getModel(PlanModel).current;
+    const state = this.agentState.get(planKey);
     if (!state.active || state.id === undefined) return null;
     const path = this.planFilePathFor(state.id);
     let content = '';

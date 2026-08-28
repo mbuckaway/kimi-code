@@ -1,12 +1,3 @@
-/**
- * `agentLanguage` domain — `IAgentLanguage` implementation.
- *
- * Builds the process-lifetime language snapshot from the `[language]` config
- * section, once config has first loaded; later `[language]` edits take effect
- * on the next start. Bound at App scope, activated eagerly so the freeze is
- * armed before any consumer can observe config readiness.
- */
-
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { CoreErrors } from '#/_base/errors/codes';

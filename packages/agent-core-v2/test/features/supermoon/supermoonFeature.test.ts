@@ -4,7 +4,8 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentSupermoonService } from '#/agent/supermoon/supermoon';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
-import { type DomainEvent, IEventBus } from '#/app/event/eventBus';
+import { type Event2 } from '#/app/event/event2';
+import { IEventBus } from '#/app/event/eventBus';
 import type { ToolCall } from '#/kosong/contract/message';
 import type { ToolResult } from '#/tool/toolContract';
 
@@ -51,7 +52,7 @@ describe('Supermoon mode tools', () => {
   it('EnterSupermoonMode dispatches supermoon_mode.enter with trigger tool and appends the enter reminder', async () => {
     const ctx = createTestAgent();
     try {
-      const events: DomainEvent[] = [];
+      const events: Event2[] = [];
       ctx.get(IEventBus).subscribe((event) => events.push(event));
 
       const result = await runTool(ctx, 'EnterSupermoonMode', 'call_enter_supermoon');
@@ -62,9 +63,14 @@ describe('Supermoon mode tools', () => {
       expect(ctx.allEvents).toContainEqual({
         type: '[wire]',
         event: 'supermoon_mode.enter',
-        args: { trigger: 'tool', time: expect.any(Number) },
+        args: { agentId: 'main', trigger: 'tool', time: expect.any(Number) },
       });
-      expect(events).toContainEqual({ type: 'agent.status.updated', supermoonMode: true });
+      expect(events).toContainEqual({
+        type: 'agent.status.updated',
+        agentId: 'main',
+        supermoonMode: true,
+        time: expect.any(Number),
+      });
 
       const history = ctx.get(IAgentContextMemoryService).get();
       expect(history).toHaveLength(1);
@@ -95,7 +101,7 @@ describe('Supermoon mode tools', () => {
   it('ExitSupermoonMode dispatches supermoon_mode.exit, emits the status event, and pops the enter reminder', async () => {
     const ctx = createTestAgent();
     try {
-      const events: DomainEvent[] = [];
+      const events: Event2[] = [];
       ctx.get(IEventBus).subscribe((event) => events.push(event));
 
       await runTool(ctx, 'EnterSupermoonMode', 'call_enter_supermoon');
@@ -106,9 +112,14 @@ describe('Supermoon mode tools', () => {
       expect(ctx.allEvents).toContainEqual({
         type: '[wire]',
         event: 'supermoon_mode.exit',
-        args: { time: expect.any(Number) },
+        args: { agentId: 'main', time: expect.any(Number) },
       });
-      expect(events).toContainEqual({ type: 'agent.status.updated', supermoonMode: false });
+      expect(events).toContainEqual({
+        type: 'agent.status.updated',
+        agentId: 'main',
+        supermoonMode: false,
+        time: expect.any(Number),
+      });
 
       const history = ctx.get(IAgentContextMemoryService).get();
       expect(

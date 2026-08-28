@@ -1,28 +1,3 @@
-/**
- * `kosong/contract` domain — the provider error taxonomy.
- *
- * The single authority on error classification for the LLM wire layer:
- * the `API*Error` class family, the retry verdict (`isRetryableGenerateError`),
- * the telemetry classification (`ApiErrorKind` / `classifyApiError`), and the
- * status-error normalizer every dialect's error converter funnels through.
- * Alongside the wire-status classes, `VideoUploadUnsupportedError` marks the
- * by-design capability gap (provider has no video upload hook) so callers
- * can tell it apart from an upload that failed at runtime.
- *
- * The family is born-coded: every class extends `Error2` and computes its
- * wire code (`provider.*` / `context.overflow`) at construction from the
- * status code / finish reason, so no boundary translation is needed — the
- * code string constants live here (the L0 wire contract) and are registered
- * by `kosong/protocol/errors.ts` (`ProtocolErrors`). `translateProviderError`
- * only remains as the abort guard and the foreign-error fallback.
- *
- * Abort has exactly one standard shape here: the DOMException built by
- * `createAbortError`. Provider error converters must run the `throwIfAbortError`
- * guard FIRST in their classification chain — a user cancellation is thrown
- * as the standard abort shape, never converted into (and never returned as)
- * a retryable provider error.
- */
-
 import { Error2, type Error2Options } from '#/_base/errors/errors';
 import type { FinishReason } from './provider';
 
@@ -264,7 +239,7 @@ export function isRetryableGenerateError(error: unknown): boolean {
     return true;
   }
   if (error instanceof APIEmptyResponseError) {
-    return true;
+    return error.finishReason !== 'filtered';
   }
   if (error instanceof APIProviderOverloadedError) {
     return true;
@@ -300,9 +275,6 @@ const CONTEXT_OVERFLOW_MESSAGE_PATTERNS = [
   /prompt is too long.*maximum/,
   /input token count.*exceeds?.*maximum number of tokens/,
   /request.*exceed(?:ed|s|ing)?.*model token limit/,
-  // Moonshot's managed API answers context-window violations with a 401 whose
-  // body names the model's window ("401 k3-256k supports only 256K context.");
-  // the status alone looks like auth, the message is the discriminator.
   /supports only \d+(?:\.\d+)?\s*(?:k|m|b)?\s*(?:context|window|tokens)/,
 ] as const;
 
@@ -408,9 +380,6 @@ export function parseTraceId(headers: unknown): string | null {
 }
 
 export function isContextOverflowStatusError(statusCode: number, message: string): boolean {
-  // 401 is the Kimi managed API's status for plan/capability rejections — a
-  // context-window limit is one of them, so a message-matched 401 classifies
-  // as overflow; a plain 401 stays auth.
   if (statusCode !== 400 && statusCode !== 401 && statusCode !== 413 && statusCode !== 422) {
     return false;
   }

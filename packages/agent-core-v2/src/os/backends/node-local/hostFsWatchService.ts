@@ -1,16 +1,3 @@
-/**
- * `hostFsWatch` domain — `IHostFsWatchService` implementation.
- *
- * Reports precise or coarse host filesystem changes through platform
- * watchers. Signal-mode recursive watches use one native recursive
- * `fs.watch` per tree. Precise watches use the native `fsevents` module on
- * macOS (one FSEventStream per tree, O(1) file descriptors — see
- * `fsEventsWatcher`), elsewhere `chokidar` (one `fs.watch` handle per file,
- * which would exhaust descriptors on large macOS workspaces). Reports the
- * macOS `fsevents` fallback once through `log`. Each handle owns and disposes
- * its watcher. Bound at App scope.
- */
-
 import { watch as fsWatch } from 'node:fs';
 import { basename, isAbsolute, join, relative } from 'node:path';
 
@@ -144,7 +131,6 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
         emit,
         onUnexpectedError,
       );
-      // FSEventStream creation is synchronous — the watch is armed on return.
       this.readiness.resolve();
       return;
     }

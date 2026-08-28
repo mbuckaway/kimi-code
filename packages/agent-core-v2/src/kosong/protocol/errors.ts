@@ -1,24 +1,3 @@
-/**
- * `kosong/protocol` domain — wire API failure codes and the boundary
- * translation from raw contract errors to coded `Error2`s.
- *
- * The `ChatProviderError` family is born-coded (see `kosong/contract/errors`):
- * every instance already carries its wire code, so `translateProviderError`'s
- * `isError2` guard passes it through untouched. What remains here is the
- * abort guard and the fallback for errors foreign to the family (plain
- * `Error` / unknown thrown values → `internal`).
- *
- * `translateProviderError`'s FIRST guard is the contract's
- * `throwIfAbortError`: a user cancellation is thrown as the standard abort
- * DOMException and can never be misclassified as a retryable provider
- * failure. The guard throws rather than returns, by design.
- *
- * `provider.usage_limit` is deliberately kept out of `retryable`: unlike a
- * rate limit, requeueing cannot help until the account's quota window resets.
- *
- * Side-effect module: importing registers the error domain.
- */
-
 import { CoreErrors, registerErrorDomain, type ErrorDomain } from '#/_base/errors/codes';
 import { Error2, isError2 } from '#/_base/errors/errors';
 import {
@@ -109,12 +88,6 @@ export function translateProviderError(error: unknown): Error2 {
   return new Error2(CoreErrors.codes.INTERNAL, String(error), { cause: error });
 }
 
-/**
- * Whether the error carries the `provider.usage_limit` wire code. Usage-limit
- * reactions must key on the code, not the message: the text can still match
- * the rate-limit wording fallback, but retrying/requeueing cannot help until
- * the quota window resets.
- */
 export function isProviderUsageLimitError(error: unknown): boolean {
   return isError2(error) && error.code === ProtocolErrors.codes.PROVIDER_USAGE_LIMIT;
 }

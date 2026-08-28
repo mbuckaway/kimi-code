@@ -49,8 +49,6 @@ describe('PlanModeInjector content', () => {
     await injector.inject();
     const text = lastReminder(agent);
 
-    expect(text).toContain('Plan mode is active');
-    expect(text).toContain('current plan file');
     expect(text).toContain('Write');
     expect(text).toContain('Edit');
     expect(text).toContain('ExitPlanMode');
@@ -142,8 +140,8 @@ describe('PlanModeInjector cadence', () => {
     await injector.inject();
 
     const text = lastReminder(agent);
-    expect(text).toContain('Plan mode is active');
-    expect(text).not.toContain('Plan mode still active');
+    // Only the full reminder names the hard-denied TaskStop; the sparse one does not.
+    expect(text).toContain('TaskStop');
   });
 
   it('refreshes the full reminder if a user message appears after the last injection', async () => {
@@ -155,7 +153,7 @@ describe('PlanModeInjector cadence', () => {
     await injector.inject();
 
     const text = lastReminder(agent);
-    expect(text).toContain('Plan mode is active');
-    expect(text).not.toContain('Plan mode still active');
+    // Only the full reminder names the hard-denied TaskStop; the sparse one does not.
+    expect(text).toContain('TaskStop');
   });
 });
