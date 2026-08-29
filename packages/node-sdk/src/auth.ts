@@ -29,6 +29,24 @@ import {
 
 import { mapOAuthTokenError } from '#/oauth-error';
 
+const KIMI_OAUTH_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH';
+const EXPERIMENTAL_MASTER_ENV = 'KIMI_CODE_EXPERIMENTAL_FLAG';
+
+function parseFlagEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === '1' || trimmed === 'true' || trimmed === 'yes' || trimmed === 'on') return true;
+  if (trimmed === '0' || trimmed === 'false' || trimmed === 'no' || trimmed === 'off') return false;
+  return undefined;
+}
+
+function isKimiOAuthEnabled(config: KimiConfig): boolean {
+  if (parseFlagEnv(process.env[EXPERIMENTAL_MASTER_ENV]) === true) return true;
+  const env = parseFlagEnv(process.env[KIMI_OAUTH_FLAG_ENV]);
+  if (env !== undefined) return env;
+  return config.experimental?.['kimi_oauth'] === true;
+}
+
 export interface KimiAuthSubmitFeedbackInput {
   readonly content: string;
   readonly sessionId: string;
@@ -137,6 +155,11 @@ export class KimiAuthFacade {
     providerName: string | undefined = KIMI_CODE_PROVIDER_NAME,
     options: KimiAuthLoginOptions = {},
   ): Promise<KimiAuthLoginResult> {
+    if (!isKimiOAuthEnabled(loadRuntimeConfigSafe(this.options.configPath).config)) {
+      throw new Error(
+        'Kimi OAuth login is disabled. Enable it via [experimental] kimi_oauth or KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH.',
+      );
+    }
     const { region, ...loginOptions } = options;
     const regionHosts = region === undefined ? undefined : kimiRegionLoginHosts(region);
     const auth = this.resolveManagedAuth(providerName);

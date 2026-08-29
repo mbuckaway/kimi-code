@@ -47,6 +47,7 @@ function freshToken(): TokenInfo {
 
 beforeEach(async () => {
   homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-auth-'));
+  vi.stubEnv('KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH', '1');
 });
 
 afterEach(async () => {
@@ -58,6 +59,13 @@ afterEach(async () => {
 describe('KimiHarness.auth', () => {
   it('can construct auth facade without host identity', () => {
     expect(() => createKimiHarness({ homeDir })).not.toThrow();
+  });
+
+  it('rejects login when kimi OAuth is disabled', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH', '0');
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+    await expect(harness.auth.login()).rejects.toThrow('Kimi OAuth login is disabled');
   });
 
   it('exposes a cached access token without refreshing auth state', async () => {

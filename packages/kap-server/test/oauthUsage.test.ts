@@ -76,6 +76,7 @@ describe('server-v2 GET /api/v1/oauth/usage', () => {
       port: 0,
       homeDir: home,
       logLevel: 'silent',
+      enableKimiOauth: true,
       seeds,
     });
     base = `http://127.0.0.1:${server.port}`;
@@ -207,6 +208,7 @@ describe('server-v2 GET /api/v1/oauth/userinfo', () => {
       port: 0,
       homeDir: home,
       logLevel: 'silent',
+      enableKimiOauth: true,
       seeds,
     });
     base = `http://127.0.0.1:${server.port}`;

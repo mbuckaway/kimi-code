@@ -581,6 +581,7 @@ export * from '#/persistence/backends/minidb/miniDbQueryStore';
 export * from '#/persistence/backends/memory/inMemoryStorageService';
 export * from '#/agent/tools/web-search/web-search';
 import '#/agent/tools/web-search/webSearchTool';
+import '#/app/auth/flag';
 export * from '#/app/auth/auth';
 export * from '#/app/auth/authService';
 export * from '#/app/auth/configSection';

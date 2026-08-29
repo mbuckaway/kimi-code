@@ -108,8 +108,11 @@ export async function registerApiV1Routes(
             })),
       });
 
+      await core.accessor.get(IConfigService).ready;
       registerAuthRoute(apiV1 as unknown as Parameters<typeof registerAuthRoute>[0], core);
-      registerOAuthRoutes(apiV1 as unknown as Parameters<typeof registerOAuthRoutes>[0], core);
+      if (core.accessor.get(IFlagService).enabled('kimi_oauth')) {
+        registerOAuthRoutes(apiV1 as unknown as Parameters<typeof registerOAuthRoutes>[0], core);
+      }
       registerConfigRoutes(apiV1 as unknown as Parameters<typeof registerConfigRoutes>[0], core);
       registerModelCatalogRoutes(
         apiV1 as unknown as Parameters<typeof registerModelCatalogRoutes>[0],

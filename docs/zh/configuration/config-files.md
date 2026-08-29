@@ -477,15 +477,13 @@ reply_language = "en"     # 可选 — 默认值为 "en"
 | --- | --- | --- | --- |
 | `socket` | `string` | 未设置 | 改为监听的 Unix domain socket（macOS/Linux）或 Windows 命名管道（`\\.\pipe\...`）路径；`--socket` 标志会覆盖此值。详见 [Socket 传输](../reference/kimi-acp.md#socket-传输) |
 
-<!--
 ## `experimental`
 
-`experimental` 存放实验功能 flag 的持久化覆盖。目前 `micro_compaction` 是唯一用户可见的字段，默认值为 `false`；如需自动清理较旧的大型工具结果，把它设为 `true`。
+`experimental` 存放实验功能 flag 的持久化覆盖。
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `micro_compaction` | `boolean` | `false` | 清理较旧的大型工具结果内容，同时保留最近对话 |
--->
+| `kimi_oauth` | `boolean` | `false` | 在 web UI 和 TUI 中启用 kimi.com/kimi.ai 的 OAuth 设备码登录；token/apiKey 鉴权仍为默认 |
 
 ## `services`
 

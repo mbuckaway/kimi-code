@@ -29,6 +29,7 @@ import { IConfigService } from '#/app/config/config';
 import { ConfigRegistry } from '#/app/config/configService';
 import { IEventService } from '#/app/event/event';
 import type { Event2 } from '#/app/event/event2';
+import { IFlagService } from '#/app/flag/flag';
 import { ILogService } from '#/_base/log/log';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -105,10 +106,12 @@ describe('OAuthService', () => {
   let configReplace: ReturnType<typeof vi.fn<(domain: string, value: unknown) => Promise<void>>>;
   let events: Event2[];
   let providerChangedEmitter: Emitter<ProvidersChangedEvent>;
+  let kimiOauthEnabled: boolean;
 
   beforeEach(() => {
     disposables = new DisposableStore();
     providerChangedEmitter = new Emitter<ProvidersChangedEvent>();
+    kimiOauthEnabled = true;
     providers = {
       [OAUTH_PROVIDER]: {
         type: 'kimi',
@@ -201,6 +204,9 @@ describe('OAuthService', () => {
           subscribe: () => ({ dispose: () => {} }),
         });
         reg.defineInstance(IOAuthToolkit, toolkit as unknown as IOAuthToolkit);
+        reg.definePartialInstance(IFlagService, {
+          enabled: ((id: string) => kimiOauthEnabled) as IFlagService['enabled'],
+        });
         reg.define(IOAuthService, OAuthService);
       },
     });
@@ -1191,6 +1197,14 @@ describe('OAuthService', () => {
     expect(configReplace).toHaveBeenCalledWith('thinking', { enabled: false });
     expect(thinking).toEqual({ enabled: false });
   });
+
+  it('startLogin rejects when kimi OAuth is disabled', async () => {
+    kimiOauthEnabled = false;
+    const svc = ix.get(IOAuthService);
+    await expect(svc.startLogin()).rejects.toMatchObject({
+      code: 'auth.oauth_disabled',
+    });
+  });
 });
 
 describe('WebSearchProviderService', () => {
@@ -1563,6 +1577,7 @@ describe('AuthSummaryService', () => {
   let oauthStatus: ReturnType<typeof vi.fn>;
   let getCachedAccessToken: ReturnType<typeof vi.fn>;
   let reload: ReturnType<typeof vi.fn>;
+  let kimiOauthEnabled: boolean;
 
   beforeEach(() => {
     disposables = new DisposableStore();
@@ -1592,6 +1607,7 @@ describe('AuthSummaryService', () => {
     oauthStatus = vi.fn();
     getCachedAccessToken = vi.fn().mockResolvedValue(undefined);
     reload = vi.fn().mockResolvedValue(undefined);
+    kimiOauthEnabled = true;
     ix = createServices(disposables, {
       additionalServices: (reg) => {
         reg.definePartialInstance(IProviderService, {
@@ -1623,6 +1639,9 @@ describe('AuthSummaryService', () => {
           warn: vi.fn(),
           debug: vi.fn(),
           error: vi.fn(),
+        });
+        reg.definePartialInstance(IFlagService, {
+          enabled: ((id: string) => kimiOauthEnabled) as IFlagService['enabled'],
         });
         reg.define(IAuthSummaryService, AuthSummaryService);
       },
@@ -1748,6 +1767,16 @@ describe('AuthSummaryService', () => {
       storage: 'file',
       key: 'oauth/kimi-code',
     });
+  });
+
+  it('ensureReady throws token_missing for an oauth model when kimi OAuth is disabled', async () => {
+    kimiOauthEnabled = false;
+    getCachedAccessToken.mockResolvedValue('access-token');
+    await expect(createSummary().ensureReady('kimi')).rejects.toMatchObject({
+      code: 'auth.token_missing',
+      details: { provider_id: OAUTH_PROVIDER },
+    });
+    expect(getCachedAccessToken).not.toHaveBeenCalled();
   });
 });
 

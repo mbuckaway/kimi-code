@@ -128,3 +128,13 @@ export class AuthModelNotResolvedError extends Error2 {
     this.providerId = providerId;
   }
 }
+
+export class AuthOAuthDisabledError extends Error2 {
+  constructor() {
+    super(
+      AuthErrors.codes.AUTH_OAUTH_DISABLED,
+      'Kimi OAuth login is disabled. Enable it via [experimental] kimi_oauth or KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH.',
+      { name: 'AuthOAuthDisabledError' },
+    );
+  }
+}

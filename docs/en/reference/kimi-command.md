@@ -175,6 +175,7 @@ Multiple instances can share one home directory: each registers itself under `~/
 | `--log-level <level>` | Enable server logs at the selected level; omitted by default |
 | `--debug-endpoints` | Mount `/api/v1/debug/*` routes (off by default) |
 | `--dangerous-bypass-auth` | Disable bearer-token auth on all REST and WebSocket routes so the web UI connects without a token; only for trusted networks or behind an authenticating proxy |
+| `--enable-kimi-oauth` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI (disabled by default; token/apiKey auth remains the default) |
 | `--web-title <title>` | Custom browser tab title for the web UI; defaults to the workspace directory name |
 | `--no-open` | Do not open the browser once the server is ready |
 

@@ -478,15 +478,13 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 | --- | --- | --- | --- |
 | `socket` | `string` | unset | Path of a Unix domain socket (macOS/Linux) or Windows named pipe (`\\.\pipe\...`) to listen on instead of stdio; the `--socket` flag overrides this value. See [Socket transport](../reference/kimi-acp.md#socket-transport) |
 
-<!--
 ## `experimental`
 
-`experimental` stores persistent overrides for experimental-feature flags. Currently, `micro_compaction` is the only user-facing entry and defaults to `false`; set it to `true` to enable automatic trimming of older large tool results.
+`experimental` stores persistent overrides for experimental-feature flags.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `micro_compaction` | `boolean` | `false` | Trim older large tool results from context while preserving recent conversation |
--->
+| `kimi_oauth` | `boolean` | `false` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI; token/apiKey auth remains the default |
 
 ## `services`
 

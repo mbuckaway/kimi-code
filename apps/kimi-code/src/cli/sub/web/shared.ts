@@ -42,6 +42,8 @@ export interface ParsedServerOptions {
   allowRemoteShutdown: boolean;
   /** Disable bearer-token auth on every route (`--dangerous-bypass-auth`). */
   dangerousBypassAuth: boolean;
+  /** Enable kimi.com/kimi.ai OAuth login (`--enable-kimi-oauth`). */
+  enableKimiOauth: boolean;
   /** Extra `Host` header values to allow through the DNS-rebinding check. */
   allowedHosts: readonly string[];
   /** Custom browser tab title for this web UI instance (`--web-title`). */
@@ -59,6 +61,8 @@ export interface ServerCliOptions {
   allowRemoteShutdown?: boolean;
   /** Disable bearer-token auth on every route (`--dangerous-bypass-auth`). */
   dangerousBypassAuth?: boolean;
+  /** Enable kimi.com/kimi.ai OAuth login (`--enable-kimi-oauth`). */
+  enableKimiOauth?: boolean;
   /** Extra `Host` header values to allow (`--allowed-host`). */
   allowedHost?: string[];
   /** Custom browser tab title for this web UI instance (`--web-title`). */
@@ -74,6 +78,7 @@ export function parseServerOptions(opts: ServerCliOptions): ParsedServerOptions 
     insecureNoTls: opts.insecureNoTls !== false,
     allowRemoteShutdown: opts.allowRemoteShutdown === true,
     dangerousBypassAuth: opts.dangerousBypassAuth === true,
+    enableKimiOauth: opts.enableKimiOauth === true,
     allowedHosts: parseAllowedHostArgs(opts.allowedHost),
     webTitle: opts.webTitle,
   };

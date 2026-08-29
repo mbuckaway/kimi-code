@@ -39,6 +39,7 @@ import { Error2, ErrorCodes } from '#/errors';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { IEventService } from '#/app/event/event';
+import { IFlagService } from '#/app/flag/flag';
 import { ILogService } from '#/_base/log/log';
 import {
   effectiveModelConfig,
@@ -67,6 +68,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 
 import {
   AuthModelNotResolvedError,
+  AuthOAuthDisabledError,
   AuthProvisioningRequiredError,
   AuthTokenMissingError,
   type AuthStatus,
@@ -109,6 +111,7 @@ export class OAuthService extends Disposable implements IOAuthService {
     @ILogService private readonly log: ILogService,
     @IEventService private readonly events: IEventService,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
+    @IFlagService private readonly flags: IFlagService,
   ) {
     super();
     this._register(providerService.onDidChangeProviders((event) => {
@@ -121,6 +124,9 @@ export class OAuthService extends Disposable implements IOAuthService {
     options: OAuthLoginOptions = {},
   ): Promise<OAuthFlowStart> {
     this.log.info('oauth startLogin: enter', { provider });
+    if (!this.flags.enabled('kimi_oauth')) {
+      throw new AuthOAuthDisabledError();
+    }
     const loginAuth = this.resolveLoginAuth(provider, options.region);
     this.log.info('oauth startLogin: resolved login auth', {
       provider,
@@ -634,6 +640,7 @@ export class AuthSummaryService implements IAuthSummaryService {
     @IConfigService private readonly config: IConfigService,
     @IOAuthService private readonly oauth: IOAuthService,
     @ILogService private readonly log: ILogService,
+    @IFlagService private readonly flags: IFlagService,
   ) {}
 
   async summarize(): Promise<readonly AuthStatus[]> {
@@ -685,7 +692,7 @@ export class AuthSummaryService implements IAuthSummaryService {
       providerName,
     });
     if (auth.apiKey !== undefined) return;
-    if (auth.oauth !== undefined) {
+    if (auth.oauth !== undefined && this.flags.enabled('kimi_oauth')) {
       const providerKey = auth.oauthProviderKey ?? providerName;
       const token = await this.oauth.getCachedAccessToken(providerKey, auth.oauth);
       if (nonEmpty(token) !== undefined) return;
