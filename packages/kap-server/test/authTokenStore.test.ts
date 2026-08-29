@@ -160,6 +160,16 @@ describe('persistentToken', () => {
     expect(rotated).not.toBe(original);
     expect(readFileSync(join(home, 'server.token'), 'utf8').trim()).toBe(rotated);
   });
+
+  it('regenerates a malformed legacy token instead of reusing it', async () => {
+    const home = join(tmpDir, 'home');
+    const tokenPath = join(home, 'server.token');
+    await writePrivateFile(tokenPath, 'legacy+token/with=padding');
+    const token = await loadOrCreateServerToken(home);
+    expect(token).not.toBe('legacy+token/with=padding');
+    expect(token).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(readFileSync(tokenPath, 'utf8').trim()).toBe(token);
+  });
 });
 
 describe('password', () => {
