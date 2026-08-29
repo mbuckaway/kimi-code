@@ -364,6 +364,17 @@ describe('KimiHarness config API', () => {
         enabled: false,
         source: 'default',
       },
+      {
+        id: 'kimi_oauth',
+        title: 'Kimi OAuth login',
+        description:
+          'Allow device-code OAuth login to kimi.com / kimi.ai. Disabled by default; token/apiKey auth remains the default.',
+        surface: 'both',
+        env: 'KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH',
+        defaultEnabled: false,
+        enabled: false,
+        source: 'default',
+      },
     ]);
   });
 

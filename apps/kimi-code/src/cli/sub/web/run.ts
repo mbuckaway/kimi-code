@@ -154,6 +154,11 @@ export function buildWebCommand(
       false,
     )
     .option(
+      '--enable-kimi-oauth',
+      'Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI. Disabled by default; token/apiKey auth remains the default.',
+      false,
+    )
+    .option(
       '--log-level <level>',
       `Server log level: ${VALID_LOG_LEVELS.join('|')}. Omit to keep logs off.`,
     )
@@ -379,6 +384,7 @@ async function runServerInProcess(
     allowRemoteShutdown: options.allowRemoteShutdown,
     allowedHosts: options.allowedHosts,
     disableAuth: options.dangerousBypassAuth,
+    enableKimiOauth: options.enableKimiOauth,
     webTitle: options.webTitle,
     // Attach the engine's cloud telemetry appender (still gated by the config
     // `telemetry` toggle). Complements the v1 client registered above, which

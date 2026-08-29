@@ -44,6 +44,7 @@ describe('server-v2 boot', () => {
       port: 0,
       homeDir: home,
       logLevel: 'silent',
+      enableKimiOauth: true,
     });
 
     const base = `http://127.0.0.1:${server.port}`;

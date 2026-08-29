@@ -533,7 +533,9 @@ describe('`kimi web` option threading', () => {
       insecureNoTls: true,
       allowRemoteShutdown: true,
       dangerousBypassAuth: true,
+      enableKimiOauth: false,
       allowedHosts: ['.example.com'],
+      webTitle: undefined,
     });
   });
 

@@ -49,6 +49,7 @@ describe('API surface snapshot', () => {
       homeDir: home,
       logLevel: 'silent',
       debugEndpoints: true,
+      enableKimiOauth: true,
     });
 
     const base = `http://${server.host}:${server.port}`;

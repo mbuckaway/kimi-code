@@ -115,6 +115,7 @@ export interface ServerStartOptions {
   readonly allowRemoteShutdown?: boolean;
   readonly authTokenService?: IAuthTokenService;
   readonly disableAuth?: boolean;
+  readonly enableKimiOauth?: boolean;
   readonly webTitle?: string;
   readonly rpcToken?: string;
   readonly seeds?: ScopeSeed;
@@ -194,11 +195,15 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   }
   const validateCredential = createCredentialValidator(authTokenService, opts.rpcToken);
   const logging = resolveLoggingConfig({ homeDir, env: process.env });
+  const bootstrapEnv =
+    opts.enableKimiOauth === true
+      ? { ...(opts.env ?? process.env), KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH: '1' }
+      : opts.env;
   const { app: core } = bootstrap(
     {
       homeDir,
       configPath,
-      env: opts.env,
+      env: bootstrapEnv,
       clientIdentity: opts.hostIdentity,
       args: {
         requestHeaders: createKimiDefaultHeaders({ homeDir, ...opts.hostIdentity }),
