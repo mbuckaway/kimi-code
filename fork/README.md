@@ -72,7 +72,8 @@ The CLI's updater polls `KIMI_CODE_CDN_BASE` (patched in
 - `latest` — plain-text semver
 - `latest.json` — `{version, publishedAt, rollout: []}` (empty rollout =
   immediate full rollout; schema in `apps/kimi-code/src/cli/update/cdn.ts`)
-- `install.sh` — native installer (below)
+- `install.sh` — macOS/Linux native installer (below)
+- `install.ps1` — Windows native installer (below)
 - `sha256/<target>.sha256` — per-platform checksums
 
 Native installs self-update by re-running the channel's `install.sh`
@@ -81,12 +82,25 @@ is needed.
 
 ## Installing the fork
 
+macOS / Linux:
+
 ```bash
 curl -fsSL https://mbuckaway.github.io/kimi-code/install.sh | bash
 ```
 
-Installs `~/.kimi-code/bin/kimi`. Windows (`install.ps1`) and npm
-(`@mbuckaway/kimi-code`) distribution are not wired up yet.
+Windows (PowerShell):
+
+```powershell
+irm https://mbuckaway.github.io/kimi-code/install.ps1 | iex
+```
+
+On Windows, install [Git for Windows](https://gitforwindows.org/) before first
+launch because the CLI uses the bundled Git Bash as its shell environment; if
+Git Bash is in a custom location, set `KIMI_SHELL_PATH` to the absolute path of
+`bash.exe`.
+
+Installs `~/.kimi-code/bin/kimi` (`.kimi-code\bin\kimi.exe` on Windows). npm
+(`@mbuckaway/kimi-code`) distribution is not wired up yet.
 
 ## Daily workflow
 

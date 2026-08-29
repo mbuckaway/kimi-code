@@ -37,6 +37,7 @@ mark the row `merged-upstream` (keep the row as history).
 | plan-review gate in reminders | `feat/plan-gate-reminders` | The plan-review gate now also rides the plan-mode reminders (full/sparse/reentry + inline twins, both engines) so every plan-mode entry path (/plan, Shift-Tab, --plan, default_plan_mode, resume) runs the plan-review skill once before ExitPlanMode | — | — | local |
 | planning-model switching | `feat/planning-model-switching` | `planning_model` config + v1/v2 plan-mode model flip, `modelquery`/`modellist`/`modelset` tools with a context-window switch guard, `/planning-model` TUI command; web "Planning model" setting in `kimi-code-web` | — | — | local |
 | disable kimi OAuth by default | `feat/disable-kimi-oauth-by-default` | Kimi OAuth login (kimi.com/kimi.ai device-code) disabled by default; opt-in via `[experimental] kimi_oauth` / `KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH` / `kimi web --enable-kimi-oauth`; token/apiKey auth stays the default; web + TUI hide the login unless enabled | — | — | not-submitting |
+| Windows native installer | `feat/windows-installer` | Fork-style `install.ps1` (win32-x64/arm64, GitHub Releases + gh-pages channel); publish `install.ps1` to the update channel; point `README.md` + `README.zh-CN.md` + `fork/README.md` at the fork install commands | — | — | not-submitting |
 
 Changesets under `.changeset/` deliberately name the upstream package
 `@moonshot-ai/kimi-code`, not the fork's `@mbuckaway/kimi-code`, so a change can
