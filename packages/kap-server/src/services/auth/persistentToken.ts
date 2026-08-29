@@ -31,7 +31,7 @@ export async function readServerToken(homeDir: string): Promise<string | undefin
 
 export async function loadOrCreateServerToken(homeDir: string): Promise<string> {
   const existing = await readServerToken(homeDir);
-  if (existing !== undefined && existing.length > 0) {
+  if (existing !== undefined && existing.length > 0 && /^[A-Za-z0-9_-]+$/.test(existing)) {
     return existing;
   }
   const token = generateServerToken();
