@@ -5,7 +5,8 @@
  *   latest                 plain-text semver, consumed by already-shipped clients
  *   latest.json            rollout manifest (schema: apps/kimi-code/src/cli/update/cdn.ts)
  *   install.sh             native installer, copied verbatim from fork/install.sh
- *   sha256/<target>.sha256 per-platform checksums, consumed by install.sh
+ *   install.ps1            Windows installer, copied verbatim from fork/install.ps1
+ *   sha256/<target>.sha256 per-platform checksums, consumed by install.sh / install.ps1
  *
  * Usage:
  *   node fork/scripts/publish-update-channel.mjs <version> <native-artifacts-dir> <out-dir>
@@ -47,6 +48,13 @@ const installShSource = resolve(
   'install.sh',
 );
 await copyFile(installShSource, resolve(outDir, 'install.sh'));
+
+const installPsSource = resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '..',
+  'install.ps1',
+);
+await copyFile(installPsSource, resolve(outDir, 'install.ps1'));
 
 const entries = await readdir(artifactsDir);
 const sumFiles = entries.filter((f) => /^kimi-code-[a-z0-9-]+\.zip\.sha256$/.test(f));

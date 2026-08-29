@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Docs](https://img.shields.io/badge/docs-online-blue)](https://moonshotai.github.io/kimi-code/zh/)
 
-[Documentation](https://moonshotai.github.io/kimi-code/zh/) · [Issues](https://github.com/MoonshotAI/kimi-code/issues) · [English](README.md)
+[Documentation](https://moonshotai.github.io/kimi-code/zh/) · [Issues](https://github.com/mbuckaway/kimi-code/issues) · [English](README.md)
 
 
 ![Kimi Code 的使用演示](./docs/media/intro.gif)
@@ -19,13 +19,13 @@ Kimi Code CLI 是一个运行在终端里的 AI 编程 agent，可以帮你读�
 - **macOS / Linux**：
 
 ```sh
-curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+curl -fsSL https://mbuckaway.github.io/kimi-code/install.sh | bash
 ```
 
 - **Windows（PowerShell）**：
 
 ```powershell
-irm https://code.kimi.com/kimi-code/install.ps1 | iex
+irm https://mbuckaway.github.io/kimi-code/install.ps1 | iex
 ```
 
 > Windows 用户首次启动前还需要安装 [Git for Windows](https://gitforwindows.org/)，Kimi Code CLI 会使用其中的 Git Bash 作为 Shell 环境。如果 Git Bash 安装在非标准路径，请把 `KIMI_SHELL_PATH` 设为 `bash.exe` 的绝对路径。
@@ -101,7 +101,7 @@ Kimi Code CLI 支持 [Agent Client Protocol](https://agentclientprotocol.com/)�
 环境要求：Node.js ≥ 24.15.0，pnpm 10.33.0。
 
 ```sh
-git clone https://github.com/MoonshotAI/kimi-code.git
+git clone https://github.com/mbuckaway/kimi-code.git
 cd kimi-code
 pnpm install
 ```
@@ -118,7 +118,7 @@ pnpm build      # 构建所有包
 
 ## 社区
 
-- [Issues](https://github.com/MoonshotAI/kimi-code/issues)
+- [Issues](https://github.com/mbuckaway/kimi-code/issues)
 - 安全漏洞反馈，请见 [SECURITY.md](SECURITY.md)。
 
 ## 致谢
