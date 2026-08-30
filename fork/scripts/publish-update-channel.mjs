@@ -92,7 +92,10 @@ for (const zipFile of entries.filter((f) => /^kimi-code-[a-z0-9-]+\.zip$/.test(f
   const extractDir = resolve(outDir, `.tmp-${target}`);
   await mkdir(extractDir, { recursive: true });
   await execFileP('unzip', ['-o', '-q', resolve(artifactsDir, zipFile), '-d', extractDir]);
-  await copyFile(resolve(extractDir, 'kimi'), resolve(binariesDir, `kimi-code-${target}`));
+  await copyFile(
+    resolve(extractDir, target.startsWith('win32') ? 'kimi.exe' : 'kimi'),
+    resolve(binariesDir, `kimi-code-${target}`),
+  );
   await rm(extractDir, { recursive: true, force: true });
 }
 

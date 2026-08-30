@@ -62,7 +62,9 @@ for (const sumFile of sumFiles.sort()) {
   const extractDir = resolve(inputDir, `.extract-${target}`);
   await mkdir(extractDir, { recursive: true });
   await execFileP('unzip', ['-o', '-q', resolve(inputDir, zipName), '-d', extractDir]);
-  const checksum = sha256Hex(await readFile(resolve(extractDir, 'kimi')));
+  const checksum = sha256Hex(
+    await readFile(resolve(extractDir, target.startsWith('win32') ? 'kimi.exe' : 'kimi')),
+  );
   await rm(extractDir, { recursive: true, force: true });
   platforms[target] = { filename: `kimi-code-${target}`, checksum };
 }
