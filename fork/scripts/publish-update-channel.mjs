@@ -7,6 +7,8 @@
  *   install.sh             native installer, copied verbatim from fork/install.sh
  *   install.ps1            Windows installer, copied verbatim from fork/install.ps1
  *   sha256/<target>.sha256 per-platform checksums, consumed by install.sh / install.ps1
+ *   binaries/<version>/    per-release native manifest + platform zips, consumed by
+ *                          the staged updater (native-manifest.ts) and the install scripts
  *
  * Usage:
  *   node fork/scripts/publish-update-channel.mjs <version> <native-artifacts-dir> <out-dir>
@@ -65,6 +67,23 @@ if (sumFiles.length === 0) {
 for (const sumFile of sumFiles) {
   const target = sumFile.replace(/^kimi-code-/, '').replace(/\.zip\.sha256$/, '');
   await copyFile(resolve(artifactsDir, sumFile), resolve(outDir, 'sha256', `${target}.sha256`));
+}
+
+// The staged updater (native-manifest.ts) and the install scripts fetch the
+// per-release native manifest + platform zips from /binaries/<version>/ —
+// publish them alongside the channel files or upgrades 404. manifest.json is
+// written into the artifacts dir by produce-manifest.mjs before this runs.
+const binariesDir = resolve(outDir, 'binaries', version);
+await mkdir(binariesDir, { recursive: true });
+const manifestSource = resolve(artifactsDir, 'manifest.json');
+try {
+  await copyFile(manifestSource, resolve(binariesDir, 'manifest.json'));
+} catch {
+  console.error(`manifest.json not found in ${artifactsDir} — run apps/kimi-code/scripts/native/produce-manifest.mjs first`);
+  process.exit(1);
+}
+for (const zipFile of entries.filter((f) => /^kimi-code-[a-z0-9-]+\.zip$/.test(f))) {
+  await copyFile(resolve(artifactsDir, zipFile), resolve(binariesDir, zipFile));
 }
 
 console.log(`Wrote update channel for ${version} (${sumFiles.length} platforms) to ${outDir}`);
