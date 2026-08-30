@@ -3,6 +3,8 @@ import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { ZipFile } from 'yazl';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { nativeBinaryUrl, nativeManifestUrl } from '#/cli/update/native-manifest';
@@ -79,6 +81,18 @@ function sha256Hex(data: Buffer): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
+/** Build a single-entry zip (matching the fork release pipeline's layout). */
+async function buildZip(entryName: string, content: Buffer): Promise<Buffer> {
+  const zip = new ZipFile();
+  zip.addBuffer(content, entryName, { mode: 0o100755 });
+  zip.end();
+  const chunks: Buffer[] = [];
+  for await (const chunk of zip.outputStream) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
 /** Write a staging artifact old enough for the orphan sweep to reap it. */
 async function agedOrphan(path: string, content: string | Buffer): Promise<void> {
   await writeFile(path, content);
@@ -90,16 +104,19 @@ interface MockCdnOptions {
   readonly version?: string;
   readonly payload: Buffer;
   readonly checksum?: string;
+  /** Manifest filename; defaults to the bare-binary name. */
+  readonly filename?: string;
 }
 
 function mockCdnFetch(options: MockCdnOptions): typeof fetch {
   const version = options.version ?? VERSION;
+  const filename = options.filename ?? BINARY_FILENAME;
   const manifestBody = JSON.stringify({
     version,
     tag: `v${version}`,
     platforms: {
       'linux-x64': {
-        filename: BINARY_FILENAME,
+        filename,
         checksum: options.checksum ?? sha256Hex(options.payload),
       },
     },
@@ -109,7 +126,7 @@ function mockCdnFetch(options: MockCdnOptions): typeof fetch {
     if (url === nativeManifestUrl(version)) {
       return { ok: true, status: 200, text: async () => manifestBody, body: null };
     }
-    if (url === nativeBinaryUrl(version, BINARY_FILENAME)) {
+    if (url === nativeBinaryUrl(version, filename)) {
       return {
         ok: true,
         status: 200,
@@ -168,6 +185,32 @@ describe('stageNativeUpdate', () => {
     // The .part intermediate is gone once the download was promoted.
     const leftovers = (await readdir(getNativeStagingDir(exePath))).filter((entry) =>
       entry.endsWith('.part'),
+    );
+    expect(leftovers).toEqual([]);
+  });
+
+  it('extracts a zip payload and stages the inner executable', async () => {
+    // The fork's update channel ships per-platform zips; the staged file must
+    // be the extracted executable, not the archive.
+    const inner = Buffer.from('fake-zip-inner-executable');
+    const zipPayload = await buildZip('kimi', inner);
+    const result = await stageNativeUpdate({
+      version: VERSION,
+      exePath,
+      platform: 'linux',
+      arch: 'x64',
+      fetchImpl: mockCdnFetch({ payload: zipPayload, filename: 'kimi-code-linux-x64.zip' }),
+    });
+
+    expect(result.status).toBe('staged');
+    // The staged file is the EXTRACTED executable, hashed and sized as such.
+    expect(result.staged.sha256).toBe(sha256Hex(inner));
+    expect(result.staged.exeSize).toBe(inner.length);
+    const stagedOnDisk = await readFile(stagedExePath(exePath, result.staged));
+    expect(stagedOnDisk.equals(inner)).toBe(true);
+    // Neither the .part archive nor the extraction directory remain.
+    const leftovers = (await readdir(getNativeStagingDir(exePath))).filter((entry) =>
+      entry.endsWith('.part') || entry.endsWith('.x'),
     );
     expect(leftovers).toEqual([]);
   });
