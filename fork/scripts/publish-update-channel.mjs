@@ -7,8 +7,8 @@
  *   install.sh             native installer, copied verbatim from fork/install.sh
  *   install.ps1            Windows installer, copied verbatim from fork/install.ps1
  *   sha256/<target>.sha256 per-platform checksums, consumed by install.sh / install.ps1
- *   binaries/<version>/    per-release native manifest + BARE platform binaries,
- *                          consumed by the staged updater (native-manifest.ts)
+ *   binaries/<version>/    per-release native manifest + platform zips, consumed by
+ *                          the staged updater (native-manifest.ts / native-stage.ts)
  *
  * Usage:
  *   node fork/scripts/publish-update-channel.mjs <version> <native-artifacts-dir> <out-dir>
@@ -18,13 +18,9 @@
  * consumes).
  */
 
-import { execFile } from 'node:child_process';
-import { copyFile, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
-
-const execFileP = promisify(execFile);
 
 const [, , version, artifactsDir, outDir] = process.argv;
 if (!version || !artifactsDir || !outDir) {
@@ -73,11 +69,12 @@ for (const sumFile of sumFiles) {
   await copyFile(resolve(artifactsDir, sumFile), resolve(outDir, 'sha256', `${target}.sha256`));
 }
 
-// The staged updater (native-manifest.ts) downloads the BARE executable
-// referenced by the manifest from /binaries/<version>/ — publish the manifest
-// plus the extracted platform binaries alongside the channel files, or
-// upgrades 404 on the manifest / stage a zip as an executable. manifest.json
-// is written into the artifacts dir by produce-manifest.mjs before this runs.
+// The staged updater (native-manifest.ts / native-stage.ts) downloads the
+// referenced archive and extracts it before staging — publish the manifest
+// plus the platform zips under /binaries/<version>/ alongside the channel
+// files or upgrades 404. manifest.json is written into the artifacts dir by
+// produce-manifest.mjs before this runs. (Bare binaries exceed GitHub's
+// 100 MB per-file limit, so the zips are what the channel carries.)
 const binariesDir = resolve(outDir, 'binaries', version);
 await mkdir(binariesDir, { recursive: true });
 const manifestSource = resolve(artifactsDir, 'manifest.json');
@@ -88,15 +85,7 @@ try {
   process.exit(1);
 }
 for (const zipFile of entries.filter((f) => /^kimi-code-[a-z0-9-]+\.zip$/.test(f))) {
-  const target = zipFile.replace(/^kimi-code-/, '').replace(/\.zip$/, '');
-  const extractDir = resolve(outDir, `.tmp-${target}`);
-  await mkdir(extractDir, { recursive: true });
-  await execFileP('unzip', ['-o', '-q', resolve(artifactsDir, zipFile), '-d', extractDir]);
-  await copyFile(
-    resolve(extractDir, target.startsWith('win32') ? 'kimi.exe' : 'kimi'),
-    resolve(binariesDir, `kimi-code-${target}`),
-  );
-  await rm(extractDir, { recursive: true, force: true });
+  await copyFile(resolve(artifactsDir, zipFile), resolve(binariesDir, zipFile));
 }
 
 console.log(`Wrote update channel for ${version} (${sumFiles.length} platforms) to ${outDir}`);

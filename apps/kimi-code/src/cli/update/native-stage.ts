@@ -3,15 +3,18 @@
  * without touching the running executable. The actual swap happens on the
  * next startup (see `native-swap.ts`).
  *
- * The CDN serves the bare platform binary (e.g. `kimi-code-win32-x64.exe`),
- * whose sha256 comes from the per-release manifest over HTTPS — a staged
- * binary is byte-exact what the release pipeline produced.
+ * The update channel serves either the bare platform binary (upstream) or a
+ * per-platform zip archive (fork), whose sha256 comes from the per-release
+ * manifest over HTTPS. Zip payloads are extracted before staging so the
+ * staged file is always the byte-exact executable the pipeline produced.
  */
 
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { chmod, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, unlink } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { promisify } from 'node:util';
 
 import { valid } from 'semver';
 import { z } from 'zod';
@@ -25,6 +28,40 @@ import {
   nativeBinaryUrl,
   selectPlatformEntry,
 } from './native-manifest';
+
+const execFileP = promisify(execFile);
+
+/**
+ * The fork's release pipeline ships per-platform zips on the update channel,
+ * while upstream serves bare binaries. The staged file MUST be the actual
+ * executable (the startup swap smoke-tests it), so zip payloads are extracted
+ * into a sibling directory and the inner executable returned; bare files pass
+ * through unchanged. The caller removes `extractDir` after publishing.
+ */
+async function extractExecutableFromArchive(
+  archivePath: string,
+  stagingDir: string,
+  platform: NodeJS.Platform,
+): Promise<{ exePath: string; extractDir: string | null }> {
+  // Zip archives start with the local-file-header magic (PK\x03\x04).
+  const file = await open(archivePath, 'r');
+  const head = Buffer.alloc(4);
+  await file.read(head, 0, 4, 0);
+  await file.close();
+  const isZip = head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
+  if (!isZip) return { exePath: archivePath, extractDir: null };
+  const extractDir = join(stagingDir, `${basename(archivePath)}.x`);
+  await rm(extractDir, { recursive: true, force: true });
+  await mkdir(extractDir, { recursive: true });
+  if (platform === 'win32') {
+    // bsdtar reads zips on Windows without needing `unzip`.
+    await execFileP('tar', ['xf', archivePath, '-C', extractDir]);
+  } else {
+    await execFileP('unzip', ['-q', archivePath, '-d', extractDir]);
+  }
+  const exeName = platform === 'win32' ? 'kimi.exe' : 'kimi';
+  return { exePath: join(extractDir, exeName), extractDir };
+}
 
 const StagedNativeUpdateSchema = z
   .object({
@@ -446,7 +483,7 @@ export async function stageNativeUpdate(
   try {
     const manifest = await fetchNativeReleaseManifest(options.version, fetchImpl);
     const entry = selectPlatformEntry(manifest, platform, arch);
-    const size = await downloadAndHash(
+    await downloadAndHash(
       nativeBinaryUrl(options.version, entry.filename),
       partPath,
       entry.checksum,
@@ -454,16 +491,34 @@ export async function stageNativeUpdate(
       options.onProgress,
       options.idleTimeoutMs,
     );
-    // sha256 matched the manifest. Make the private .part file executable
-    // BEFORE publishing it: a concurrent swap may move the staged exe into
-    // the install path the instant it appears at its published name, so a
-    // post-publish chmod could land on a path that is already gone — leaving
-    // a non-executable installation behind.
-    await chmod(partPath, 0o755);
-    await rename(partPath, stagedExePath(options.exePath, staged));
+    // The fork's update channel ships per-platform zips; upstream serves bare
+    // binaries. The staged file MUST be the actual executable (the startup
+    // swap smoke-tests it), so extract zip payloads before publishing; bare
+    // files are used as-is.
+    const { exePath: stagedFile, extractDir } = await extractExecutableFromArchive(
+      partPath,
+      stagingDir,
+      platform,
+    );
+    // sha256 matched the manifest (of the downloaded archive/binary). Make
+    // the file executable BEFORE publishing it: a concurrent swap may move
+    // the staged exe into the install path the instant it appears at its
+    // published name, so a post-publish chmod could land on a path that is
+    // already gone — leaving a non-executable installation behind.
+    await chmod(stagedFile, 0o755);
+    const stagedStat = await stat(stagedFile);
+    const stagedHash = await hashFileSha256(stagedFile);
+    if (stagedHash === null) {
+      throw new Error(`failed to hash the staged executable: ${stagedFile}`);
+    }
+    await rename(stagedFile, stagedExePath(options.exePath, staged));
+    if (extractDir !== null) {
+      await rm(extractDir, { recursive: true, force: true });
+    }
+    await rm(partPath, { force: true });
 
-    staged.sha256 = entry.checksum;
-    staged.exeSize = size;
+    staged.sha256 = stagedHash;
+    staged.exeSize = stagedStat.size;
     // Atomic write: staged.json only ever appears complete and consistent.
     await writeJsonFile(
       getNativeStagedStateFile(options.exePath),
