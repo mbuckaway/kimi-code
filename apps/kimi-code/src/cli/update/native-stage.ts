@@ -11,7 +11,7 @@
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { chmod, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, unlink } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -30,6 +30,32 @@ import {
 } from './native-manifest';
 
 const execFileP = promisify(execFile);
+
+/**
+ * Resolve Windows' System32 tar.exe when present, else fall back to the PATH.
+ * Bare `tar` on Windows is unreliable: Git-for-Windows' GNU tar cannot read
+ * zips and can shadow System32 bsdtar. Mirrors fd-detect's getWindowsTarCommand.
+ */
+function windowsTarCommand(): string {
+  const systemRoot = process.env['SystemRoot'] ?? process.env['WINDIR'];
+  if (systemRoot !== undefined) {
+    const systemTar = join(systemRoot, 'System32', 'tar.exe');
+    if (existsSync(systemTar)) return systemTar;
+  }
+  return 'tar.exe';
+}
+
+/**
+ * Resolve Windows' bundled PowerShell when present, else fall back to the PATH.
+ */
+function windowsPowerShellCommand(): string {
+  const systemRoot = process.env['SystemRoot'] ?? process.env['WINDIR'];
+  if (systemRoot !== undefined) {
+    const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    if (existsSync(powershell)) return powershell;
+  }
+  return 'powershell.exe';
+}
 
 /**
  * The fork's release pipeline ships per-platform zips on the update channel,
@@ -54,8 +80,18 @@ async function extractExecutableFromArchive(
   await rm(extractDir, { recursive: true, force: true });
   await mkdir(extractDir, { recursive: true });
   if (platform === 'win32') {
-    // bsdtar reads zips on Windows without needing `unzip`.
-    await execFileP('tar', ['xf', archivePath, '-C', extractDir]);
+    // System32 bsdtar reads zips on Windows without needing `unzip`; resolve
+    // it explicitly because bare `tar` is PATH-fragile (Git-for-Windows GNU
+    // tar shadows System32 bsdtar and cannot read zips).
+    try {
+      await execFileP(windowsTarCommand(), ['xf', archivePath, '-C', extractDir]);
+    } catch {
+      // Fall back to PowerShell Expand-Archive (System32 tar.exe is missing
+      // before Win10-1803 / Server 2016). -EncodedCommand keeps the paths
+      // out of cmd → PowerShell double-parsing (spaces/apostrophes/backslashes).
+      const script = `Expand-Archive -LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${extractDir.replaceAll("'", "''")}' -Force`;
+      await execFileP(windowsPowerShellCommand(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]);
+    }
   } else {
     await execFileP('unzip', ['-q', archivePath, '-d', extractDir]);
   }

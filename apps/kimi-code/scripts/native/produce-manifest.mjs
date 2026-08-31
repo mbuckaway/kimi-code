@@ -36,6 +36,16 @@ if (sumFiles.length === 0) {
   process.exit(1);
 }
 
+// A release must never silently omit a supported platform. KIMI_CODE_REQUIRED_PLATFORMS
+// lets a single-platform test/dry-run scope the check down.
+const requiredPlatforms = (process.env.KIMI_CODE_REQUIRED_PLATFORMS ?? 'darwin-arm64,darwin-x64,linux-arm64,linux-x64,win32-arm64,win32-x64').split(',').map((s) => s.trim()).filter(Boolean);
+const present = new Set(sumFiles.map((f) => f.replace(/^kimi-code-/, '').replace(/\.zip\.sha256$/, '')));
+const missing = requiredPlatforms.filter((p) => !present.has(p));
+if (missing.length > 0) {
+  console.error(`Missing native artifacts for required platforms: ${missing.join(', ')}`);
+  process.exit(1);
+}
+
 const platforms = {};
 for (const sumFile of sumFiles.sort()) {
   const text = await readFile(resolve(inputDir, sumFile), 'utf-8');

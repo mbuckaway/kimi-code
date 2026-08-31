@@ -72,6 +72,23 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
+type ExecFileCallback = (error: Error | null, stdout?: unknown, stderr?: unknown) => void;
+
+const childProcessMocks = vi.hoisted(() => ({
+  execFile: vi.fn<(command: string, args: readonly string[], callback: ExecFileCallback) => void>(),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  // Pass through to the real child_process by default: only the win32
+  // fallback test overrides the tar invocation, and the linux zip tests
+  // keep using the real unzip.
+  childProcessMocks.execFile.mockImplementation((command, args, callback) => {
+    actual.execFile(command, args, callback);
+  });
+  return { ...actual, execFile: childProcessMocks.execFile };
+});
+
 const VERSION = '0.7.0';
 const PAYLOAD = Buffer.from('fake-sea-binary-payload');
 // The CDN serves the bare platform binary; the manifest checksum is its sha256.
@@ -106,16 +123,19 @@ interface MockCdnOptions {
   readonly checksum?: string;
   /** Manifest filename; defaults to the bare-binary name. */
   readonly filename?: string;
+  /** Manifest platform key; defaults to linux-x64. */
+  readonly platform?: string;
 }
 
 function mockCdnFetch(options: MockCdnOptions): typeof fetch {
   const version = options.version ?? VERSION;
   const filename = options.filename ?? BINARY_FILENAME;
+  const platform = options.platform ?? 'linux-x64';
   const manifestBody = JSON.stringify({
     version,
     tag: `v${version}`,
     platforms: {
-      'linux-x64': {
+      [platform]: {
         filename,
         checksum: options.checksum ?? sha256Hex(options.payload),
       },
@@ -151,6 +171,7 @@ describe('stageNativeUpdate', () => {
     exePath = join(workDir, 'bin', 'kimi');
     fsMocks.calls.length = 0;
     fsMocks.shortWriteBudget = 0;
+    childProcessMocks.execFile.mockClear();
   });
 
   afterEach(async () => {
@@ -189,9 +210,10 @@ describe('stageNativeUpdate', () => {
     expect(leftovers).toEqual([]);
   });
 
-  it('extracts a zip payload and stages the inner executable', async () => {
+  it.skipIf(process.platform === 'win32')('extracts a zip payload and stages the inner executable', async () => {
     // The fork's update channel ships per-platform zips; the staged file must
-    // be the extracted executable, not the archive.
+    // be the extracted executable, not the archive. Skipped on win32: the
+    // runner has no guaranteed `unzip` binary (see the win32 tests below).
     const inner = Buffer.from('fake-zip-inner-executable');
     const zipPayload = await buildZip('kimi', inner);
     const result = await stageNativeUpdate({
@@ -215,7 +237,77 @@ describe('stageNativeUpdate', () => {
     expect(leftovers).toEqual([]);
   });
 
-  it('marks the staged exe executable', async () => {
+  it.skipIf(process.platform !== 'win32')('extracts a win32 zip payload and stages the inner kimi.exe', async () => {
+    const inner = Buffer.from('fake-win32-inner-executable');
+    const zipPayload = await buildZip('kimi.exe', inner);
+    const result = await stageNativeUpdate({
+      version: VERSION,
+      exePath,
+      platform: 'win32',
+      arch: 'x64',
+      fetchImpl: mockCdnFetch({
+        payload: zipPayload,
+        platform: 'win32-x64',
+        filename: 'kimi-code-win32-x64.zip',
+      }),
+    });
+
+    expect(result.status).toBe('staged');
+    // The staged file is the EXTRACTED kimi.exe, hashed and sized as such.
+    expect(result.staged.sha256).toBe(sha256Hex(inner));
+    expect(result.staged.exeSize).toBe(inner.length);
+    const stagedOnDisk = await readFile(stagedExePath(exePath, result.staged));
+    expect(stagedOnDisk.equals(inner)).toBe(true);
+    // Neither the .part archive nor the extraction directory remain.
+    const leftovers = (await readdir(getNativeStagingDir(exePath))).filter((entry) =>
+      entry.endsWith('.part') || entry.endsWith('.x'),
+    );
+    expect(leftovers).toEqual([]);
+  });
+
+  it.skipIf(process.platform !== 'win32')('falls back to PowerShell Expand-Archive when System32 tar fails', async () => {
+    const inner = Buffer.from('fake-win32-inner-executable');
+    const zipPayload = await buildZip('kimi.exe', inner);
+    // Force the tar attempt to fail; the fallback must run PowerShell's
+    // Expand-Archive via -EncodedCommand and still stage the inner exe.
+    childProcessMocks.execFile.mockImplementationOnce((command, args, callback) => {
+      callback(new Error('simulated tar failure'));
+    });
+
+    const result = await stageNativeUpdate({
+      version: VERSION,
+      exePath,
+      platform: 'win32',
+      arch: 'x64',
+      fetchImpl: mockCdnFetch({
+        payload: zipPayload,
+        platform: 'win32-x64',
+        filename: 'kimi-code-win32-x64.zip',
+      }),
+    });
+
+    expect(result.status).toBe('staged');
+    const stagedOnDisk = await readFile(stagedExePath(exePath, result.staged));
+    expect(stagedOnDisk.equals(inner)).toBe(true);
+
+    // The tar attempt happened first, then the PowerShell fallback with an
+    // -EncodedCommand carrying the Expand-Archive script.
+    const tarCall = childProcessMocks.execFile.mock.calls.find((call) => call[1].includes('xf'));
+    expect(tarCall).toBeDefined();
+    const powershellCall = childProcessMocks.execFile.mock.calls.find((call) =>
+      call[0].toLowerCase().includes('powershell'),
+    );
+    expect(powershellCall).toBeDefined();
+    expect(powershellCall?.[1]).toEqual(
+      expect.arrayContaining(['-NoProfile', '-NonInteractive', '-EncodedCommand', expect.any(String)]),
+    );
+    const encoded = powershellCall?.[1]?.[3];
+    if (encoded === undefined) throw new Error('expected an -EncodedCommand argument');
+    const script = Buffer.from(encoded, 'base64').toString('utf16le');
+    expect(script).toContain('Expand-Archive -LiteralPath');
+  });
+
+  it.skipIf(process.platform === 'win32')('marks the staged exe executable', async () => {
     const result = await stageNativeUpdate({
       version: VERSION,
       exePath,

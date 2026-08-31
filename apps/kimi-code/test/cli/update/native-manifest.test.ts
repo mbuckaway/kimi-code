@@ -135,9 +135,9 @@ describe('selectPlatformEntry', () => {
     );
   });
 
-  it('throws when the platform is missing', () => {
+  it('throws when the platform is missing, listing the supported platforms', () => {
     expect(() => selectPlatformEntry(manifest, 'linux', 'arm64')).toThrow(
-      /linux-arm64 not found/,
+      /linux-arm64 not found in native manifest for 0\.7\.0 — supported platforms: darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-arm64, win32-x64/,
     );
   });
 });
