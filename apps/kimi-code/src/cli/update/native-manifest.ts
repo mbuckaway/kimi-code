@@ -95,7 +95,9 @@ export function selectPlatformEntry(
   const target = `${platform}-${arch}`;
   const entry = manifest.platforms[target];
   if (entry === undefined) {
-    throw new Error(`platform ${target} not found in native manifest for ${manifest.version}`);
+    throw new Error(
+      `platform ${target} not found in native manifest for ${manifest.version} — supported platforms: darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-arm64, win32-x64. If your architecture is not listed, install the x64 build.`,
+    );
   }
   return entry;
 }

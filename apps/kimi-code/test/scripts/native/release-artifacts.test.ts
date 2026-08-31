@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -127,7 +127,11 @@ describe('native release artifacts', () => {
       `${checksum}  kimi-code-darwin-arm64.zip\n`,
     );
 
-    await execFileAsync(process.execPath, [manifestScript, releaseDir, 'v0.5.0']);
+    // The fixture ships a SINGLE platform, so the required-platforms guard
+    // must be scoped down to that one platform for this run.
+    await execFileAsync(process.execPath, [manifestScript, releaseDir, 'v0.5.0'], {
+      env: { ...process.env, KIMI_CODE_REQUIRED_PLATFORMS: 'darwin-arm64' },
+    });
 
     const manifest = JSON.parse(
       await readFile(join(releaseDir, 'manifest.json'), 'utf-8'),
@@ -146,5 +150,26 @@ describe('native release artifacts', () => {
         },
       },
     });
+  });
+
+  it('refuses to produce a manifest when a required platform artifact is missing', async () => {
+    const releaseDir = await mkdtemp(join(tmpdir(), 'kimi-manifest-missing-'));
+    const archiveBytes = Buffer.from('fake zip bytes');
+    const checksum = sha256(archiveBytes);
+    await writeFile(join(releaseDir, 'kimi-code-darwin-arm64.zip'), archiveBytes);
+    await writeFile(
+      join(releaseDir, 'kimi-code-darwin-arm64.zip.sha256'),
+      `${checksum}  kimi-code-darwin-arm64.zip\n`,
+    );
+
+    // Without the env override the script requires all six supported
+    // platforms: a single fixture must fail loudly instead of silently
+    // publishing a partial manifest.
+    await expect(
+      execFileAsync(process.execPath, [manifestScript, releaseDir, 'v0.5.0']),
+    ).rejects.toThrow(/Missing native artifacts for required platforms/);
+
+    // The manifest must not be written.
+    await expect(stat(join(releaseDir, 'manifest.json'))).rejects.toThrow();
   });
 });
