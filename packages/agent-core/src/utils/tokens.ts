@@ -110,6 +110,8 @@ export function estimateTokensForContentPart(part: ContentPart): number {
     case 'audio_url':
     case 'video_url':
       return MEDIA_TOKEN_ESTIMATE;
+    case 'file':
+      return estimateTokens(part.fileId);
     default: {
       // Exhaustiveness guard: a new ContentPart kind must declare its estimate
       // here rather than silently counting as 0 (the CMP-03 defect).

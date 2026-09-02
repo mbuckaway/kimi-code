@@ -32,6 +32,7 @@ describe('KimiFiles', () => {
       const files = provider.files;
       expect(files).toBeInstanceOf(KimiFiles);
       expect(typeof files.uploadVideo).toBe('function');
+      expect(typeof files.uploadImage).toBe('function');
     });
 
     it('memoizes the files property', () => {
@@ -228,6 +229,44 @@ describe('KimiFiles', () => {
         );
       expect(caught).toBeInstanceOf(APIProviderQuotaExhaustedError);
       expect(isRetryableGenerateError(caught)).toBe(false);
+    });
+  });
+
+  describe('uploadImage', () => {
+    it('uploads an image with purpose user_data and returns a file part', async () => {
+      const provider = createProvider();
+      let captured: unknown;
+      provider.files['_client']!.files.create = vi.fn().mockImplementation((params: unknown) => {
+        captured = params;
+        return Promise.resolve({
+          id: 'file-api-123',
+          object: 'file',
+          bytes: 3,
+          created_at: 1,
+          filename: 'pic.png',
+          purpose: 'user_data',
+        });
+      }) as never;
+
+      const part = await provider.files.uploadImage({
+        data: Buffer.from([1, 2, 3]),
+        mimeType: 'image/png',
+      });
+
+      const call = captured as { file: File; purpose: string };
+      expect(call.purpose).toBe('user_data');
+      expect(call.file).toBeInstanceOf(File);
+      expect(part).toEqual({ type: 'file', fileId: 'file-api-123' });
+    });
+
+    it('rejects a non-image mime type', async () => {
+      const provider = createProvider();
+      await expect(
+        provider.files.uploadImage({
+          data: Buffer.from([1, 2, 3]),
+          mimeType: 'video/mp4',
+        }),
+      ).rejects.toThrow(/image/i);
     });
   });
 });

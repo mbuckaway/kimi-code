@@ -112,6 +112,16 @@ export interface AgentOptions {
   readonly replay?: ReplayBuilderOptions;
   readonly additionalDirs?: readonly string[];
   readonly systemPromptContextProvider?: (() => Promise<PreparedSystemPromptContext>) | undefined;
+  /**
+   * Content-identity digests of media parts the provider rejected, persisted in
+   * the session state so a resumed session keeps stripping them.
+   */
+  readonly initialStrippedMediaKeys?: readonly string[];
+  /**
+   * Invoked whenever the turn flow's stripped-media accumulator grows, so the
+   * session can persist the set back into its state.
+   */
+  readonly onStrippedMediaKeysChange?: ((keys: readonly string[]) => void) | undefined;
 }
 
 export class Agent {
@@ -191,6 +201,8 @@ export class Agent {
     readonly knownEfforts: string | undefined;
   }> = [];
   private readonly systemPromptContextProvider?: (() => Promise<PreparedSystemPromptContext>) | undefined;
+  readonly initialStrippedMediaKeys?: readonly string[];
+  readonly onStrippedMediaKeysChange?: ((keys: readonly string[]) => void) | undefined;
 
   constructor(options: AgentOptions) {
     this.type = options.type ?? 'main';
@@ -198,6 +210,8 @@ export class Agent {
     this.kimiConfig = options.config;
     this.homedir = options.homedir;
     this.mediaOriginalsDir = options.mediaOriginalsDir;
+    this.initialStrippedMediaKeys = options.initialStrippedMediaKeys;
+    this.onStrippedMediaKeysChange = options.onStrippedMediaKeysChange;
     this.rpc = options.rpc;
     this.toolServices = options.toolServices;
     this.pluginSessionStarts = options.pluginSessionStarts ?? [];

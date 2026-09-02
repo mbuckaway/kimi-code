@@ -12,6 +12,7 @@ export {
 export type {
   AudioURLPart,
   ContentPart,
+  FilePart,
   ImageURLPart,
   Message,
   Role,

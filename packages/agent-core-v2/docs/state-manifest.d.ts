@@ -1069,6 +1069,9 @@ export interface AgentStateSnapshot {
         url: string;
         id?: string;
       };
+    } | /* FilePart — packages/agent-core-v2/src/kosong/contract/message.ts */ {
+      type: 'file';
+      fileId: string;
     })[];
     readonly toolCalls: /* ToolCall — packages/agent-core-v2/src/kosong/contract/message.ts */ {
       type: 'function';
@@ -1192,9 +1195,8 @@ export interface AgentStateSnapshot {
   'llmRequester.emittedThinkingEffortWarnings': Set<string>;
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
-  'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand": undefined;
-  }>;
+  // replayable · durable — folds: MediaStripped
+  'llmRequester.mediaStrippedTurns': readonly string[];
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {
       readonly modelAlias: string;
@@ -1207,6 +1209,7 @@ export interface AgentStateSnapshot {
         readonly max_context_tokens: number;
         readonly max_input_tokens?: number;
         readonly dynamically_loaded_tools?: boolean;
+        readonly image_file_api?: boolean;
       };
       readonly maxOutputSize: number | undefined;
       readonly alwaysThinking: boolean | undefined;
@@ -1280,6 +1283,9 @@ export interface AgentStateSnapshot {
       url: string;
       id?: string;
     };
+  } | /* FilePart — packages/agent-core-v2/src/kosong/contract/message.ts */ {
+    type: 'file';
+    fileId: string;
   }>;
   // src/agent/media/mediaToolsRegistrar.ts
   'media.registeredKey': string | undefined;

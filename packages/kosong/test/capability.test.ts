@@ -16,6 +16,23 @@ describe('ModelCapability / UNKNOWN_CAPABILITY', () => {
     expect(UNKNOWN_CAPABILITY.tool_use).toBe(false);
   });
 
+  it('UNKNOWN_CAPABILITY.image_file_api defaults to false', () => {
+    expect(UNKNOWN_CAPABILITY.image_file_api).toBe(false);
+  });
+
+  it('a capability declaring only image_file_api is not unknown', () => {
+    const cap: ModelCapability = {
+      image_in: false,
+      video_in: false,
+      audio_in: false,
+      thinking: false,
+      tool_use: false,
+      max_context_tokens: 0,
+      image_file_api: true,
+    };
+    expect(isUnknownCapability(cap)).toBe(false);
+  });
+
   it('UNKNOWN_CAPABILITY.max_context_tokens is 0 (unknown)', () => {
     expect(UNKNOWN_CAPABILITY.max_context_tokens).toBe(0);
   });

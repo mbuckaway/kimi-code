@@ -31,6 +31,7 @@ export interface ModelCapability {
    * message carrying `tools`.
    */
   readonly dynamically_loaded_tools?: boolean;
+  readonly image_file_api?: boolean;
 }
 
 const UNKNOWN_CAPABILITY_MARKER = Symbol.for('moonshot-ai.kosong.UNKNOWN_CAPABILITY');
@@ -50,6 +51,7 @@ export const UNKNOWN_CAPABILITY: ModelCapability = Object.freeze(
       tool_use: false,
       max_context_tokens: 0,
       dynamically_loaded_tools: false,
+      image_file_api: false,
     },
     UNKNOWN_CAPABILITY_MARKER,
     { value: true },
@@ -67,6 +69,7 @@ export function isUnknownCapability(capability: ModelCapability): boolean {
     !capability.audio_in &&
     !capability.thinking &&
     !capability.tool_use &&
+    !capability.image_file_api &&
     capability.dynamically_loaded_tools !== true &&
     capability.max_context_tokens === 0
   );

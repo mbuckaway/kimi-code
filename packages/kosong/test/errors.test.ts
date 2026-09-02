@@ -611,6 +611,32 @@ describe('isImageFormatError', () => {
     ).toBe(true);
   });
 
+  it('matches DeepSeek image-rejection 400 messages', () => {
+    expect(
+      isImageFormatError(new APIStatusError(400, 'This model does not support image input')),
+    ).toBe(true);
+    expect(
+      isImageFormatError(
+        new APIStatusError(400, 'unknown variant `image_url`, expected one of `input_image`'),
+      ),
+    ).toBe(true);
+    expect(
+      isImageFormatError(new APIStatusError(400, 'Images are supported in user messages only')),
+    ).toBe(true);
+    expect(
+      isImageFormatError(new APIStatusError(400, 'Image in assistant message is not supported')),
+    ).toBe(true);
+    expect(
+      isImageFormatError(new APIStatusError(400, 'Image in system message is not supported')),
+    ).toBe(true);
+    expect(
+      isImageFormatError(new APIStatusError(400, 'Image in tool message is not supported')),
+    ).toBe(true);
+    expect(
+      isImageFormatError(new APIStatusError(400, 'You have uploaded an unsupported image')),
+    ).toBe(true);
+  });
+
   it('matches kosong client-side image whitelist throws', () => {
     expect(
       isImageFormatError(new ChatProviderError('Unsupported media type for base64 image: image/avif')),
@@ -679,6 +705,24 @@ describe('isImageFormatError', () => {
       isImageFormatError(new APIStatusError(400, 'unsupported media type for audio input')),
     ).toBe(false);
     expect(isImageFormatError(new APIStatusError(400, 'invalid media type'))).toBe(false);
+  });
+
+  it('does not classify a non-image media rejection or a non-400 status as an image error', () => {
+    expect(
+      isImageFormatError(
+        new APIStatusError(
+          400,
+          "messages.0.content.1.audio.source.base64.media_type: Input should be 'audio/mp3'",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isImageFormatError(new APIStatusError(400, 'This model does not support video input')),
+    ).toBe(false);
+    expect(isImageFormatError(new APIStatusError(429, 'Rate limit exceeded'))).toBe(false);
+    expect(
+      isImageFormatError(new APIStatusError(429, 'This model does not support image')),
+    ).toBe(false);
   });
 
   it('is excluded from the transient-retry fallback so dedicated recovery fires first', () => {

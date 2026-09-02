@@ -497,6 +497,7 @@ function resolveModelCapabilities(
     dynamically_loaded_tools:
       declared.has('dynamically_loaded_tools') ||
       detected.dynamically_loaded_tools === true,
+    image_file_api: declared.has('image_file_api') || detected.image_file_api === true,
   };
 }
 

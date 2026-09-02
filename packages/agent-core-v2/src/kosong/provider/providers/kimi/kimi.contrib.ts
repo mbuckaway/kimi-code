@@ -196,6 +196,8 @@ export const kimiOpenAITrait: ProtocolTrait = {
   },
 
   uploadVideo: (input, options, ctx) => resolveFiles(ctx).uploadVideo(input, options),
+
+  uploadImage: (input, options, ctx) => resolveFiles(ctx).uploadImage(input, options),
 };
 
 export const kimiAnthropicTrait: ProtocolTrait = {

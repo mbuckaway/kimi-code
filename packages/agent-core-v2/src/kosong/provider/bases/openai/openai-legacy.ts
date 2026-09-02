@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { parseTraceId, type ChatProviderError } from '#/kosong/contract/errors';
 import type {
   ContentPart,
+  FilePart,
   Message,
   StreamedMessagePart,
   ToolCall,
@@ -13,6 +14,7 @@ import type {
   ChatProvider,
   FinishReason,
   GenerateOptions,
+  ImageUploadInput,
   ProviderRequestAuth,
   ResponseFormat,
   StreamedMessage,
@@ -87,6 +89,10 @@ export interface OpenAIChatCompletionsHooks {
     input: string | VideoUploadInput,
     options?: GenerateOptions,
   ) => Promise<VideoURLPart>;
+  uploadImage?: (
+    input: string | ImageUploadInput,
+    options?: GenerateOptions,
+  ) => Promise<FilePart>;
 }
 
 export interface OpenAILegacyOptions {
@@ -507,6 +513,11 @@ export class OpenAILegacyChatProvider implements ChatProvider {
     options?: GenerateOptions,
   ) => Promise<VideoURLPart>;
 
+  readonly uploadImage?: (
+    input: string | ImageUploadInput,
+    options?: GenerateOptions,
+  ) => Promise<FilePart>;
+
   constructor(options: OpenAILegacyOptions) {
     const apiKey = options.apiKey ?? process.env['OPENAI_API_KEY'];
     this._apiKey = apiKey === undefined || apiKey.length === 0 ? undefined : apiKey;
@@ -536,6 +547,10 @@ export class OpenAILegacyChatProvider implements ChatProvider {
     const uploadVideo = this._hooks?.uploadVideo;
     if (uploadVideo !== undefined) {
       this.uploadVideo = (input, generateOptions) => uploadVideo(input, generateOptions);
+    }
+    const uploadImage = this._hooks?.uploadImage;
+    if (uploadImage !== undefined) {
+      this.uploadImage = (input, generateOptions) => uploadImage(input, generateOptions);
     }
   }
 

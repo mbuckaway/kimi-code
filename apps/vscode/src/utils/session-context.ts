@@ -196,6 +196,7 @@ function formatPartMarkdown(part: ContentPart): string {
     case "image_url": return "[image]";
     case "audio_url": return "[audio]";
     case "video_url": return "[video]";
+    case "file": return "[file]";
   }
 }
 

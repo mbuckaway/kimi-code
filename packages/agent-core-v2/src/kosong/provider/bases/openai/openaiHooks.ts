@@ -1,4 +1,4 @@
-import type { GenerateOptions, VideoUploadInput } from '#/kosong/contract/provider';
+import type { GenerateOptions, ImageUploadInput, VideoUploadInput } from '#/kosong/contract/provider';
 import type { Tool } from '#/kosong/contract/tool';
 import type { ProtocolEndpoint, ResolvedTrait } from '#/kosong/protocol/protocolTrait';
 
@@ -79,6 +79,10 @@ export function composeOpenAIChatHooks(
     if (trait.uploadVideo !== undefined) {
       hooks.uploadVideo = (input: string | VideoUploadInput, options?: GenerateOptions) =>
         trait.uploadVideo!(input, options, context);
+    }
+    if (trait.uploadImage !== undefined) {
+      hooks.uploadImage = (input: string | ImageUploadInput, options?: GenerateOptions) =>
+        trait.uploadImage!(input, options, context);
     }
   }
 

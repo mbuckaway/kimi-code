@@ -217,7 +217,7 @@ function applyBinaryPartCap(parts: readonly ContentPart[]): {
   const notices: string[] = [];
 
   for (const part of parts) {
-    if (part.type === 'text' || part.type === 'think') {
+    if (part.type === 'text' || part.type === 'think' || part.type === 'file') {
       out.push(part);
       continue;
     }

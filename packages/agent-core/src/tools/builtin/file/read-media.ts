@@ -27,6 +27,7 @@
 import type { Kaos } from '@moonshot-ai/kaos';
 import type {
   ContentPart,
+  ImageUploadInput,
   ModelCapability,
   VideoUploadInput as ProviderVideoUploadInput,
 } from '@moonshot-ai/kosong';
@@ -39,7 +40,12 @@ import type { TelemetryClient } from '../../../telemetry';
 import { renderPrompt } from '../../../utils/render-prompt';
 import { resolvePathAccessPath } from '../../policies/path-access';
 import { MEDIA_SNIFF_BYTES, detectFileType, sniffImageDimensions } from '../../support/file-type';
-import { deliverVideoContent, type VideoUploader } from '../../support/video-delivery';
+import {
+  deliverImageContent,
+  deliverVideoContent,
+  type ImageUploader,
+  type VideoUploader,
+} from '../../support/video-delivery';
 import {
   IMAGE_BYTE_BUDGET,
   MAX_IMAGE_DECODE_BYTES,
@@ -99,7 +105,7 @@ function buildFullResolutionLimitError(path: string, finalBytes: number): string
 
 export type VideoUploadInput = ProviderVideoUploadInput;
 
-export type { VideoUploader };
+export type { ImageUploader, ImageUploadInput, VideoUploader };
 
 // ── Input schema ─────────────────────────────────────────────────────
 
@@ -265,6 +271,7 @@ export class ReadMediaFileTool implements BuiltinTool<ReadMediaFileInput> {
     private readonly videoUploader?: VideoUploader | undefined,
     telemetry?: TelemetryClient,
     imageLimits?: ImageLimits,
+    private readonly imageUploader?: ImageUploader | undefined,
   ) {
     if (!capabilities.image_in && !capabilities.video_in) {
       const skip = new Error('ReadMediaFile requires image_in or video_in capability');
@@ -295,6 +302,24 @@ export class ReadMediaFileTool implements BuiltinTool<ReadMediaFileInput> {
       { data, mimeType, filename: safePath.split(/[\\/]/).at(-1) },
       this.videoUploader,
     );
+  }
+
+  private imageContentPart(
+    data: Uint8Array,
+    mimeType: string,
+    safePath: string,
+  ): Promise<ContentPart> {
+    if (this.capabilities.image_file_api === true) {
+      return deliverImageContent(
+        { data, mimeType, filename: safePath.split(/[\\/]/).at(-1) },
+        this.imageUploader,
+      );
+    }
+    const base64 = Buffer.from(data).toString('base64');
+    return Promise.resolve({
+      type: 'image_url',
+      imageUrl: { url: `data:${mimeType};base64,${base64}` },
+    });
   }
 
   resolveExecution(args: ReadMediaFileInput): ToolExecution {
@@ -467,11 +492,11 @@ export class ReadMediaFileTool implements BuiltinTool<ReadMediaFileInput> {
           if (!outcome.ok) {
             return { isError: true, output: `Cannot read region from "${args.path}": ${outcome.error}` };
           }
-          const base64 = Buffer.from(outcome.data).toString('base64');
-          mediaPart = {
-            type: 'image_url',
-            imageUrl: { url: `data:${outcome.mimeType};base64,${base64}` },
-          };
+          mediaPart = await this.imageContentPart(
+            Buffer.from(outcome.data),
+            outcome.mimeType,
+            safePath,
+          );
           delivery = {
             kind: 'crop',
             width: outcome.width,
@@ -496,11 +521,7 @@ export class ReadMediaFileTool implements BuiltinTool<ReadMediaFileInput> {
               output: buildFullResolutionLimitError(args.path, data.length),
             };
           }
-          const base64 = Buffer.from(data).toString('base64');
-          mediaPart = {
-            type: 'image_url',
-            imageUrl: { url: `data:${fileType.mimeType};base64,${base64}` },
-          };
+          mediaPart = await this.imageContentPart(data, fileType.mimeType, safePath);
           delivery = {
             kind: 'full',
             width: dimensions?.width ?? 0,
@@ -536,11 +557,7 @@ export class ReadMediaFileTool implements BuiltinTool<ReadMediaFileInput> {
               }),
             };
           }
-          const base64 = Buffer.from(compressed.data).toString('base64');
-          mediaPart = {
-            type: 'image_url',
-            imageUrl: { url: `data:${compressed.mimeType};base64,${base64}` },
-          };
+          mediaPart = await this.imageContentPart(compressed.data, compressed.mimeType, safePath);
           delivery = {
             kind: compressed.changed ? 'downsampled' : 'untouched',
             width: compressed.width,

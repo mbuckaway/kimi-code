@@ -43,7 +43,6 @@ import { USER_PROMPT_ORIGIN, type PromptOrigin } from '../context';
 import {
   captureMediaStripSnapshot,
   stripMediaPartsBySnapshot,
-  type MediaStripSnapshot,
 } from '../context/projector';
 import { renderUserPromptHookBlockResult, renderUserPromptHookResult } from '../../session/hooks';
 import { canonicalTelemetryArgs, isPlainRecord } from './canonical-args';
@@ -154,8 +153,35 @@ export class TurnFlow {
   private activeRequestTrace: LLMRequestTrace | undefined;
   private latestTraceId: string | undefined;
   private currentStep = 0;
+  private readonly mediaStripAccumulator: Set<string> = new Set();
 
-  constructor(protected readonly agent: Agent) {}
+  constructor(protected readonly agent: Agent) {
+    for (const key of agent.initialStrippedMediaKeys ?? []) {
+      this.mediaStripAccumulator.add(key);
+    }
+  }
+
+  /** Content-identity digests the provider rejected and that must stay stripped. */
+  get mediaStripKeys(): readonly string[] {
+    return [...this.mediaStripAccumulator];
+  }
+
+  /**
+   * Merges media-strip digests into the accumulator and notifies the persistence
+   * hook only when the set actually grows.
+   */
+  addMediaStripKeys(keys: Iterable<string>): void {
+    let changed = false;
+    for (const key of keys) {
+      if (!this.mediaStripAccumulator.has(key)) {
+        this.mediaStripAccumulator.add(key);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.agent.onStrippedMediaKeysChange?.(this.mediaStripKeys);
+    }
+  }
 
   /** Best-effort agent id (main / generated id) derived from the agent homedir. */
   private get agentId(): string {
@@ -822,11 +848,19 @@ export class TurnFlow {
     // appended only when the loadable set actually changed, so quiet turns
     // keep the prompt cache fully warm.
     this.agent.injection.injectToolsDiff();
-    let mediaStripSnapshot: MediaStripSnapshot | undefined;
+    let mediaStripMergedThisTurn = false;
+    const buildMessages = (): Message[] => {
+      const messages = this.agent.context.messages;
+      if (this.mediaStripAccumulator.size === 0) return messages;
+      return stripMediaPartsBySnapshot(messages, this.mediaStripAccumulator);
+    };
     const buildMessagesMediaStripped = (): Message[] => {
       const messages = this.agent.context.messages;
-      mediaStripSnapshot ??= captureMediaStripSnapshot(messages);
-      return stripMediaPartsBySnapshot(messages, mediaStripSnapshot);
+      if (!mediaStripMergedThisTurn) {
+        this.addMediaStripKeys(captureMediaStripSnapshot(messages));
+        mediaStripMergedThisTurn = true;
+      }
+      return stripMediaPartsBySnapshot(messages, this.mediaStripAccumulator);
     };
     while (true) {
       signal.throwIfAborted();
@@ -840,7 +874,7 @@ export class TurnFlow {
           turnId: String(turnId),
           signal,
           llm: this.agent.llm,
-          buildMessages: () => this.agent.context.messages,
+          buildMessages,
           buildMessagesStrict: () => this.agent.context.strictMessages,
           buildMessagesMediaDegraded: () => this.agent.context.mediaDegradedMessages,
           buildMessagesMediaStripped,

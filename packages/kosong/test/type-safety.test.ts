@@ -1,5 +1,6 @@
 import type {
   AudioURLPart,
+  FilePart,
   ImageURLPart,
   StreamedMessagePart,
   TextPart,
@@ -26,6 +27,8 @@ function processPartSafely(part: StreamedMessagePart): string {
       return part.audioUrl.url; // AudioURLPart.audioUrl.url -> string
     case 'video_url':
       return part.videoUrl.url; // VideoURLPart.videoUrl.url -> string
+    case 'file':
+      return part.fileId; // FilePart.fileId -> string
     case 'function':
       return part.name; // ToolCall.name -> string
     case 'tool_call_part':
@@ -111,6 +114,7 @@ describe('exhaustiveness check', () => {
       { type: 'image_url', imageUrl: { url: 'c' } },
       { type: 'audio_url', audioUrl: { url: 'd' } },
       { type: 'video_url', videoUrl: { url: 'e' } },
+      { type: 'file', fileId: 'f' },
       { type: 'function', id: 'f', name: 'g', arguments: null },
       { type: 'tool_call_part', argumentsPart: 'h' },
     ];

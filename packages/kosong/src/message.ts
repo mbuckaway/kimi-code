@@ -28,6 +28,11 @@ export interface VideoURLPart {
   videoUrl: { url: string; id?: string | undefined };
 }
 
+export interface FilePart {
+  type: 'file';
+  fileId: string;
+}
+
 /**
  * A single piece of content within a {@link Message}.
  *
@@ -35,7 +40,7 @@ export interface VideoURLPart {
  * Providers convert these to their native content-block format during
  * {@link ChatProvider.generate}.
  */
-export type ContentPart = TextPart | ThinkPart | ImageURLPart | AudioURLPart | VideoURLPart;
+export type ContentPart = TextPart | ThinkPart | ImageURLPart | AudioURLPart | VideoURLPart | FilePart;
 
 export interface ToolCall {
   type: 'function';
@@ -114,11 +119,16 @@ export interface Message {
   readonly tools?: readonly Tool[] | undefined;
 }
 
-/** Check if a streamed part is a ContentPart (text, think, image_url, audio_url, video_url). */
+/** Check if a streamed part is a ContentPart (text, think, image_url, audio_url, video_url, file). */
 export function isContentPart(part: StreamedMessagePart): part is ContentPart {
   const t = part.type;
   return (
-    t === 'text' || t === 'think' || t === 'image_url' || t === 'audio_url' || t === 'video_url'
+    t === 'text' ||
+    t === 'think' ||
+    t === 'image_url' ||
+    t === 'audio_url' ||
+    t === 'video_url' ||
+    t === 'file'
   );
 }
 

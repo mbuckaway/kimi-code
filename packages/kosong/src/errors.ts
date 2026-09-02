@@ -288,6 +288,12 @@ const IMAGE_FORMAT_STATUS_MESSAGE_PATTERNS = [
   /unable to process (?:the |input )?image/,
   /failed to decode (?:the )?image/,
   /invalid image(?: data| type| format)?/,
+  // DeepSeek image-rejection 400s (image input unsupported on the selected model).
+  /this model does not support image/,
+  /unknown variant\s+\u0060?image_url\u0060?/,
+  /images are supported in user messages only/,
+  /image in (?:assistant|system|tool) message is not supported/,
+  /you have uploaded an unsupported image/,
 ] as const;
 
 // Anthropic `media_type` & Gemini `mime_type` enum violations name the field

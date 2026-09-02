@@ -356,13 +356,13 @@ describe('convertContentPart', () => {
     ).toEqual({ type: 'image_url', image_url: { url: 'https://ex/img.png' } });
   });
 
-  it('converts ImageURLPart with id', () => {
+  it('drops id from ImageURLPart in the OpenAI image_url wire shape', () => {
     expect(
       convertContentPart({
         type: 'image_url',
         imageUrl: { url: 'https://ex/img.png', id: 'img-1' },
       }),
-    ).toEqual({ type: 'image_url', image_url: { url: 'https://ex/img.png', id: 'img-1' } });
+    ).toEqual({ type: 'image_url', image_url: { url: 'https://ex/img.png' } });
   });
 
   it('converts AudioURLPart without id', () => {
@@ -393,6 +393,13 @@ describe('convertContentPart', () => {
         videoUrl: { url: 'https://ex/v.mp4', id: 'v-1' },
       }),
     ).toEqual({ type: 'video_url', video_url: { url: 'https://ex/v.mp4', id: 'v-1' } });
+  });
+
+  it('converts FilePart to a DeepSeek file content block', () => {
+    expect(convertContentPart({ type: 'file', fileId: 'file-api-abc' })).toEqual({
+      type: 'file',
+      file_id: 'file-api-abc',
+    });
   });
 
   it('throws on unknown content part type', () => {

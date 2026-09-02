@@ -5,6 +5,7 @@ import type {
   ChatProvider,
   FinishReason,
   GenerateOptions,
+  ImageUploadInput,
   MaxCompletionTokensOptions,
   ProviderRequestAuth,
   ResponseFormat,
@@ -471,6 +472,10 @@ export class KimiChatProvider implements ChatProvider {
 
   uploadVideo(input: string | VideoUploadInput, options?: GenerateOptions) {
     return this.files.uploadVideo(input, options);
+  }
+
+  uploadImage(input: string | ImageUploadInput, options?: GenerateOptions) {
+    return this.files.uploadImage(input, options);
   }
 
   get thinkingEffort(): ThinkingEffort | null {

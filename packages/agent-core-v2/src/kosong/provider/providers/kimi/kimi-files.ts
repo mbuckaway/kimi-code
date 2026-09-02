@@ -6,8 +6,12 @@ import type OpenAI from 'openai';
 import OpenAIClient from 'openai';
 
 import { ChatProviderError } from '#/kosong/contract/errors';
-import type { VideoURLPart } from '#/kosong/contract/message';
-import type { ProviderRequestAuth, VideoUploadInput } from '#/kosong/contract/provider';
+import type { FilePart, VideoURLPart } from '#/kosong/contract/message';
+import type {
+  ImageUploadInput,
+  ProviderRequestAuth,
+  VideoUploadInput,
+} from '#/kosong/contract/provider';
 
 import { convertOpenAIError } from '../../bases/openai/openai-common';
 import {
@@ -104,6 +108,53 @@ export class KimiFiles {
     };
   }
 
+  async uploadImage(
+    input: string | ImageUploadInput,
+    options?: KimiUploadOptions,
+  ): Promise<FilePart> {
+    let file: unknown;
+
+    if (typeof input === 'string') {
+      if (!fs.existsSync(input)) {
+        throw new ChatProviderError(`Image file not found: ${input}`);
+      }
+      const filename = path.basename(input);
+      const mimeType = guessImageMimeTypeFromExt(filename);
+      if (mimeType === undefined || !mimeType.startsWith('image/')) {
+        throw new ChatProviderError(
+          `KimiFiles.uploadImage: file extension does not indicate an image type: ${filename}`,
+        );
+      }
+      const data = await fs.promises.readFile(input);
+      const blob = new Blob([new Uint8Array(data)], { type: mimeType });
+      file = new File([blob], filename, { type: mimeType });
+    } else {
+      if (!input.mimeType.startsWith('image/')) {
+        throw new ChatProviderError(`Expected an image mime type, got ${input.mimeType}`);
+      }
+      const filename = input.filename ?? guessImageFilename(input.mimeType);
+      const bytes = input.data instanceof Uint8Array ? input.data : new Uint8Array(input.data);
+      const blob = new Blob([bytes], { type: input.mimeType });
+      file = new File([blob], filename, { type: input.mimeType });
+    }
+
+    let uploaded: { id: string };
+    try {
+      const client = this._createClient(options?.auth);
+      uploaded = (await client.files.create(
+        {
+          file: file as never,
+          purpose: 'user_data' as never,
+        },
+        options?.signal ? { signal: options.signal } : undefined,
+      )) as unknown as { id: string };
+    } catch (error: unknown) {
+      throw convertOpenAIError(error, classifyKimiQuotaError);
+    }
+
+    return { type: 'file', fileId: uploaded.id };
+  }
+
   private _createClient(auth: ProviderRequestAuth | undefined): OpenAI {
     return resolveAuthBackedClient(
       { cachedClient: this._client, clientFactory: this._clientFactory },
@@ -145,4 +196,27 @@ function guessMimeTypeFromExt(filename: string): string | undefined {
   if (dot < 0) return undefined;
   const ext = filename.slice(dot + 1).toLowerCase();
   return EXT_TO_MIME[ext];
+}
+
+const IMAGE_MIME_TO_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+const IMAGE_EXT_TO_MIME: Record<string, string> = Object.fromEntries(
+  Object.entries(IMAGE_MIME_TO_EXT).map(([mime, ext]) => [ext, mime]),
+);
+
+function guessImageFilename(mimeType: string): string {
+  const ext = IMAGE_MIME_TO_EXT[mimeType.toLowerCase()] ?? 'bin';
+  return `upload.${ext}`;
+}
+
+function guessImageMimeTypeFromExt(filename: string): string | undefined {
+  const dot = filename.lastIndexOf('.');
+  if (dot < 0) return undefined;
+  const ext = filename.slice(dot + 1).toLowerCase();
+  return IMAGE_EXT_TO_MIME[ext];
 }

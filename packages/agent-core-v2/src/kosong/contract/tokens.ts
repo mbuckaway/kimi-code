@@ -72,6 +72,8 @@ export function estimateTokensForContentPart(part: ContentPart): number {
     case 'audio_url':
     case 'video_url':
       return MEDIA_TOKEN_ESTIMATE;
+    case 'file':
+      return estimateTokens(part.fileId);
     default: {
       const exhaustive: never = part;
       void exhaustive;

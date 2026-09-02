@@ -398,6 +398,9 @@ function projectResumedSession(resumed: ResumedSessionSummary, home: HomePair): 
   const metadata = projected['sessionMetadata'] as Record<string, unknown>;
   delete metadata['createdAt'];
   delete metadata['updatedAt'];
+  // `strippedMediaKeys` is v1-only engine-internal state (the media resolver
+  // records which context keys it stripped); v2 has no equivalent field.
+  delete metadata['strippedMediaKeys'];
   // v1 defaults an untitled metadata document to 'New Session'; the v2
   // mapping reports the same unset title as ''.
   if (metadata['title'] === 'New Session' || metadata['title'] === '') {

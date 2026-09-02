@@ -1356,3 +1356,48 @@ describe('ModelCatalog setDefaultModel', () => {
     }
   });
 });
+
+describe('image_file_api capability resolution', () => {
+  it('maps a declared image_file_api capability onto the resolved model', () => {
+    const { host, catalog } = createHost({
+      providers: {
+        kimi: { type: 'kimi', apiKey: 'sk-test', baseUrl: 'https://api.example/v1' },
+      },
+      models: {
+        img: {
+          provider: 'kimi',
+          model: 'kimi-k2',
+          maxContextSize: 131072,
+          displayName: 'Kimi K2',
+          capabilities: ['image_file_api'],
+        },
+      },
+    });
+    try {
+      expect(catalog.get('img')?.capabilities.image_file_api).toBe(true);
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('defaults image_file_api to false when not declared', () => {
+    const { host, catalog } = createHost({
+      providers: {
+        kimi: { type: 'kimi', apiKey: 'sk-test', baseUrl: 'https://api.example/v1' },
+      },
+      models: {
+        turbo: {
+          provider: 'kimi',
+          model: 'kimi-turbo',
+          maxContextSize: 32768,
+          displayName: 'Kimi Turbo',
+        },
+      },
+    });
+    try {
+      expect(catalog.get('turbo')?.capabilities.image_file_api).not.toBe(true);
+    } finally {
+      host.dispose();
+    }
+  });
+});

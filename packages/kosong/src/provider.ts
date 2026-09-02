@@ -1,4 +1,4 @@
-import type { Message, StreamedMessagePart, VideoURLPart } from './message';
+import type { FilePart, Message, StreamedMessagePart, VideoURLPart } from './message';
 import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
 
@@ -210,6 +210,16 @@ export interface VideoUploadInput {
 }
 
 /**
+ * In-memory image bytes for providers that require an uploaded file
+ * reference instead of an inline data URL.
+ */
+export interface ImageUploadInput {
+  readonly data: Uint8Array;
+  readonly mimeType: string;
+  readonly filename?: string | undefined;
+}
+
+/**
  * Unified interface for an LLM chat provider.
  *
  * Each provider implementation (Kimi, OpenAI, Anthropic, Google GenAI, etc.)
@@ -271,4 +281,6 @@ export interface ChatProvider {
   ): ChatProvider;
   /** Upload a video and return a content part that can be sent to this provider. */
   uploadVideo?(input: string | VideoUploadInput, options?: GenerateOptions): Promise<VideoURLPart>;
+  /** Upload an image and return a content part that can be sent to this provider. */
+  uploadImage?(input: string | ImageUploadInput, options?: GenerateOptions): Promise<FilePart>;
 }

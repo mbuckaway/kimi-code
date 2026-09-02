@@ -1,6 +1,7 @@
-import type { Message, StreamedMessagePart, VideoURLPart } from '#/kosong/contract/message';
+import type { FilePart, Message, StreamedMessagePart, VideoURLPart } from '#/kosong/contract/message';
 import type {
   FinishReason,
+  ImageUploadInput,
   ResponseFormat,
   SamplingOptions,
   ThinkingEffort,
@@ -65,6 +66,11 @@ export interface ModelRequester {
     input: string | VideoUploadInput,
     options?: { readonly signal?: AbortSignal },
   ): Promise<VideoURLPart>;
+
+  uploadImage?(
+    input: string | ImageUploadInput,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<FilePart>;
 }
 
 export function effectiveMaxCompletionTokens(params?: ModelRequestParams): number | undefined {

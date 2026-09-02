@@ -273,6 +273,7 @@ describe('trait objects are plain declarations', () => {
       'extractUsage',
       'preserveThinking',
       'strictThinkingValidation',
+      'uploadImage',
       'uploadVideo',
       'withMaxCompletionTokens',
       'withThinking',
@@ -313,5 +314,39 @@ describe('KimiFiles upload error conversion', () => {
       );
     expect(caught).toBeInstanceOf(APIProviderQuotaExhaustedError);
     expect(isRetryableGenerateError(caught)).toBe(false);
+  });
+});
+
+describe('KimiFiles.uploadImage', () => {
+  it('uploads an image with purpose user_data and returns a file part', async () => {
+    const create = vi.fn().mockResolvedValue({ id: 'file-api-123' });
+    const files = new KimiFiles({
+      baseUrl: 'https://api.example/v1',
+      clientFactory: () => ({ files: { create } }) as never,
+    });
+
+    const part = await files.uploadImage(
+      { data: Buffer.from([1, 2, 3]), mimeType: 'image/png', filename: 'pic.png' },
+      { auth: { apiKey: 'request-token' } },
+    );
+
+    expect(part).toEqual({ type: 'file', fileId: 'file-api-123' });
+    expect(create).toHaveBeenCalledWith(
+      { file: expect.any(File) as never, purpose: 'user_data' as never },
+      undefined,
+    );
+  });
+
+  it('rejects a non-image mime type before hitting the files API', async () => {
+    const create = vi.fn();
+    const files = new KimiFiles({
+      baseUrl: 'https://api.example/v1',
+      clientFactory: () => ({ files: { create } }) as never,
+    });
+
+    await expect(
+      files.uploadImage({ data: Buffer.from([1, 2, 3]), mimeType: 'video/mp4' }),
+    ).rejects.toThrow(/image mime/i);
+    expect(create).not.toHaveBeenCalled();
   });
 });

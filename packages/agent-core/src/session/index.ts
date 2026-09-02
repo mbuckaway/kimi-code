@@ -190,6 +190,11 @@ export interface SessionMeta {
    *  these follow the session across close/resume without affecting any other
    *  session opened in the same workspace. */
   additionalDirs?: string[];
+  /**
+   * Content-identity digests of media parts the provider rejected and that must
+   * stay stripped across a resumed session.
+   */
+  strippedMediaKeys?: string[];
   agents: Record<string, AgentMeta>;
   custom: Record<string, any>;
 }
@@ -255,6 +260,7 @@ export class Session {
     isCustomTitle: false,
     agents: {},
     custom: {},
+    strippedMediaKeys: [],
   };
   private writeMetadataPromise = Promise.resolve();
   private agentProfileSnapshot: AgentProfileCatalogSnapshot | undefined;
@@ -1120,7 +1126,7 @@ export class Session {
     const text = await this.persistenceKaos.readText(this.metadataPath);
     const persisted = JSON.parse(text) as PersistedSessionState;
     const { agentProfileCatalog, ...metadata } = persisted;
-    this.metadata = metadata;
+    this.metadata = { ...metadata, strippedMediaKeys: metadata.strippedMediaKeys ?? [] };
     if (agentProfileCatalog === undefined) {
       if (this.options.agents?.refreshPluginAgents === true) {
         this.agentProfileSnapshot = this.agentCatalog.snapshot();
@@ -1302,6 +1308,15 @@ export class Session {
           this.options.kimiHomeDir,
           { additionalDirs: agent.getAdditionalDirs() },
         ),
+      initialStrippedMediaKeys:
+        type === 'main' ? (this.metadata.strippedMediaKeys ?? []) : undefined,
+      onStrippedMediaKeysChange:
+        type === 'main'
+          ? (keys) => {
+              this.metadata.strippedMediaKeys = [...keys];
+              void this.writeMetadata();
+            }
+          : undefined,
     });
     return agent;
   }

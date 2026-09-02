@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { MEDIA_STRIPPED_PLACEHOLDERS } from '#/agent/contextProjector/mediaProjection';
 import { defineState } from '#/state/state';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IFileService } from '#/app/file/fileService';
@@ -70,29 +71,37 @@ export class AgentMediaResolverService implements IAgentMediaResolverService {
     requester: ModelRequester,
     signal?: AbortSignal,
   ): Promise<readonly Message[]> {
-    if (!messages.some(hasDaemonFileMediaPart)) return messages;
+    if (!messages.some(hasMediaPart)) return messages;
 
     let changed = false;
     const out: Message[] = [];
     for (const message of messages) {
-      if (!hasDaemonFileMediaPart(message)) {
+      if (!hasMediaPart(message)) {
         out.push(message);
         continue;
       }
       const content: ContentPart[] = [];
       let sawVideoRef = false;
+      let messageChanged = false;
       for (const part of message.content) {
         const daemonPart = daemonFileRefFromPart(part);
-        if (daemonPart === undefined) {
-          content.push(part);
+        if (daemonPart !== undefined) {
+          sawVideoRef ||= daemonPart.kind === 'video';
+          const resolved =
+            daemonPart.kind === 'video'
+              ? await this.resolveVideoPart(daemonPart.ref, requester, signal)
+              : await this.resolveImagePart(daemonPart.ref, requester, signal);
+          content.push(resolved);
+          messageChanged = true;
           continue;
         }
-        sawVideoRef ||= daemonPart.kind === 'video';
-        const resolved =
-          daemonPart.kind === 'video'
-            ? await this.resolveVideoPart(daemonPart.ref, requester, signal)
-            : await this.resolveImagePart(daemonPart.ref, requester, signal);
-        content.push(resolved);
+        const gated = gateUnsupportedMediaPart(part, requester);
+        content.push(gated);
+        if (gated !== part) messageChanged = true;
+      }
+      if (!messageChanged) {
+        out.push(message);
+        continue;
       }
       out.push({
         ...message,
@@ -139,16 +148,41 @@ export class AgentMediaResolverService implements IAgentMediaResolverService {
     if (fileType.kind !== 'image') return degradedImage(path);
     if (!isModelAcceptedImageMime(fileType.mimeType)) return degradedImage(path);
 
+    const mimeType = normalizeImageMime(fileType.mimeType);
+    if (requester.model.capabilities.image_file_api === true) {
+      const uploaded = await this.tryUploadImage(source, mimeType, requester, signal);
+      if (uploaded !== undefined) return uploaded;
+    }
     const part: ContentPart = {
       type: 'image_url',
       imageUrl: {
-        url: `data:${normalizeImageMime(fileType.mimeType)};base64,${source.bytes.toString('base64')}`,
+        url: `data:${mimeType};base64,${source.bytes.toString('base64')}`,
       },
     };
     if (source.bytes.length <= IMAGE_MEMO_MAX_BYTES) {
       this.memoizeImage(cacheKey, part, source.bytes.length);
     }
     return part;
+  }
+
+  private async tryUploadImage(
+    source: { readonly bytes: Buffer; readonly filename: string },
+    mimeType: string,
+    requester: ModelRequester,
+    signal: AbortSignal | undefined,
+  ): Promise<ContentPart | undefined> {
+    try {
+      const uploaded = await requester.uploadImage?.(
+        { data: source.bytes, mimeType, filename: source.filename },
+        signal === undefined ? undefined : { signal },
+      );
+      if (uploaded === undefined) return undefined;
+      return { type: 'file', fileId: uploaded.fileId };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (isVideoUploadAuthError(error)) throw error;
+      return undefined;
+    }
   }
 
   private memoedImage(cacheKey: string): ContentPart | undefined {
@@ -292,8 +326,23 @@ export class AgentMediaResolverService implements IAgentMediaResolverService {
   }
 }
 
-function hasDaemonFileMediaPart(message: Message): boolean {
-  return message.content.some((part) => daemonFileRefFromPart(part) !== undefined);
+function hasMediaPart(message: Message): boolean {
+  return message.content.some(
+    (part) => part.type === 'image_url' || part.type === 'video_url' || part.type === 'audio_url',
+  );
+}
+
+function gateUnsupportedMediaPart(part: ContentPart, requester: ModelRequester): ContentPart {
+  if (part.type === 'image_url' && !requester.model.capabilities.image_in) {
+    return { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.image_url };
+  }
+  if (part.type === 'video_url' && !requester.model.capabilities.video_in) {
+    return { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.video_url };
+  }
+  if (part.type === 'audio_url' && !requester.model.capabilities.audio_in) {
+    return { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.audio_url };
+  }
+  return part;
 }
 
 function degradedImage(path: string | undefined): ContentPart {

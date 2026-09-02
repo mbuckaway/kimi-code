@@ -1014,3 +1014,30 @@ function wrapReadTextWithError(inner: Kaos, cause: Error): Kaos {
     },
   });
 }
+
+describe('Session metadata stripped-media keys', () => {
+  it('persists and restores stripped-media keys across a state.json round-trip', async () => {
+    const homedir = await makeTempDir();
+    const first = new Session({
+      id: 'test-strip-keys',
+      kaos: testKaos.withCwd(await makeTempDir()),
+      homedir,
+      rpc: createSessionRpc([]),
+      providerManager: testProviderManager(),
+    });
+    first.metadata.strippedMediaKeys = ['key-1', 'key-2'];
+    await first.writeMetadata();
+    await first.close();
+
+    const resumed = new Session({
+      id: 'test-strip-keys',
+      kaos: testKaos.withCwd(await makeTempDir()),
+      homedir,
+      rpc: createSessionRpc([]),
+      providerManager: testProviderManager(),
+    });
+    await resumed.readMetadata();
+    expect(resumed.metadata.strippedMediaKeys).toEqual(['key-1', 'key-2']);
+    await resumed.close();
+  });
+});

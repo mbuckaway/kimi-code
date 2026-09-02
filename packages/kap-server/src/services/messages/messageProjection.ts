@@ -1,4 +1,4 @@
-import { daemonFileRefFromPart, parseDaemonFileUrl, type ContentPart, type ContextMessage } from '@moonshot-ai/agent-core-v2';
+import { BugIndicatingError, daemonFileRefFromPart, parseDaemonFileUrl, type ContentPart, type ContextMessage } from '@moonshot-ai/agent-core-v2';
 
 import type { Message, MessageContent, MessageRole, ToolUseContent } from '../../protocol/message';
 
@@ -35,6 +35,8 @@ function mapContentPart(part: ContextMessage['content'][number]): MessageContent
         ? { type: 'video', source: { kind: 'session_media', file_id: ref.fileId } }
         : { type: 'video', source: { kind: 'url', url: part.videoUrl.url, id: part.videoUrl.id } };
     }
+    case 'file':
+      throw new BugIndicatingError('file content part cannot be projected from stored context');
   }
 }
 

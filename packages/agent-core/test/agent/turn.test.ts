@@ -512,6 +512,73 @@ describe('Agent turn flow', () => {
           .filter((text) => text.includes('[image omitted for provider compatibility;')),
       ).toHaveLength(2);
     });
+
+    it('keeps a poisoned image stripped on the next turn (sticky snapshot)', async () => {
+      let attempts = 0;
+      const histories: Message[][] = [];
+      const generate: GenerateFn = async (_p, _s, _t, history) => {
+        attempts += 1;
+        histories.push(structuredClone(history));
+        const hasImage = history.flatMap((m) => m.content).some((p) => p.type === 'image_url');
+        if (hasImage) throw new APIStatusError(400, 'unsupported image format');
+        return okResponse();
+      };
+      const ctx = testAgent({ generate });
+      ctx.configure({
+        provider: { type: 'kimi', apiKey: 'test-key', model: 'kimi-code' },
+        modelCapabilities: IMAGE_CAPABLE,
+      });
+      plantPoisonedImage(ctx);
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'first turn' }] });
+      await ctx.untilTurnEnd();
+      expect(attempts).toBe(2);
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'second turn' }] });
+      await ctx.untilTurnEnd();
+
+      expect(attempts).toBe(3);
+      expect(histories[2]!.flatMap((m) => m.content).some((p) => p.type === 'image_url')).toBe(false);
+    });
+
+    it('sends a new image pasted after a strip while keeping the old image stripped', async () => {
+      const POISON_URL = 'data:image/avif;base64,QUJD';
+      const NEW_URL = 'data:image/png;base64,TkVX';
+      let attempts = 0;
+      const histories: Message[][] = [];
+      const generate: GenerateFn = async (_p, _s, _t, history) => {
+        attempts += 1;
+        histories.push(structuredClone(history));
+        const hasPoison = history
+          .flatMap((m) => m.content)
+          .some((p) => p.type === 'image_url' && p.imageUrl.url === POISON_URL);
+        if (hasPoison) throw new APIStatusError(400, 'unsupported image format');
+        return okResponse();
+      };
+      const ctx = testAgent({ generate });
+      ctx.configure({
+        provider: { type: 'kimi', apiKey: 'test-key', model: 'kimi-code' },
+        modelCapabilities: IMAGE_CAPABLE,
+      });
+      plantPoisonedImage(ctx);
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'first turn' }] });
+      await ctx.untilTurnEnd();
+      expect(attempts).toBe(2);
+
+      await ctx.rpc.prompt({
+        input: [{ type: 'text', text: 'second turn' }, { type: 'image_url', imageUrl: { url: NEW_URL, id: 'new-id' } }],
+      });
+      await ctx.untilTurnEnd();
+
+      expect(attempts).toBe(3);
+      const urls = histories
+        .at(-1)!
+        .flatMap((m) => m.content)
+        .filter((p) => p.type === 'image_url')
+        .map((p) => (p.type === 'image_url' ? p.imageUrl.url : undefined));
+      expect(urls).toEqual([NEW_URL]);
+    });
   });
 
   it('tracks turn_started and turn_interrupted telemetry', async () => {
