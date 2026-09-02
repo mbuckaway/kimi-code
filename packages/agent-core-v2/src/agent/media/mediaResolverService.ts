@@ -171,13 +171,12 @@ export class AgentMediaResolverService implements IAgentMediaResolverService {
     requester: ModelRequester,
     signal: AbortSignal | undefined,
   ): Promise<ContentPart | undefined> {
-    const uploadImage = requester.uploadImage;
-    if (uploadImage === undefined) return undefined;
     try {
-      const uploaded = await uploadImage(
+      const uploaded = await requester.uploadImage?.(
         { data: source.bytes, mimeType, filename: source.filename },
         signal === undefined ? undefined : { signal },
       );
+      if (uploaded === undefined) return undefined;
       return { type: 'file', fileId: uploaded.fileId };
     } catch (error) {
       if (signal?.aborted) throw error;

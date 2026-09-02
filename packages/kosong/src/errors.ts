@@ -290,7 +290,7 @@ const IMAGE_FORMAT_STATUS_MESSAGE_PATTERNS = [
   /invalid image(?: data| type| format)?/,
   // DeepSeek image-rejection 400s (image input unsupported on the selected model).
   /this model does not support image/,
-  /unknown variant\s+\x60?image_url\x60?/,
+  /unknown variant\s+\u0060?image_url\u0060?/,
   /images are supported in user messages only/,
   /image in (?:assistant|system|tool) message is not supported/,
   /you have uploaded an unsupported image/,

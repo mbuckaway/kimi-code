@@ -369,6 +369,7 @@ beforeAll(async () => {
     baseUrl: `${baseUrl}/v1`,
     auth: { method: 'api-key', apiKey: 'test-key' },
     maxContextSize: 262_144,
+    capabilities: { video_in: true },
   });
   await klient.global.kosong.addProvider({
     id: M_OPENAI_VISION,
@@ -396,6 +397,7 @@ beforeAll(async () => {
     baseUrl: `${baseUrl}/v1`,
     auth: { method: 'api-key', apiKey: 'test-key' },
     maxContextSize: 262_144,
+    capabilities: { video_in: true },
   });
   await klient.global.kosong.addProvider({
     id: M_GOOGLE,
@@ -404,6 +406,7 @@ beforeAll(async () => {
     baseUrl,
     auth: { method: 'api-key', apiKey: 'test-key' },
     maxContextSize: 262_144,
+    capabilities: { video_in: true },
   });
 }, 60_000);
 
