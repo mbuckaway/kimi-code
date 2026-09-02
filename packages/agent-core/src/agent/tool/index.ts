@@ -780,6 +780,7 @@ export class ToolManager {
       background,
     } = this.agent;
     const videoUploader = this.createVideoUploader(provider);
+    const imageUploader = this.createImageUploader(provider);
     const workspace = extendWorkspaceWithSkillRoots(
       {
         workspaceDir: cwd,
@@ -814,6 +815,7 @@ export class ToolManager {
             videoUploader,
             this.agent.telemetry,
             this.agent.imageLimits,
+            imageUploader,
           ),
         new b.EnterPlanModeTool(this.agent),
         new b.ExitPlanModeTool(this.agent),
@@ -895,6 +897,62 @@ export class ToolManager {
   videoUploader(): b.VideoUploader | undefined {
     if (!this.agent.config.hasProvider) return undefined;
     return this.createVideoUploader(this.agent.config.provider);
+  }
+
+  /**
+   * Uploader bound to the agent's current provider, for images that the model
+   * reads through ReadMediaFile and the provider can reference by file id.
+   * `undefined` when no model is bound or the provider has no image upload
+   * channel.
+   */
+  imageUploader(): b.ImageUploader | undefined {
+    if (!this.agent.config.hasProvider) return undefined;
+    return this.createImageUploader(this.agent.config.provider);
+  }
+
+  private createImageUploader(provider: ChatProvider): b.ImageUploader | undefined {
+    const uploadImage = provider.uploadImage?.bind(provider);
+    if (uploadImage === undefined) return undefined;
+
+    const modelAlias = this.agent.config.modelAlias!;
+    const withAuth = this.agent.modelProvider?.resolveAuth?.(modelAlias, {
+      log: this.agent.log,
+    });
+    const baseProps = this.videoUploadTelemetryProps(modelAlias);
+    const upload =
+      withAuth === undefined
+        ? (input: b.ImageUploadInput, signal?: AbortSignal) => uploadImage(input, { signal })
+        : (input: b.ImageUploadInput, signal?: AbortSignal) =>
+            withAuth((auth) => uploadImage(input, { auth, signal }));
+
+    return async (input, options) => {
+      const startedAt = Date.now();
+      const base = {
+        ...baseProps,
+        mime_type: input.mimeType,
+        size_bytes: input.data.length,
+      };
+      const track = (props: Record<string, string | number | boolean | undefined>): void => {
+        try {
+          this.agent.telemetry.track('image_upload', props);
+        } catch {
+          // Telemetry must never affect the upload outcome.
+        }
+      };
+      try {
+        const part = await upload(input, options?.signal);
+        track({ ...base, outcome: 'success', duration_ms: Date.now() - startedAt });
+        return part;
+      } catch (error) {
+        track({
+          ...base,
+          outcome: 'error',
+          duration_ms: Date.now() - startedAt,
+          error_type: error instanceof Error ? error.name : 'Unknown',
+        });
+        throw error;
+      }
+    };
   }
 
   private createVideoUploader(provider: ChatProvider): b.VideoUploader | undefined {

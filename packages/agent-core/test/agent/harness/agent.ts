@@ -109,6 +109,8 @@ export interface TestAgentOptions {
   readonly telemetry?: TelemetryClient | undefined;
   readonly log?: Logger;
   readonly experimentalFlags?: AgentOptions['experimentalFlags'];
+  readonly initialStrippedMediaKeys?: AgentOptions['initialStrippedMediaKeys'];
+  readonly onStrippedMediaKeysChange?: AgentOptions['onStrippedMediaKeysChange'];
 }
 
 interface ConfigureOptions {
@@ -197,6 +199,8 @@ export class AgentTestContext {
       telemetry: options.telemetry,
       log: options.log,
       experimentalFlags: options.experimentalFlags,
+      initialStrippedMediaKeys: options.initialStrippedMediaKeys,
+      onStrippedMediaKeysChange: options.onStrippedMediaKeysChange,
     });
     if (options.goal !== undefined) {
       (this.agent as unknown as { goal: GoalMode }).goal = options.goal;

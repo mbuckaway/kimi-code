@@ -506,3 +506,23 @@ describe('prompt-attached video resolution', () => {
     }
   });
 });
+
+describe('media-strip accumulator persistence', () => {
+  it('seeds the media-strip accumulator from persisted stripped-media keys', () => {
+    const ctx = testAgent({ initialStrippedMediaKeys: ['key-1', 'key-2'] });
+    expect(ctx.agent.turn.mediaStripKeys).toEqual(['key-1', 'key-2']);
+  });
+
+  it('notifies the persistence hook when the media-strip accumulator grows', () => {
+    const onStrippedMediaKeysChange = vi.fn();
+    const ctx = testAgent({
+      initialStrippedMediaKeys: ['key-1'],
+      onStrippedMediaKeysChange,
+    });
+
+    ctx.agent.turn.addMediaStripKeys(['key-2']);
+
+    expect(ctx.agent.turn.mediaStripKeys).toEqual(['key-1', 'key-2']);
+    expect(onStrippedMediaKeysChange).toHaveBeenCalledWith(['key-1', 'key-2']);
+  });
+});

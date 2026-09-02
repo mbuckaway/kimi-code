@@ -9,9 +9,9 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import {
   IAgentContextProjectorService,
-  type MediaStripSnapshot,
   type ProjectionPolicy,
 } from '#/agent/contextProjector/contextProjector';
+import { mediaStripSnapshotFromKeys } from '#/agent/contextProjector/mediaProjection';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
 import { AgentLLMRequesterService, KIMI_CODE_INFINITE_RETRY_ENV } from '#/agent/llmRequester/llmRequesterService';
 import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
@@ -219,7 +219,7 @@ function createService(
     shapeTools: (entries) => entries,
     shapeHistory: (messages) => messages,
   };
-  const testSnapshot = Object.freeze({}) as MediaStripSnapshot;
+  const testSnapshot = mediaStripSnapshotFromKeys(['stub-rejected-media']);
   const events: Event2[] = [];
   const eventBus: IEventBus = {
     _serviceBrand: undefined,
@@ -505,6 +505,45 @@ describe('AgentLLMRequesterService media-stripped resend', () => {
     await service.request({ source: { type: 'turn', turnId: 1, step: 2 } });
     expect(calls.value).toBe(3);
     expect(projection.calls).toEqual(['normal', 'stripped', 'stripped']);
+  });
+
+  it('keeps an image rejected in an earlier turn stripped on a later turn (sticky snapshot)', async () => {
+    const calls = { value: 0 };
+    const capturedInputs: ModelRequestInput[] = [];
+    const requester = createRequester(calls);
+    const poisonedImage: Message = {
+      role: 'user',
+      content: [{ type: 'image_url', imageUrl: { url: 'data:image/avif;base64,QUJD', id: 'poisoned-id' } }],
+      toolCalls: [],
+    };
+    requester.request = async function* (input) {
+      calls.value += 1;
+      capturedInputs.push(input);
+      const hasImage = input.messages.some((message) =>
+        message.content.some((part) => part.type === 'image_url'),
+      );
+      if (hasImage) throw IMAGE_FORMAT_400;
+      yield {
+        type: 'finish',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], toolCalls: [] },
+        providerFinishReason: 'completed',
+        rawFinishReason: 'stop',
+        id: 'resp-1',
+      } satisfies ModelRequestEvent;
+    };
+    const { service } = createService(requester, undefined, {
+      contextMessages: [poisonedImage],
+    });
+
+    await service.request({ messages: [poisonedImage], source: { type: 'turn', turnId: 1, step: 1 } });
+    await service.request({ messages: [poisonedImage], source: { type: 'turn', turnId: 2, step: 1 } });
+
+    expect(calls.value).toBe(3);
+    const lastVisible = capturedInputs
+      .at(-1)
+      ?.messages.flatMap((message) => message.content)
+      .filter((part) => part.type === 'image_url');
+    expect(lastVisible).toHaveLength(0);
   });
 
   it('does not resend for an unrelated 400', async () => {

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/state/state';
@@ -8,6 +9,10 @@ import {
   type MediaStripSnapshot,
   type ProjectionPolicy,
 } from '#/agent/contextProjector/contextProjector';
+import {
+  mediaStripSnapshotFromKeys,
+  mediaStripSnapshotKeys,
+} from '#/agent/contextProjector/mediaProjection';
 import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { IAgentProfileService, type ProfileModelContext } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
@@ -69,6 +74,7 @@ import {
   LlmRequest,
   llmRequestTraceKey,
   LlmToolsSnapshot,
+  MediaStripped,
   type LlmRequestPayload,
   type LlmRequestToolSchema,
 } from './llmRequestOps';
@@ -136,10 +142,18 @@ export const llmRequesterMediaDegradedTurnsKey = defineState<Set<number>>(
   'llmRequester.mediaDegradedTurns',
   () => new Set(),
 );
-export const llmRequesterMediaStrippedTurnsKey = defineState<Map<number, MediaStripSnapshot>>(
+export const llmRequesterMediaStrippedTurnsKey = defineState(
   'llmRequester.mediaStrippedTurns',
-  () => new Map(),
-);
+  (): readonly string[] => [],
+)
+  .replayable({ schema: z.array(z.string()).readonly() })
+  .on(MediaStripped, (s, e) => {
+    for (const key of e.keys) {
+      if (!s.includes(key)) {
+        s.push(key);
+      }
+    }
+  });
 export const llmRequesterEmittedThinkingEffortWarningsKey = defineState<Set<string>>(
   'llmRequester.emittedThinkingEffortWarnings',
   () => new Set(),
@@ -191,10 +205,6 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private get mediaDegradedTurns(): Set<number> {
     return this.states.get(llmRequesterMediaDegradedTurnsKey);
-  }
-
-  private get mediaStrippedTurns(): Map<number, MediaStripSnapshot> {
-    return this.states.get(llmRequesterMediaStrippedTurnsKey);
   }
 
   private get emittedThinkingEffortWarnings(): Set<string> {
@@ -594,21 +604,22 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   }
 
   private mediaStripSnapshotForTurn(
-    source: AgentLLMRequestSource | undefined,
+    _source: AgentLLMRequestSource | undefined,
   ): MediaStripSnapshot | undefined {
-    if (source?.type !== 'turn') return undefined;
-    return this.mediaStrippedTurns.get(source.turnId);
+    const keys = this.states.get(llmRequesterMediaStrippedTurnsKey);
+    return keys.length === 0 ? undefined : mediaStripSnapshotFromKeys(keys);
   }
 
   private markMediaStrippedRecoveryTurn(
     snapshot: MediaStripSnapshot,
-    source: AgentLLMRequestSource | undefined,
+    _source: AgentLLMRequestSource | undefined,
   ): void {
-    if (source?.type !== 'turn') return;
-    for (const id of this.mediaStrippedTurns.keys()) {
-      if (id < source.turnId) this.mediaStrippedTurns.delete(id);
-    }
-    this.mediaStrippedTurns.set(source.turnId, snapshot);
+    void this.dispatcher.dispatch(
+      new MediaStripped({
+        agentId: this.scopeContext.agentId,
+        keys: [...mediaStripSnapshotKeys(snapshot)],
+      }),
+    );
   }
 
   private markRecoveryTurn(set: Set<number>, source: AgentLLMRequestSource | undefined): void {

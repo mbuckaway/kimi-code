@@ -177,6 +177,11 @@ function mapContentPart(part: ContextMessage['content'][number]): MessageContent
         type: 'text',
         text: `[video:${part.videoUrl.url}]`,
       };
+    case 'file':
+      return {
+        type: 'text',
+        text: `[file:${part.fileId}]`,
+      };
   }
 }
 

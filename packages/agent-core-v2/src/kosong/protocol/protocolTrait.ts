@@ -1,8 +1,9 @@
 import type { ModelCapability } from '#/kosong/contract/capability';
 import type { ChatProviderError } from '#/kosong/contract/errors';
-import type { Message, VideoURLPart } from '#/kosong/contract/message';
+import type { FilePart, Message, VideoURLPart } from '#/kosong/contract/message';
 import type {
   GenerateOptions,
+  ImageUploadInput,
   ThinkingEffort,
   ToolCallIdPolicy,
   VideoUploadInput,
@@ -86,6 +87,12 @@ export interface ProtocolTrait {
     options: GenerateOptions | undefined,
     ctx: TraitContext,
   ): Promise<VideoURLPart>;
+
+  uploadImage?(
+    input: string | ImageUploadInput,
+    options: GenerateOptions | undefined,
+    ctx: TraitContext,
+  ): Promise<FilePart>;
 }
 
 export interface ResolvedTrait {

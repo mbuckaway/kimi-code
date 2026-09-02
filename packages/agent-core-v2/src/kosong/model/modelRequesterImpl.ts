@@ -1,8 +1,9 @@
 import { AsyncEventQueue } from '#/_base/asyncEventQueue';
-import type { VideoURLPart } from '#/kosong/contract/message';
+import type { FilePart, VideoURLPart } from '#/kosong/contract/message';
 import {
   APIContextOverflowError,
   APIStatusError,
+  ImageUploadUnsupportedError,
   isAbortError,
   VideoUploadUnsupportedError,
 } from '#/kosong/contract/errors';
@@ -10,6 +11,7 @@ import { generate, type GenerateResult } from '#/kosong/contract/generate';
 import type {
   ChatProvider,
   GenerateOptions,
+  ImageUploadInput,
   ProviderRequestAuth,
   StreamDecodeStats,
   VideoUploadInput,
@@ -74,6 +76,22 @@ export class ModelRequesterImpl implements ModelRequester {
     const uploadVideo = provider.uploadVideo.bind(provider);
     return this.runWithAuthRefresh((auth) =>
       uploadVideo(input, { signal: options?.signal, auth }),
+    );
+  }
+
+  async uploadImage(
+    input: string | ImageUploadInput,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<FilePart> {
+    const provider = this.resolveChatProvider();
+    if (provider.uploadImage === undefined) {
+      throw new ImageUploadUnsupportedError(
+        `Model "${this.model.id}" (protocol=${this.model.protocol}) does not support image upload`,
+      );
+    }
+    const uploadImage = provider.uploadImage.bind(provider);
+    return this.runWithAuthRefresh((auth) =>
+      uploadImage(input, { signal: options?.signal, auth }),
     );
   }
 

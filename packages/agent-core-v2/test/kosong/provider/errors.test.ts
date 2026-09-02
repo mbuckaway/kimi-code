@@ -15,7 +15,7 @@ import type { ProtocolAdapterConfig } from '#/kosong/protocol/protocol';
 import { traitConvertError, type TraitContext } from '#/kosong/protocol/protocolTrait';
 import { convertAnthropicError } from '#/kosong/provider/bases/anthropic/anthropic';
 import { convertGoogleGenAIError } from '#/kosong/provider/bases/google-genai/google-genai';
-import { convertOpenAIError } from '#/kosong/provider/bases/openai/openai-common';
+import { convertContentPart, convertOpenAIError } from '#/kosong/provider/bases/openai/openai-common';
 import { OpenAIResponsesStreamedMessage } from '#/kosong/provider/bases/openai/openai-responses';
 import { composeOpenAIChatHooks } from '#/kosong/provider/bases/openai/openaiHooks';
 import { kimiAnthropicTrait, kimiOpenAITrait } from '#/kosong/provider/providers/kimi/kimi.contrib';
@@ -418,5 +418,31 @@ describe('convertGoogleGenAIError RetryInfo recovery', () => {
     );
     expect(error).toBeInstanceOf(APIProviderRateLimitError);
     expect((error as APIStatusError).retryAfterMs).toBe(5000);
+  });
+});
+
+describe('convertContentPart image_url wire shape', () => {
+  it('emits only url for an image part with an id, dropping id from the OpenAI image_url contract', () => {
+    expect(
+      convertContentPart({
+        type: 'image_url',
+        imageUrl: { url: 'https://ex/img.png', id: 'img-1' },
+      }),
+    ).toEqual({ type: 'image_url', image_url: { url: 'https://ex/img.png' } });
+  });
+
+  it('emits only url for an image part without an id', () => {
+    expect(
+      convertContentPart({ type: 'image_url', imageUrl: { url: 'https://ex/img.png' } }),
+    ).toEqual({ type: 'image_url', image_url: { url: 'https://ex/img.png' } });
+  });
+});
+
+describe('convertContentPart file wire shape', () => {
+  it('emits a DeepSeek file content part from an uploaded file id', () => {
+    expect(convertContentPart({ type: 'file', fileId: 'file-api-abc' })).toEqual({
+      type: 'file',
+      file_id: 'file-api-abc',
+    });
   });
 });

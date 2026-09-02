@@ -246,6 +246,11 @@ describe('type guards', () => {
     expect(isContentPart(part)).toBe(true);
   });
 
+  it('isContentPart returns true for file', () => {
+    const part: StreamedMessagePart = { type: 'file', fileId: 'file-api-1' };
+    expect(isContentPart(part)).toBe(true);
+  });
+
   it('isContentPart returns false for tool call', () => {
     const part: StreamedMessagePart = {
       type: 'function',

@@ -96,6 +96,21 @@ export interface LlmRequest {
   readonly droppedCount?: number;
 }
 
+const mediaStrippedSchema = z.object({
+  agentId: z.string(),
+  keys: z.array(z.string()).readonly(),
+});
+
+export class MediaStripped extends AgentEvent2<z.infer<typeof mediaStrippedSchema>> {
+  static override readonly type = 'llm.media_stripped';
+  static override readonly durable = true;
+  static override readonly schema = mediaStrippedSchema;
+}
+export interface MediaStripped {
+  readonly agentId: string;
+  readonly keys: readonly string[];
+}
+
 export const llmRequestTraceKey = defineState(
   'llm.requestTrace',
   (): LlmRequestTraceState => ({ seenToolsHashes: [] }),

@@ -24,7 +24,7 @@ const DEFAULT_BASE_URL: Partial<Record<ProviderType, string>> = {
 /** Default context window (256K) used when KIMI_MODEL_MAX_CONTEXT_SIZE is unset. */
 const DEFAULT_MAX_CONTEXT_SIZE = 262144;
 
-/** Default capabilities when KIMI_MODEL_CAPABILITIES is unset (kimi models support both). */
+/** Default capabilities for a kimi provider when KIMI_MODEL_CAPABILITIES is unset (kimi models support images and thinking). */
 const DEFAULT_CAPABILITIES = ['image_in', 'thinking'];
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -119,7 +119,9 @@ export function applyEnvModelConfig(config: KimiConfig, env: Env = process.env):
     maxOutputRaw !== undefined
       ? parsePositiveInt(maxOutputRaw, 'KIMI_MODEL_MAX_OUTPUT_SIZE')
       : undefined;
-  const capabilities = parseCapabilities(env['KIMI_MODEL_CAPABILITIES']) ?? DEFAULT_CAPABILITIES;
+  const capabilities =
+    parseCapabilities(env['KIMI_MODEL_CAPABILITIES']) ??
+    (type === 'kimi' ? DEFAULT_CAPABILITIES : ['thinking']);
   const displayName = trimmed(env['KIMI_MODEL_DISPLAY_NAME']);
   const reasoningKey = trimmed(env['KIMI_MODEL_REASONING_KEY']);
   const adaptiveThinking = parseBooleanVar(

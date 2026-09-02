@@ -6,6 +6,7 @@ import { TestInstantiationService } from '#/_base/di/test';
 import { ILogService, type ILogger } from '#/_base/log/log';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
+import { mergeMediaStripSnapshots } from '#/agent/contextProjector/mediaProjection';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
@@ -833,6 +834,43 @@ describe('projector tool-exchange normalization', () => {
         .flatMap((message) => message.content)
         .find((part) => part.type === 'image_url');
       expect(image).toMatchObject({ imageUrl: { url, id: 'new-id' } });
+    });
+
+    it('unions the key sets of two snapshots so both images are stripped', () => {
+      const a = projector.captureMediaStripSnapshot([imageMessage('data:image/png;base64,AAA', 'a-id')]);
+      const b = projector.captureMediaStripSnapshot([imageMessage('data:image/png;base64,BBB', 'b-id')]);
+      const merged = mergeMediaStripSnapshots(a, b);
+
+      const projected = projectStripped(
+        [imageMessage('data:image/png;base64,AAA', 'a-id'), imageMessage('data:image/png;base64,BBB', 'b-id')],
+        merged,
+      );
+
+      expect(
+        projected
+          .flatMap((message) => message.content)
+          .some((part) => part.type === 'image_url'),
+      ).toBe(false);
+    });
+
+    it('merged snapshot strips an image present in only one of the sources', () => {
+      const a = projector.captureMediaStripSnapshot([imageMessage('data:image/png;base64,AAA', 'a-id')]);
+      const b = projector.captureMediaStripSnapshot([imageMessage('data:image/png;base64,BBB', 'b-id')]);
+      const merged = mergeMediaStripSnapshots(a, b);
+
+      const projectedA = projectStripped([imageMessage('data:image/png;base64,AAA', 'a-id')], merged);
+      const projectedB = projectStripped([imageMessage('data:image/png;base64,BBB', 'b-id')], merged);
+
+      expect(
+        projectedA
+          .flatMap((message) => message.content)
+          .some((part) => part.type === 'image_url'),
+      ).toBe(false);
+      expect(
+        projectedB
+          .flatMap((message) => message.content)
+          .some((part) => part.type === 'image_url'),
+      ).toBe(false);
     });
   });
 });

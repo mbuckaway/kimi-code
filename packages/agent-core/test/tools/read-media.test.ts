@@ -15,6 +15,7 @@ import type { ExecutableToolResult } from '../../src/loop';
 import {
   ReadMediaFileInputSchema,
   ReadMediaFileTool,
+  type ImageUploader,
 } from '../../src/tools/builtin/file/read-media';
 import { MAX_IMAGE_DECODE_BYTES } from '../../src/tools/support/image-compress';
 import { ImageLimits } from '../../src/tools/support/image-limits';
@@ -95,6 +96,7 @@ function makeReadMediaTool(
     readonly modelCapabilities?: ModelCapability | undefined;
     readonly telemetry?: TelemetryClient | undefined;
     readonly imageLimits?: ImageLimits | undefined;
+    readonly imageUploader?: ImageUploader | undefined;
   } = {},
 ): ReadMediaFileTool {
   const kaos = createFakeKaos({
@@ -108,6 +110,7 @@ function makeReadMediaTool(
     undefined,
     input.telemetry,
     input.imageLimits,
+    input.imageUploader,
   );
 }
 
@@ -194,6 +197,76 @@ describe('ReadMediaFileTool', () => {
       `data:image/png;base64,${data.toString('base64')}`,
     );
     expect(parts[2]).toEqual({ type: 'text', text: '</image>' });
+  });
+
+  it('uploads the image as a file part when image_file_api is declared', async () => {
+    const data = Buffer.concat([PNG_HEADER, Buffer.from('pngdata')]);
+    const uploader = vi
+      .fn<ImageUploader>()
+      .mockResolvedValue({ type: 'file', fileId: 'file-api-123' });
+    const tool = makeReadMediaTool({
+      stat: vi.fn<Kaos['stat']>().mockResolvedValue({ ...DEFAULT_STAT, stSize: data.length }),
+      readBytes: vi.fn<Kaos['readBytes']>().mockResolvedValue(data),
+      modelCapabilities: capabilities({ image_file_api: true }),
+      imageUploader: uploader,
+    });
+
+    const result = await executeTool(tool, {
+      turnId: 't1',
+      toolCallId: 'c1',
+      args: { path: '/workspace/sample.png' },
+      signal,
+    });
+
+    const parts = outputParts(result);
+    expect(parts[1]).toEqual({ type: 'file', fileId: 'file-api-123' });
+    expect(uploader).toHaveBeenCalledTimes(1);
+  });
+
+  it('inlines a base64 image when image_file_api is not declared', async () => {
+    const data = Buffer.concat([PNG_HEADER, Buffer.from('pngdata')]);
+    const uploader = vi.fn<ImageUploader>();
+    const tool = makeReadMediaTool({
+      stat: vi.fn<Kaos['stat']>().mockResolvedValue({ ...DEFAULT_STAT, stSize: data.length }),
+      readBytes: vi.fn<Kaos['readBytes']>().mockResolvedValue(data),
+      modelCapabilities: capabilities({ image_file_api: false }),
+      imageUploader: uploader,
+    });
+
+    const result = await executeTool(tool, {
+      turnId: 't1',
+      toolCallId: 'c1',
+      args: { path: '/workspace/sample.png' },
+      signal,
+    });
+
+    const parts = outputParts(result);
+    expect(parts[1]).toMatchObject({ type: 'image_url' });
+    expect(uploader).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a base64 image when the upload fails', async () => {
+    const data = Buffer.concat([PNG_HEADER, Buffer.from('pngdata')]);
+    const uploader = vi.fn<ImageUploader>().mockRejectedValue(new Error('files unavailable'));
+    const tool = makeReadMediaTool({
+      stat: vi.fn<Kaos['stat']>().mockResolvedValue({ ...DEFAULT_STAT, stSize: data.length }),
+      readBytes: vi.fn<Kaos['readBytes']>().mockResolvedValue(data),
+      modelCapabilities: capabilities({ image_file_api: true }),
+      imageUploader: uploader,
+    });
+
+    const result = await executeTool(tool, {
+      turnId: 't1',
+      toolCallId: 'c1',
+      args: { path: '/workspace/sample.png' },
+      signal,
+    });
+
+    const parts = outputParts(result);
+    expect(parts[1]).toMatchObject({ type: 'image_url' });
+    expect((parts[1] as { imageUrl: { url: string } }).imageUrl.url).toBe(
+      `data:image/png;base64,${data.toString('base64')}`,
+    );
   });
 
   it('emits a <system> summary with mime type and byte size for images', async () => {

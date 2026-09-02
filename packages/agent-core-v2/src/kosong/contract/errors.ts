@@ -60,6 +60,13 @@ export class VideoUploadUnsupportedError extends ChatProviderError {
   }
 }
 
+export class ImageUploadUnsupportedError extends ChatProviderError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ImageUploadUnsupportedError';
+  }
+}
+
 export class APITimeoutError extends ChatProviderError {
   constructor(message: string) {
     super(message, PROVIDER_CONNECTION_ERROR_CODE);
@@ -212,6 +219,11 @@ const IMAGE_FORMAT_STATUS_MESSAGE_PATTERNS = [
   /unable to process (?:the |input )?image/,
   /failed to decode (?:the )?image/,
   /invalid image(?: data| type| format)?/,
+  /this model does not support image/,
+  /unknown variant\s+\x60?image_url\x60?/,
+  /images are supported in user messages only/,
+  /image in (?:assistant|system|tool) message is not supported/,
+  /you have uploaded an unsupported image/,
 ] as const;
 
 const MEDIA_TYPE_FIELD_PATTERN = /(?:media|mime)_?type/;

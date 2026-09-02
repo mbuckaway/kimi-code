@@ -28,7 +28,12 @@ export interface VideoURLPart {
   videoUrl: { url: string; id?: string | undefined };
 }
 
-export type ContentPart = TextPart | ThinkPart | ImageURLPart | AudioURLPart | VideoURLPart;
+export interface FilePart {
+  type: 'file';
+  fileId: string;
+}
+
+export type ContentPart = TextPart | ThinkPart | ImageURLPart | AudioURLPart | VideoURLPart | FilePart;
 
 export interface ToolCall {
   type: 'function';
@@ -60,7 +65,12 @@ export interface Message {
 export function isContentPart(part: StreamedMessagePart): part is ContentPart {
   const t = part.type;
   return (
-    t === 'text' || t === 'think' || t === 'image_url' || t === 'audio_url' || t === 'video_url'
+    t === 'text' ||
+    t === 'think' ||
+    t === 'image_url' ||
+    t === 'audio_url' ||
+    t === 'video_url' ||
+    t === 'file'
   );
 }
 

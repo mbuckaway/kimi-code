@@ -13,6 +13,7 @@ import {
 } from '#/_base/di/scope';
 import { LifecycleScope } from '#/app/scopes';
 import { createScopedTestHost, createServices, stubPair } from '#/_base/di/test';
+import { MEDIA_STRIPPED_PLACEHOLDERS } from '#/agent/contextProjector/mediaProjection';
 import { buildKimiFileUrl } from '#/agent/media/kimiFileUrl';
 import { IAgentMediaResolverService } from '#/agent/media/mediaResolver';
 import { AgentMediaResolverService } from '#/agent/media/mediaResolverService';
@@ -156,9 +157,12 @@ async function plantCanonical(fileId: string, ext: string, bytes: Buffer): Promi
 function requester(opts: {
   videoIn?: boolean;
   imageIn?: boolean;
+  audioIn?: boolean;
+  imageFileApi?: boolean;
   protocol?: Protocol;
   providerType?: string;
   uploadVideo?: ModelRequester['uploadVideo'];
+  uploadImage?: ModelRequester['uploadImage'];
 }): ModelRequester {
   return {
     model: {
@@ -170,6 +174,8 @@ function requester(opts: {
       capabilities: {
         video_in: opts.videoIn ?? true,
         image_in: opts.imageIn ?? true,
+        audio_in: opts.audioIn ?? true,
+        image_file_api: opts.imageFileApi ?? false,
       } as unknown as ModelCapability,
       maxContextSize: 1000,
       alwaysThinking: false,
@@ -181,6 +187,7 @@ function requester(opts: {
       throw new Error('unused');
     },
     uploadVideo: opts.uploadVideo,
+    uploadImage: opts.uploadImage,
   };
 }
 
@@ -550,6 +557,51 @@ describe('AgentMediaResolverService image strategy', () => {
     expect(out[0]!.content).toEqual([{ type: 'text', text: expected }]);
   });
 
+  it('uploads a daemon-ref image as a file part when image_file_api is declared', async () => {
+    const upload = vi.fn(async (): Promise<{ type: 'file'; fileId: string }> => {
+      return { type: 'file', fileId: 'file-api-123' };
+    });
+    const res = resolver(new Map([[FILE_ID, { name: 'pic.png', bytes: PNG_BYTES }]]));
+    const message = imageMessage(buildKimiFileUrl(FILE_ID));
+
+    const out = await res.resolve(
+      [message],
+      requester({ imageFileApi: true, uploadImage: upload }),
+    );
+
+    expect(firstPart(out)).toEqual({ type: 'file', fileId: 'file-api-123' });
+    expect(upload).toHaveBeenCalledWith(
+      { data: PNG_BYTES, mimeType: 'image/png', filename: 'pic.png' },
+      undefined,
+    );
+  });
+
+  it('inlines a daemon-ref image as base64 when image_file_api is not declared', async () => {
+    const upload = vi.fn();
+    const res = resolver(new Map([[FILE_ID, { name: 'pic.png', bytes: PNG_BYTES }]]));
+    const message = imageMessage(buildKimiFileUrl(FILE_ID));
+
+    const out = await res.resolve([message], requester({ imageFileApi: false, uploadImage: upload }));
+
+    expect(firstPart(out)).toEqual({ type: 'image_url', imageUrl: { url: PNG_DATA_URL } });
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it('falls back to an inline base64 image when the upload fails', async () => {
+    const upload = vi.fn(async () => {
+      throw new Error('files endpoint unavailable');
+    });
+    const res = resolver(new Map([[FILE_ID, { name: 'pic.png', bytes: PNG_BYTES }]]));
+    const message = imageMessage(buildKimiFileUrl(FILE_ID));
+
+    const out = await res.resolve(
+      [message],
+      requester({ imageFileApi: true, uploadImage: upload }),
+    );
+
+    expect(firstPart(out)).toEqual({ type: 'image_url', imageUrl: { url: PNG_DATA_URL } });
+  });
+
   it('memoizes an inlined image across resolves without re-reading the bytes', async () => {
     const files = new Map([[FILE_ID, { name: 'pic.png', bytes: PNG_BYTES }]]);
     const counting = countingFileService(files);
@@ -664,6 +716,88 @@ describe('AgentMediaResolverService image strategy', () => {
       expect(counting.gets).toBe(reads);
     },
   );
+});
+
+describe('AgentMediaResolverService remote media capability gating', () => {
+  it('degrades a remote https image_url when the model lacks image_in', async () => {
+    const res = resolver(new Map());
+    const message = imageMessage('https://example.com/pic.png');
+
+    const out = await res.resolve([message], requester({ imageIn: false }));
+
+    expect(out[0]!.content).toEqual([
+      { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.image_url },
+    ]);
+  });
+
+  it('keeps a remote https image_url when the model supports image_in', async () => {
+    const res = resolver(new Map());
+    const message = imageMessage('https://example.com/pic.png');
+
+    const out = await res.resolve([message], requester({}));
+
+    expect(out[0]!.content).toEqual([
+      { type: 'image_url', imageUrl: { url: 'https://example.com/pic.png' } },
+    ]);
+  });
+
+  it('degrades a remote https video_url when the model lacks video_in', async () => {
+    const res = resolver(new Map());
+    const message = videoMessage('https://example.com/clip.mp4');
+
+    const out = await res.resolve([message], requester({ videoIn: false }));
+
+    expect(out[0]!.content).toEqual([
+      { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.video_url },
+    ]);
+  });
+
+  it('degrades a remote https audio_url when the model lacks audio_in', async () => {
+    const res = resolver(new Map());
+    const message: Message = {
+      role: 'user',
+      content: [{ type: 'audio_url', audioUrl: { url: 'https://example.com/clip.mp3' } }],
+      toolCalls: [],
+    };
+
+    const out = await res.resolve([message], requester({ audioIn: false }));
+
+    expect(out[0]!.content).toEqual([
+      { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.audio_url },
+    ]);
+  });
+
+  it('keeps non-media content and degrades only the unsupported remote part', async () => {
+    const res = resolver(new Map());
+    const textPart: ContentPart = { type: 'text', text: 'hello' };
+    const message: Message = {
+      role: 'user',
+      content: [textPart, { type: 'image_url', imageUrl: { url: 'https://example.com/pic.png' } }],
+      toolCalls: [],
+    };
+
+    const out = await res.resolve([message], requester({ imageIn: false }));
+
+    expect(out[0]!.content).toEqual([
+      textPart,
+      { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.image_url },
+    ]);
+  });
+
+  it('degrades remote media alongside an inlined daemon image in the same message', async () => {
+    const res = resolver(new Map([[FILE_ID, { name: 'pic.png', bytes: PNG_BYTES }]]));
+    const message = imageMessage(buildKimiFileUrl(FILE_ID), {
+      type: 'image_url',
+      imageUrl: { url: 'https://example.com/pic.png' },
+    });
+
+    const out = await res.resolve([message], requester({ imageIn: false }));
+
+    expect(out[0]!.content).toEqual([
+      { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS.image_url },
+      { type: 'text', text: IMAGE_UNAVAILABLE_TEXT },
+    ]);
+  });
 });
 
 describe('AgentMediaResolverService session-canonical display path', () => {

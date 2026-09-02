@@ -16,7 +16,13 @@
  * ladder so their delivery and fallback semantics stay identical.
  */
 
-import type { ContentPart, VideoUploadInput, VideoURLPart } from '@moonshot-ai/kosong';
+import type {
+  ContentPart,
+  FilePart,
+  ImageUploadInput,
+  VideoUploadInput,
+  VideoURLPart,
+} from '@moonshot-ai/kosong';
 
 import { ErrorCodes } from '../../errors';
 import { abortReason } from '../../utils/abort';
@@ -26,6 +32,12 @@ export type VideoUploader = (
   input: VideoUploadInput,
   options?: { signal?: AbortSignal },
 ) => Promise<VideoURLPart>;
+
+/** Uploads a local image and returns the provider-issued `file` part. */
+export type ImageUploader = (
+  input: ImageUploadInput,
+  options?: { signal?: AbortSignal },
+) => Promise<FilePart>;
 
 /**
  * Auth rejections from the upload channel that must surface (they drive
@@ -86,4 +98,28 @@ export async function deliverVideoContent(
     type: 'video_url',
     videoUrl: { url: `data:${input.mimeType};base64,${base64}` },
   };
+}
+
+/**
+ * Deliver an image through the provider's upload channel when available,
+ * falling back to an inline base64 part when the channel is missing or the
+ * upload fails for a non-auth reason. Mirrors {@link deliverVideoContent} so
+ * the image and video delivery semantics stay identical.
+ */
+export async function deliverImageContent(
+  input: ImageUploadInput,
+  uploader: ImageUploader | undefined,
+  signal?: AbortSignal,
+): Promise<ContentPart> {
+  if (uploader !== undefined) {
+    try {
+      return await (signal === undefined ? uploader(input) : uploader(input, { signal }));
+    } catch (error) {
+      if (signal?.aborted) throw abortReason(signal);
+      if (isAuthUploadError(error)) throw error;
+    }
+  }
+  if (signal?.aborted) throw abortReason(signal);
+  const base64 = Buffer.from(input.data).toString('base64');
+  return { type: 'image_url', imageUrl: { url: `data:${input.mimeType};base64,${base64}` } };
 }

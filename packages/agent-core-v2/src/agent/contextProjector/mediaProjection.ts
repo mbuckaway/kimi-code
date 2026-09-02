@@ -36,10 +36,6 @@ interface MediaContainer {
   readonly id?: string;
 }
 
-interface MediaStripSnapshotData {
-  readonly keys: ReadonlySet<string>;
-}
-
 type MediaContainerKeyCache = Partial<Record<DegradableMediaPart['type'], string>>;
 
 const MEDIA_CONTAINER_KEY_CACHE = new WeakMap<MediaContainer, MediaContainerKeyCache>();
@@ -77,8 +73,13 @@ function mediaStripKey(part: DegradableMediaPart): string {
   return key;
 }
 
-function mediaStripSnapshotKeys(snapshot: MediaStripSnapshot): ReadonlySet<string> {
-  return (snapshot as unknown as MediaStripSnapshotData).keys;
+export function mediaStripSnapshotKeys(snapshot: MediaStripSnapshot): ReadonlySet<string> {
+  const keys = (snapshot as unknown as { keys?: ReadonlySet<string> | undefined }).keys;
+  return keys ?? new Set();
+}
+
+export function mediaStripSnapshotFromKeys(keys: Iterable<string>): MediaStripSnapshot {
+  return Object.freeze({ keys: new Set(keys) }) as unknown as MediaStripSnapshot;
 }
 
 export function captureMediaStripSnapshot(
@@ -90,6 +91,15 @@ export function captureMediaStripSnapshot(
       if (isDegradableMediaPart(part)) keys.add(mediaStripKey(part));
     }
   }
+  return Object.freeze({ keys }) as unknown as MediaStripSnapshot;
+}
+
+export function mergeMediaStripSnapshots(
+  a: MediaStripSnapshot,
+  b: MediaStripSnapshot,
+): MediaStripSnapshot {
+  const keys = new Set(mediaStripSnapshotKeys(a));
+  for (const key of mediaStripSnapshotKeys(b)) keys.add(key);
   return Object.freeze({ keys }) as unknown as MediaStripSnapshot;
 }
 

@@ -460,6 +460,25 @@ describe('downgradeUnsupportedMedia', () => {
     expect(message.content[0]).toEqual(videoPart);
   });
 
+  it('gates a remote https image_url when the model lacks image_in', () => {
+    const capability: ModelCapability = {
+      ...makeCapability(1000),
+      video_in: true,
+      audio_in: true,
+    };
+    const remoteImage = {
+      type: 'image_url',
+      imageUrl: { url: 'https://example.com/pic.png' },
+    } as const;
+    const input = [mediaMessage([remoteImage])];
+
+    const out = downgradeUnsupportedMedia(input, capability);
+
+    expect(out[0]?.content).toEqual([
+      { type: 'text', text: '[image omitted: current model has no image input]' },
+    ]);
+  });
+
   it('KosongLLM strips unsupported video from messages sent to generate', async () => {
     let captured: readonly Message[] | undefined;
     const generate: GenerateFn = async (_p, _s, _t, messages) => {

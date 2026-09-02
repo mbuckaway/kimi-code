@@ -24,7 +24,7 @@
 // cross-reducers), blobs (the folding states whose blob codec offloads inline
 // media to blob storage), owner (the source file declaring the class).
 
-// Index (57 record types)
+// Index (58 record types)
 //   config.update                      profile                                               src/agent/profile/profileOps.ts
 //   context.append_loop_event          contextMemory, turn                                   src/agent/contextMemory/contextEvents.ts
 //   context.append_message             contextMemory, plan, task.notificationDelivery        src/agent/contextMemory/contextEvents.ts
@@ -44,6 +44,7 @@
 //   interaction.request                (none)                                                src/features/interaction/interactionOps.ts
 //   interaction.resolved               (none)                                                src/features/interaction/interactionOps.ts
 //   interruptionReminder.recorded      interruptionReminder                                  src/agent/interruptionReminder/interruptionReminderOps.ts
+//   llm.media_stripped                 llmRequester.mediaStrippedTurns                       src/agent/llmRequester/llmRequestOps.ts
 //   llm.request                        llm.requestTrace                                      src/agent/llmRequester/llmRequestOps.ts
 //   llm.tools_snapshot                 llm.requestTrace                                      src/agent/llmRequester/llmRequestOps.ts
 //   mcp.tools_discovered               mcp.discovery                                         src/agent/mcp/mcpDiscoveryOps.ts
@@ -128,7 +129,7 @@ interface ContextAppendMessagePayload {
   message: {
     role: 'system' | 'user' | 'assistant' | 'tool';
     name?: string;
-    content: ('text' | 'think' | 'image_url' | 'audio_url' | 'video_url')[];
+    content: ('text' | 'think' | 'image_url' | 'audio_url' | 'video_url' | 'file')[];
     toolCalls: {
       type: 'function';
       id: string;
@@ -337,6 +338,16 @@ interface InterruptionReminderRecordedPayload {
   _name: 'interruptionReminder.recorded';
   agentId: string;
   turnId: number;
+}
+
+/**
+ * states: llmRequester.mediaStrippedTurns
+ * owner: src/agent/llmRequester/llmRequestOps.ts
+ */
+interface LlmMediaStrippedPayload {
+  _name: 'llm.media_stripped';
+  agentId: string;
+  keys: string[];
 }
 
 /**
@@ -867,6 +878,7 @@ interface WirePayloadMap {
   "interaction.request": InteractionRequestPayload;
   "interaction.resolved": InteractionResolvedPayload;
   "interruptionReminder.recorded": InterruptionReminderRecordedPayload;
+  "llm.media_stripped": LlmMediaStrippedPayload;
   "llm.request": LlmRequestPayload;
   "llm.tools_snapshot": LlmToolsSnapshotPayload;
   "mcp.tools_discovered": McpToolsDiscoveredPayload;

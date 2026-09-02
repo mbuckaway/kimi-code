@@ -23,9 +23,10 @@ import {
 export interface OpenAIContentPart {
   type: string;
   text?: string | undefined;
-  image_url?: { url: string; id?: string | null } | undefined;
+  image_url?: { url: string } | undefined;
   audio_url?: { url: string; id?: string | null } | undefined;
   video_url?: { url: string; id?: string | null } | undefined;
+  file_id?: string | undefined;
 }
 
 /**
@@ -42,10 +43,7 @@ export function convertContentPart(part: ContentPart): OpenAIContentPart | null 
     case 'image_url':
       return {
         type: 'image_url',
-        image_url:
-          part.imageUrl.id === undefined
-            ? { url: part.imageUrl.url }
-            : { url: part.imageUrl.url, id: part.imageUrl.id },
+        image_url: { url: part.imageUrl.url },
       };
     case 'audio_url':
       return {
@@ -63,6 +61,8 @@ export function convertContentPart(part: ContentPart): OpenAIContentPart | null 
             ? { url: part.videoUrl.url }
             : { url: part.videoUrl.url, id: part.videoUrl.id },
       };
+    case 'file':
+      return { type: 'file', file_id: part.fileId };
     default:
       throw new Error(`Unknown content part type: ${(part as ContentPart).type}`);
   }
