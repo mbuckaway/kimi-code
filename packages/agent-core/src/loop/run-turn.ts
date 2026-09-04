@@ -59,6 +59,22 @@ export interface RunTurnInput {
    * this projection directly.
    */
   readonly buildMessagesMediaStripped?: LoopMessageBuilder | undefined;
+  /**
+   * Optional thinking-stripped rebuild of the request messages: EVERY thinking
+   * part removed from every message, text and tool calls kept. Used to resend
+   * once after the provider rejects its own `thinking` blocks — an
+   * unverifiable `signature` (a reasoning blob from a different wire, replayed
+   * after a mid-session model switch) or altered thinking in the latest
+   * assistant message (see `executeLoopStep`). After a successful stripped
+   * resend, later steps of the same turn build from this projection directly.
+   *
+   * The latch is turn-local, so a later turn starts from the normal projection
+   * and re-pays one rejection. v1 keeps no durable recovery state of any kind
+   * (`mediaDegradedActive` / `mediaStrippedActive` are locals too) and is
+   * reachable only behind `KIMI_CODE_LEGACY_FLAG` / `kimi.useAgentCoreV1`, so
+   * that cost is accepted rather than papered over with a persistence layer.
+   */
+  readonly buildMessagesThinkingStripped?: LoopMessageBuilder | undefined;
   readonly dispatchEvent: LoopEventDispatcher;
   readonly tools?: readonly ExecutableTool[] | undefined;
   /**
@@ -95,6 +111,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
     buildMessagesStrict,
     buildMessagesMediaDegraded,
     buildMessagesMediaStripped,
+    buildMessagesThinkingStripped,
     dispatchEvent,
     tools,
     buildTools,
@@ -121,6 +138,14 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
   // second 413: the rejected media is still in history, so later steps stay
   // stripped.
   let mediaStrippedActive = false;
+  // Same for the thinking-stripped resend after the provider refused its own
+  // `thinking` blocks: the offending block is still in history, so later steps
+  // of this turn skip it. Ranked BELOW both media projections — the
+  // thinking-stripped rebuild carries full media, and re-earning a 413 leads
+  // into a recovery ladder that has no thinking rung to fall back on. When both
+  // axes are active the thinking rung simply re-fires per step, which is
+  // bounded at one extra rejection plus one resend.
+  let thinkingStrippedActive = false;
   const recordStepUsage = async (
     stepUsage: TokenUsage,
   ): Promise<RecordStepUsageResult | void> => {
@@ -143,23 +168,25 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
       steps += 1;
       activeStep = steps;
       activeRequestTrace = undefined;
+      const projection = selectStepProjection({
+        buildMessages,
+        buildMessagesMediaDegraded,
+        buildMessagesMediaStripped,
+        buildMessagesThinkingStripped,
+        mediaDegradedActive,
+        mediaStrippedActive,
+        thinkingStrippedActive,
+      });
       const stepResult = await executeLoopStep({
         turnId,
         signal,
-        buildMessages:
-          mediaStrippedActive && buildMessagesMediaStripped !== undefined
-            ? buildMessagesMediaStripped
-            : mediaDegradedActive && buildMessagesMediaDegraded !== undefined
-              ? buildMessagesMediaDegraded
-              : buildMessages,
-        initialMediaProjection: mediaStrippedActive
-          ? 'media-stripped'
-          : mediaDegradedActive
-            ? 'media-degraded'
-            : 'normal',
+        buildMessages: projection.buildMessages,
+        initialMediaProjection: projection.mediaProjection,
+        initialThinkingStripped: projection.thinkingStripped,
         buildMessagesStrict,
         buildMessagesMediaDegraded,
         buildMessagesMediaStripped,
+        buildMessagesThinkingStripped,
         dispatchEvent,
         llm,
         tools,
@@ -179,6 +206,8 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
       activeStep = undefined;
       mediaDegradedActive = mediaDegradedActive || stepResult.mediaDegradedResendUsed === true;
       mediaStrippedActive = mediaStrippedActive || stepResult.mediaStrippedResendUsed === true;
+      thinkingStrippedActive =
+        thinkingStrippedActive || stepResult.thinkingStrippedResendUsed === true;
 
       if (stepResult.stopReason === 'tool_use') {
         continue;
@@ -233,6 +262,66 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
   }
 
   return { stopReason, steps, usage };
+}
+
+interface StepProjectionInput {
+  readonly buildMessages: LoopMessageBuilder;
+  readonly buildMessagesMediaDegraded: LoopMessageBuilder | undefined;
+  readonly buildMessagesMediaStripped: LoopMessageBuilder | undefined;
+  readonly buildMessagesThinkingStripped: LoopMessageBuilder | undefined;
+  readonly mediaDegradedActive: boolean;
+  readonly mediaStrippedActive: boolean;
+  readonly thinkingStrippedActive: boolean;
+}
+
+interface StepProjection {
+  readonly buildMessages: LoopMessageBuilder;
+  readonly mediaProjection: 'normal' | 'media-degraded' | 'media-stripped';
+  readonly thinkingStripped: boolean;
+}
+
+/**
+ * Pick the builder for a step from the turn's latched recovery state, and
+ * report which projection it produced so `executeLoopStep` does not re-attempt
+ * a rung the messages are already past.
+ *
+ * Media outranks thinking. The thinking-stripped rebuild carries full media, so
+ * preferring it after a media rejection would re-earn that rejection every
+ * step, and the media rung's inner recovery has no thinking fallback. With both
+ * latched, the thinking rung simply re-fires per step — bounded at one extra
+ * rejection plus one resend, and strictly better than looping on media.
+ */
+function selectStepProjection(input: StepProjectionInput): StepProjection {
+  if (input.mediaStrippedActive && input.buildMessagesMediaStripped !== undefined) {
+    return {
+      buildMessages: input.buildMessagesMediaStripped,
+      mediaProjection: 'media-stripped',
+      thinkingStripped: false,
+    };
+  }
+  if (input.mediaDegradedActive && input.buildMessagesMediaDegraded !== undefined) {
+    return {
+      buildMessages: input.buildMessagesMediaDegraded,
+      mediaProjection: 'media-degraded',
+      thinkingStripped: false,
+    };
+  }
+  if (input.thinkingStrippedActive && input.buildMessagesThinkingStripped !== undefined) {
+    return {
+      buildMessages: input.buildMessagesThinkingStripped,
+      mediaProjection: 'normal',
+      thinkingStripped: true,
+    };
+  }
+  // No latch matched a builder — a latch can only be set by a successful
+  // resend through its own builder, so this is the plain first-choice path.
+  // The reported projection describes the messages actually sent, which is
+  // whatever the host's own `buildMessages` produces.
+  return {
+    buildMessages: input.buildMessages,
+    mediaProjection: 'normal',
+    thinkingStripped: false,
+  };
 }
 
 function makeInterruptedEvent(

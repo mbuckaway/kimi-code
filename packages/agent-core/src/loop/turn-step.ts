@@ -13,6 +13,7 @@ import {
   APIRequestTooLargeError,
   isImageFormatError,
   isRecoverableRequestStructureError,
+  isThinkingSignatureError,
   type TokenUsage,
 } from '@moonshot-ai/kosong';
 import type { Logger } from '#/logging/types';
@@ -24,6 +25,7 @@ import {
   type LLM,
   type LLMChatParams,
   type LLMChatResponse,
+  type LLMRequestLogFields,
   type LLMRequestTrace,
 } from './llm';
 import { chatWithRetry } from './retry';
@@ -56,6 +58,15 @@ export interface ExecuteLoopStepDeps {
   readonly buildMessagesMediaDegraded?: LoopMessageBuilder | undefined;
   /** See RunTurnInput.buildMessagesMediaStripped. */
   readonly buildMessagesMediaStripped?: LoopMessageBuilder | undefined;
+  /** See RunTurnInput.buildMessagesThinkingStripped. */
+  readonly buildMessagesThinkingStripped?: LoopMessageBuilder | undefined;
+  /**
+   * True when `buildMessages` for this step already produced the
+   * thinking-stripped projection. Recovery only moves forward: a step that is
+   * already stripped has no further thinking to remove, so a repeat rejection
+   * propagates instead of re-sending byte-identical messages.
+   */
+  readonly initialThinkingStripped?: boolean;
   readonly dispatchEvent: LoopEventDispatcher;
   readonly llm: LLM;
   readonly tools?: readonly ExecutableTool[] | undefined;
@@ -93,6 +104,13 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
    * projection for the same reason as above.
    */
   readonly mediaStrippedResendUsed?: boolean;
+  /**
+   * True when this step only succeeded after resending with every thinking
+   * part stripped. The turn loop keeps later steps on that projection: the
+   * rejected block is still in history, so rebuilding it would pay a fresh
+   * 400 on every step of the turn.
+   */
+  readonly thinkingStrippedResendUsed?: boolean;
 }> {
   const {
     turnId,
@@ -102,6 +120,8 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
     buildMessagesStrict,
     buildMessagesMediaDegraded,
     buildMessagesMediaStripped,
+    buildMessagesThinkingStripped,
+    initialThinkingStripped = false,
     dispatchEvent,
     llm,
     tools,
@@ -166,10 +186,10 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
     messages,
     tools: stepTools ?? [],
     signal,
-    requestLogFields:
-      initialMediaProjection === 'normal'
-        ? undefined
-        : { projection: initialMediaProjection },
+    requestLogFields: initialProjectionLogFields(
+      initialMediaProjection,
+      initialThinkingStripped,
+    ),
     trace,
     ...createChatStreamingCallbacks({
       dispatchEvent,
@@ -206,6 +226,7 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
   let response: LLMChatResponse;
   let mediaDegradedResendUsed = false;
   let mediaStrippedResendUsed = false;
+  let thinkingStrippedResendUsed = false;
   try {
     response = await chatWithRetry({ ...retryInput, params: chatParams });
   } catch (error) {
@@ -385,6 +406,46 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
       log?.info('recovered after strict resend', {
         turnStep: `${turnId}.${String(currentStep)}`,
       });
+    } else if (buildMessagesThinkingStripped !== undefined && isThinkingSignatureError(error)) {
+      // The provider cannot accept its own `thinking` blocks back: the
+      // signature does not verify (a reasoning blob minted by a different wire,
+      // replayed here after the user switched models mid-session), or the
+      // latest assistant message's thinking was altered since the response.
+      // Both are deterministic 400s on history that is re-sent every turn, so
+      // the session stays wedged forever without intervention — and the strict
+      // rebuild above cannot help, because its repairs never touch thinking
+      // blocks. Resend ONCE with every thinking part removed. Read-side only:
+      // the stored history keeps its reasoning.
+      if (initialThinkingStripped) throw error;
+      signal.throwIfAborted();
+      log?.warn('provider rejected the thinking blocks in the request; resending with thinking stripped', {
+        turnStep: `${turnId}.${String(currentStep)}`,
+        model: llm.modelName,
+      });
+      const thinkingStrippedMessages = await buildMessagesThinkingStripped();
+      signal.throwIfAborted();
+      try {
+        response = await chatWithRetry({
+          ...retryInput,
+          params: {
+            ...chatParams,
+            messages: thinkingStrippedMessages,
+            requestLogFields: { projection: 'thinking-stripped' },
+          },
+        });
+      } catch (thinkingStrippedError) {
+        log?.error('thinking-stripped resend still rejected by provider', {
+          turnStep: `${turnId}.${String(currentStep)}`,
+          model: llm.modelName,
+          originalError: errorMessage(error),
+          thinkingStrippedError: errorMessage(thinkingStrippedError),
+        });
+        throw thinkingStrippedError;
+      }
+      thinkingStrippedResendUsed = true;
+      log?.info('recovered after thinking-stripped resend', {
+        turnStep: `${turnId}.${String(currentStep)}`,
+      });
     } else {
       throw error;
     }
@@ -465,7 +526,23 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
       stopTurnAfterStep && effectiveStopReason === 'tool_use' ? 'end_turn' : effectiveStopReason,
     mediaDegradedResendUsed,
     mediaStrippedResendUsed,
+    thinkingStrippedResendUsed,
   };
+}
+
+/**
+ * `requestLogFields` for the step's FIRST attempt. Media and thinking are
+ * orthogonal recovery axes; the media label wins when both are active because
+ * that is the projection `buildMessages` actually produced (see the builder
+ * precedence in `runTurn`).
+ */
+function initialProjectionLogFields(
+  mediaProjection: 'normal' | 'media-degraded' | 'media-stripped',
+  thinkingStripped: boolean,
+): Pick<LLMRequestLogFields, 'projection'> | undefined {
+  if (mediaProjection !== 'normal') return { projection: mediaProjection };
+  if (thinkingStripped) return { projection: 'thinking-stripped' };
+  return undefined;
 }
 
 /**

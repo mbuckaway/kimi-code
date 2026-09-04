@@ -73,6 +73,23 @@ export function projectStrict(
   );
 }
 
+export function stripThinkingParts(messages: readonly Message[]): readonly Message[] {
+  if (!messages.some(hasThinkPart)) return messages;
+  const out: Message[] = [];
+  for (const message of messages) {
+    if (!hasThinkPart(message)) {
+      out.push(message);
+      continue;
+    }
+    const stripped: Message = {
+      ...message,
+      content: message.content.filter((part) => part.type !== 'think'),
+    };
+    if (isWireSendableMessage(stripped)) out.push(stripped);
+  }
+  return out;
+}
+
 interface SliceLayout {
   readonly sizing: boolean;
   readonly lastNonToolIndex: number;
@@ -416,11 +433,22 @@ function wireSendableContent(content: readonly ContentPart[]): ContentPart[] {
   return content.filter((part) => part.type !== 'think' || part.encrypted !== undefined);
 }
 
+function hasThinkPart(message: Message): boolean {
+  return message.content.some((part) => part.type === 'think');
+}
+
+function isWireSendableMessage(message: Message): boolean {
+  if (message.role === 'tool') return true;
+  if (message.toolCalls.length > 0) return true;
+  if (hasDeclaredTools(message)) return true;
+  return !message.content.every(isVacuousContentPart);
+}
+
 function canMergeUserMessage(message: ContextMessage): boolean {
   return message.role === 'user' && message.origin?.kind === 'user';
 }
 
-function hasDeclaredTools(message: ContextMessage): boolean {
+function hasDeclaredTools(message: Message): boolean {
   return message.tools !== undefined && message.tools.length > 0;
 }
 

@@ -35,7 +35,7 @@ import type {
   StreamedMessagePart,
   ToolCall,
 } from '#/kosong/contract/message';
-import { isToolDeclarationOnlyMessage } from '#/kosong/contract/message';
+import { encryptedForProtocol, isToolDeclarationOnlyMessage } from '#/kosong/contract/message';
 import type {
   ChatProvider,
   FinishReason,
@@ -436,11 +436,12 @@ function convertMessage(message: Message, model: string): MessageParam {
     } else if (part.type === 'image_url') {
       blocks.push(imageUrlPartToAnthropic(part.imageUrl.url) as unknown as ContentBlockParam);
     } else if (part.type === 'think') {
-      if (part.encrypted !== undefined) {
+      const signature = encryptedForProtocol(part, 'anthropic');
+      if (signature !== undefined) {
         blocks.push({
           type: 'thinking',
           thinking: part.think,
-          signature: part.encrypted,
+          signature,
         } satisfies ThinkingBlockParam);
       } else if (shouldPreserveUnsignedThinking(model)) {
         blocks.push({ type: 'thinking', thinking: part.think } as unknown as ThinkingBlockParam);
@@ -644,12 +645,22 @@ class AnthropicStreamedMessage implements StreamedMessage {
           break;
         case 'thinking':
           yield block.signature !== undefined
-            ? { type: 'think' as const, think: block.thinking ?? '', encrypted: block.signature }
+            ? {
+                type: 'think' as const,
+                think: block.thinking ?? '',
+                encrypted: block.signature,
+                encryptedProtocol: 'anthropic' as const,
+              }
             : { type: 'think' as const, think: block.thinking ?? '' };
           break;
         case 'redacted_thinking':
           yield block.data !== undefined
-            ? { type: 'think' as const, think: '', encrypted: block.data }
+            ? {
+                type: 'think' as const,
+                think: '',
+                encrypted: block.data,
+                encryptedProtocol: 'anthropic' as const,
+              }
             : { type: 'think' as const, think: '' };
           break;
         case 'tool_use':
@@ -701,6 +712,7 @@ class AnthropicStreamedMessage implements StreamedMessage {
                 type: 'think',
                 think: '',
                 encrypted: (block as unknown as { data: string }).data,
+                encryptedProtocol: 'anthropic',
               };
               break;
             case 'tool_use':
@@ -737,6 +749,7 @@ class AnthropicStreamedMessage implements StreamedMessage {
                 type: 'think',
                 think: '',
                 encrypted: delta.signature,
+                encryptedProtocol: 'anthropic',
               };
               break;
           }

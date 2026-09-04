@@ -5,20 +5,24 @@
  * Run: pnpm exec vitest run packages/kosong/test/anthropic.test.ts
  */
 import { ChatProviderError } from '#/errors';
-import type { ContentPart, Message, StreamedMessagePart, ToolCall } from '#/message';
+import type { ContentPart, Message, StreamedMessagePart, ThinkPart, ToolCall } from '#/message';
+import { mergeInPlace } from '#/message';
 import { AnthropicChatProvider, resolveDefaultMaxTokens } from '#/providers/anthropic';
 import { matchKnownAnthropicModelProfile, matchUnknownClaudeProfile, LATEST_OPUS_PROFILE } from '#/providers/anthropic-profile';
 import type { GenerateOptions } from '#/provider';
 import type { Tool } from '#/tool';
 import { describe, it, expect, vi } from 'vitest';
 
-function makeAnthropicResponse(model: string = 'k25') {
+function makeAnthropicResponse(
+  model: string = 'k25',
+  overrides?: { content?: unknown[] },
+) {
   return {
     id: 'msg_test_123',
     type: 'message',
     role: 'assistant',
     model,
-    content: [{ type: 'text', text: 'Hello' }],
+    content: overrides?.content ?? [{ type: 'text', text: 'Hello' }],
     stop_reason: 'end_turn',
     usage: { input_tokens: 10, output_tokens: 5 },
   };
@@ -1760,6 +1764,246 @@ describe('AnthropicChatProvider', () => {
       });
     });
 
+    // -----------------------------------------------------------------------
+    // Reasoning-blob provenance
+    // -----------------------------------------------------------------------
+    //
+    // A mid-session model switch used to hand Anthropic another provider's
+    // opaque blob verbatim as its own `signature`; Anthropic verifies it
+    // cryptographically and answers
+    // `400 messages.1.content.0: Invalid `signature` in `thinking` block`,
+    // permanently poisoning the replayed history. Real Anthropic signatures
+    // look like `CAIShQ0KjgEI…`; an OpenAI Responses blob is a Fernet token
+    // (`gAAAAAB…`) and a Google one a `thoughtSignature` — nothing alike, but
+    // we gate on the provenance tag rather than sniffing the format.
+    describe('reasoning-blob provenance', () => {
+      const ANTHROPIC_SIGNATURE = 'CAIShQ0KjgEIBRgCIkCanthropic-signature-probe';
+      const OPENAI_RESPONSES_FERNET =
+        'gAAAAABpQ29wZW5haS1mZXJuZXQtcmVhc29uaW5nLWJsb2ItcHJvYmU=';
+      const GOOGLE_THOUGHT_SIGNATURE = 'CpEBCkYIBRgCIkBnb29nbGUtdGhvdWdodC1zaWduYXR1cmU=';
+
+      function signedThinkingHistory(think: ThinkPart): Message[] {
+        return [
+          { role: 'user', content: [{ type: 'text', text: 'Hi' }], toolCalls: [] },
+          { role: 'assistant', content: [think, { type: 'text', text: 'Hello!' }], toolCalls: [] },
+        ];
+      }
+
+      it('emits the signature for a blob tagged anthropic', async () => {
+        const messages = await captureAnthropicMessages(
+          'claude-opus-4-6',
+          signedThinkingHistory({
+            type: 'think',
+            think: 'Let me think...',
+            encrypted: ANTHROPIC_SIGNATURE,
+            encryptedProtocol: 'anthropic',
+          }),
+        );
+
+        expect(messages[1]).toEqual({
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Let me think...', signature: ANTHROPIC_SIGNATURE },
+            { type: 'text', text: 'Hello!', cache_control: { type: 'ephemeral' } },
+          ],
+        });
+      });
+
+      it('emits the signature for an untagged blob (legacy history stays compatible)', async () => {
+        const messages = await captureAnthropicMessages(
+          'claude-opus-4-6',
+          signedThinkingHistory({
+            type: 'think',
+            think: 'Let me think...',
+            encrypted: ANTHROPIC_SIGNATURE,
+          }),
+        );
+
+        expect(messages[1]).toEqual({
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Let me think...', signature: ANTHROPIC_SIGNATURE },
+            { type: 'text', text: 'Hello!', cache_control: { type: 'ephemeral' } },
+          ],
+        });
+      });
+
+      it.each([
+        ['openai_responses', OPENAI_RESPONSES_FERNET],
+        ['google-genai', GOOGLE_THOUGHT_SIGNATURE],
+        ['openai', 'openai-chat-reasoning-blob-probe'],
+      ] as const)(
+        'drops a blob tagged %s for a Claude model instead of replaying it as a signature',
+        async (tag, blob) => {
+          const messages = await captureAnthropicMessages(
+            'claude-opus-4-6',
+            signedThinkingHistory({
+              type: 'think',
+              think: 'Let me think...',
+              encrypted: blob,
+              encryptedProtocol: tag,
+            }),
+          );
+
+          // Claude rejects unsigned thinking, so the mismatch falls through to
+          // `shouldPreserveUnsignedThinking`, which drops the block entirely.
+          expect(messages[1]).toEqual({
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Hello!', cache_control: { type: 'ephemeral' } }],
+          });
+          expect(JSON.stringify(messages)).not.toContain(blob);
+        },
+      );
+
+      it('falls through to the unsigned branch on mismatch for Anthropic-compatible models', async () => {
+        const messages = await captureAnthropicMessages(
+          'compatible-model',
+          signedThinkingHistory({
+            type: 'think',
+            think: 'Let me think...',
+            encrypted: OPENAI_RESPONSES_FERNET,
+            encryptedProtocol: 'openai_responses',
+          }),
+        );
+
+        // PR #222 behaviour: a non-Claude Anthropic-protocol backend still
+        // needs the thinking back, just without a signature it cannot verify.
+        expect(messages[1]).toEqual({
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Let me think...' },
+            { type: 'text', text: 'Hello!', cache_control: { type: 'ephemeral' } },
+          ],
+        });
+        expect(JSON.stringify(messages)).not.toContain(OPENAI_RESPONSES_FERNET);
+      });
+
+      it('tags a signed thinking block from a non-stream response as anthropic', async () => {
+        const provider = createProvider();
+        (provider as any)._client.messages.create = vi.fn().mockResolvedValue(
+          makeAnthropicResponse('k25', {
+            content: [{ type: 'thinking', thinking: 'reasoned', signature: ANTHROPIC_SIGNATURE }],
+          }),
+        );
+
+        const parts = await collectParts(await provider.generate('', [], []));
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: 'reasoned',
+            encrypted: ANTHROPIC_SIGNATURE,
+            encryptedProtocol: 'anthropic',
+          },
+        ]);
+      });
+
+      it('tags a redacted thinking block from a non-stream response as anthropic', async () => {
+        const provider = createProvider();
+        (provider as any)._client.messages.create = vi.fn().mockResolvedValue(
+          makeAnthropicResponse('k25', {
+            content: [{ type: 'redacted_thinking', data: 'redacted-blob' }],
+          }),
+        );
+
+        const parts = await collectParts(await provider.generate('', [], []));
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: '',
+            encrypted: 'redacted-blob',
+            encryptedProtocol: 'anthropic',
+          },
+        ]);
+      });
+
+      it('leaves an unsigned non-stream thinking block untagged', async () => {
+        const provider = createProvider();
+        (provider as any)._client.messages.create = vi.fn().mockResolvedValue(
+          makeAnthropicResponse('k25', {
+            content: [{ type: 'thinking', thinking: 'reasoned' }],
+          }),
+        );
+
+        const parts = await collectParts(await provider.generate('', [], []));
+
+        expect(parts).toEqual([{ type: 'think', think: 'reasoned' }]);
+      });
+
+      it('tags a streamed signature_delta as anthropic', async () => {
+        const parts = await collectAnthropicStreamParts([
+          {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'signature_delta', signature: ANTHROPIC_SIGNATURE },
+          },
+        ]);
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: '',
+            encrypted: ANTHROPIC_SIGNATURE,
+            encryptedProtocol: 'anthropic',
+          },
+        ]);
+      });
+
+      it('tags a streamed redacted_thinking block as anthropic', async () => {
+        const parts = await collectAnthropicStreamParts([
+          {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'redacted_thinking', data: 'redacted-blob' },
+          },
+        ]);
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: '',
+            encrypted: 'redacted-blob',
+            encryptedProtocol: 'anthropic',
+          },
+        ]);
+      });
+
+      it('round-trips a streamed signature back onto the Anthropic wire', async () => {
+        // End-to-end provenance: what the adapter produced must be exactly what
+        // it is willing to send back, with no tag-driven downgrade.
+        const streamed = await collectAnthropicStreamParts([
+          { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+          {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'thinking_delta', thinking: 'reasoned' },
+          },
+          {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'signature_delta', signature: ANTHROPIC_SIGNATURE },
+          },
+        ]);
+        const merged: ThinkPart = { type: 'think', think: '' };
+        for (const part of streamed) mergeInPlace(merged, part);
+
+        const messages = await captureAnthropicMessages(
+          'claude-opus-4-6',
+          signedThinkingHistory(merged),
+        );
+
+        expect(merged.encryptedProtocol).toBe('anthropic');
+        expect(messages[1]).toEqual({
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'reasoned', signature: ANTHROPIC_SIGNATURE },
+            { type: 'text', text: 'Hello!', cache_control: { type: 'ephemeral' } },
+          ],
+        });
+      });
+    });
+
     it.each([
       'claude-opus-4-6',
       'opus-4-6',
@@ -2757,7 +3001,12 @@ describe('AnthropicChatProvider', () => {
       }
 
       expect(parts).toEqual([
-        { type: 'think', think: 'Let me think...', encrypted: 'sig_abc' },
+        {
+          type: 'think',
+          think: 'Let me think...',
+          encrypted: 'sig_abc',
+          encryptedProtocol: 'anthropic',
+        },
         { type: 'text', text: 'The answer is 4.' },
         {
           type: 'function',
@@ -2867,7 +3116,7 @@ describe('AnthropicChatProvider', () => {
         { type: 'think', think: '' },
         { type: 'think', think: 'Let me think' },
         { type: 'think', think: ' about this' },
-        { type: 'think', think: '', encrypted: 'sig_xyz' },
+        { type: 'think', think: '', encrypted: 'sig_xyz', encryptedProtocol: 'anthropic' },
         { type: 'text', text: '' },
         { type: 'text', text: 'The answer is 4.' },
       ]);
@@ -3218,7 +3467,7 @@ describe('AnthropicChatProvider', () => {
       const parts = await collectParts(result);
 
       expect(parts).toEqual([
-        { type: 'think', think: '', encrypted: 'enc_data_123' },
+        { type: 'think', think: '', encrypted: 'enc_data_123', encryptedProtocol: 'anthropic' },
         { type: 'text', text: '' },
         { type: 'text', text: 'Done.' },
       ]);

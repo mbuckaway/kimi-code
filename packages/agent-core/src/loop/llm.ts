@@ -35,9 +35,11 @@ export interface LLMRequestLogFields {
   readonly kind?: 'loop' | 'compaction';
   /** Set when the messages are a fallback resend projection: the strict
    * wire-compliant rebuild, the media-degraded rebuild after a
-   * request-too-large rejection, or the media-stripped rebuild after an
-   * image-format rejection / a second request-too-large rejection. */
-  readonly projection?: 'strict' | 'media-degraded' | 'media-stripped';
+   * request-too-large rejection, the media-stripped rebuild after an
+   * image-format rejection / a second request-too-large rejection, or the
+   * thinking-stripped rebuild after the provider refused its own `thinking`
+   * blocks (unverifiable signature / altered latest-assistant thinking). */
+  readonly projection?: 'strict' | 'media-degraded' | 'media-stripped' | 'thinking-stripped';
   /** Compaction only: messages dropped so far by overflow/empty shrinking. */
   readonly droppedCount?: number;
 }

@@ -211,7 +211,13 @@ function createService(
   const config: Partial<IConfigService> = {
     get: (() => undefined) as IConfigService['get'],
   };
-  const log = { info: () => undefined, warn: () => undefined };
+  const logWarnings: string[] = [];
+  const log = {
+    info: () => undefined,
+    warn: (message: string) => {
+      logWarnings.push(message);
+    },
+  };
   const telemetryRecords: TelemetryRecord[] = [];
   const telemetry = recordingTelemetry(telemetryRecords);
   const toolSelect: Partial<IAgentToolSelectService> = {
@@ -273,6 +279,7 @@ function createService(
     events,
     telemetryRecords,
     measuredCalls,
+    logWarnings,
   };
 }
 
@@ -775,6 +782,259 @@ describe('AgentLLMRequesterService combined recovery projections', () => {
       undefined,
       { media: 'degraded' },
       { structure: 'strict', media: 'degraded' },
+    ]);
+  });
+});
+
+describe('AgentLLMRequesterService thinking-stripped resend', () => {
+  const THINKING_SIGNATURE_400 = new APIStatusError(
+    400,
+    'messages.1.content.0: Invalid `signature` in `thinking` block',
+  );
+  const THINKING_CONFIG_400 = new APIStatusError(
+    400,
+    '"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.',
+  );
+  const STRUCTURAL_400 = new APIStatusError(400, 'messages: `tool_use` ids must be unique');
+  const IMAGE_FORMAT_400 = new APIStatusError(
+    400,
+    'unsupported image format: image/avif is not supported',
+  );
+  const BODY_TOO_LARGE_413 = new APIRequestTooLargeError(413, 'Request Entity Too Large');
+
+  function recordPolicies(
+    policies: (ProjectionPolicy | undefined)[],
+  ): Pick<IAgentContextProjectorService, 'project'> {
+    return {
+      project: (messages: readonly ContextMessage[], policy) => {
+        policies.push(policy);
+        return messages;
+      },
+    };
+  }
+
+  function projectionLabels(records: readonly WireRecord[]): unknown[] {
+    return records
+      .filter((record) => record.type === 'llm.request')
+      .map((record) => record['projection']);
+  }
+
+  it('resends once with the thinking stripped after a thinking-signature 400', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400),
+      recordPolicies(policies),
+    );
+
+    const result = await service.request();
+
+    expect(result.message.content).toEqual([{ type: 'text', text: 'ok' }]);
+    expect(calls.value).toBe(2);
+    expect(policies).toEqual([undefined, { thinking: 'strip' }]);
+  });
+
+  it('records the thinking-stripped projection label on the resent request', async () => {
+    const calls = { value: 0 };
+    const { service, dispatcher, records } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400),
+      recordPolicies([]),
+    );
+
+    await service.request();
+    await dispatcher.flush();
+
+    expect(projectionLabels(records)).toEqual([undefined, 'thinking-stripped']);
+  });
+
+  it('persists the recovery as a durable llm.thinking_stripped record', async () => {
+    const calls = { value: 0 };
+    const { service, dispatcher, records } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400),
+      recordPolicies([]),
+    );
+
+    await service.request();
+    await dispatcher.flush();
+
+    expect(records.filter((record) => record.type === 'llm.thinking_stripped')).toHaveLength(1);
+  });
+
+  it('keeps a later turn on the thinking-stripped projection after an earlier recovery', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400),
+      recordPolicies(policies),
+    );
+
+    await service.request({ source: { type: 'turn', turnId: 1, step: 1 } });
+    await service.request({ source: { type: 'turn', turnId: 2, step: 1 } });
+
+    expect(calls.value).toBe(3);
+    expect(policies).toEqual([undefined, { thinking: 'strip' }, { thinking: 'strip' }]);
+  });
+
+  it('stops after the thinking-stripped resend also fails with a thinking-signature 400', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400, [THINKING_SIGNATURE_400]),
+      recordPolicies(policies),
+    );
+
+    await expect(service.request()).rejects.toBe(THINKING_SIGNATURE_400);
+    expect(calls.value).toBe(2);
+    expect(policies).toEqual([undefined, { thinking: 'strip' }]);
+  });
+
+  it('logs the terminal case when the thinking-stripped resend still fails', async () => {
+    const calls = { value: 0 };
+    const { service, logWarnings } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400, [THINKING_SIGNATURE_400]),
+      recordPolicies([]),
+    );
+
+    await expect(service.request()).rejects.toBe(THINKING_SIGNATURE_400);
+    expect(logWarnings).toContain(
+      'provider still rejects thinking blocks after a full thinking strip; no projection recovery left',
+    );
+  });
+
+  it('does not resend for a thinking configuration 400', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service } = createService(
+      createRequester(calls, THINKING_CONFIG_400),
+      recordPolicies(policies),
+    );
+
+    await expect(service.request()).rejects.toBe(THINKING_CONFIG_400);
+    expect(calls.value).toBe(1);
+    expect(policies).toEqual([undefined]);
+  });
+
+  it('applies the thinking strip on top of strict after a structural rejection', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service, dispatcher, records } = createService(
+      createRequester(calls, STRUCTURAL_400, [THINKING_SIGNATURE_400]),
+      recordPolicies(policies),
+    );
+
+    await service.request();
+    await dispatcher.flush();
+
+    expect(calls.value).toBe(3);
+    expect(policies).toEqual([
+      undefined,
+      { structure: 'strict' },
+      { structure: 'strict', thinking: 'strip' },
+    ]);
+    expect(projectionLabels(records)).toEqual([undefined, 'strict', 'strict-thinking-stripped']);
+  });
+
+  it('applies the strict repair on top of a stripped thinking projection', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service, dispatcher, records } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400, [STRUCTURAL_400]),
+      recordPolicies(policies),
+    );
+
+    await service.request();
+    await dispatcher.flush();
+
+    expect(calls.value).toBe(3);
+    expect(policies).toEqual([
+      undefined,
+      { thinking: 'strip' },
+      { thinking: 'strip', structure: 'strict' },
+    ]);
+    expect(projectionLabels(records)).toEqual([
+      undefined,
+      'thinking-stripped',
+      'strict-thinking-stripped',
+    ]);
+  });
+
+  it('strips rejected media on top of a stripped thinking projection', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service, dispatcher, records } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400, [IMAGE_FORMAT_400]),
+      recordPolicies(policies),
+    );
+
+    await service.request();
+    await dispatcher.flush();
+
+    expect(calls.value).toBe(3);
+    expect(policies).toEqual([
+      undefined,
+      { thinking: 'strip' },
+      { thinking: 'strip', media: { strip: expect.anything() } },
+    ]);
+    expect(projectionLabels(records)).toEqual([
+      undefined,
+      'thinking-stripped',
+      'media-stripped-thinking-stripped',
+    ]);
+  });
+
+  it('degrades media on top of a stripped thinking projection after a 413', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service, dispatcher, records } = createService(
+      createRequester(calls, THINKING_SIGNATURE_400, [BODY_TOO_LARGE_413]),
+      recordPolicies(policies),
+    );
+
+    await service.request();
+    await dispatcher.flush();
+
+    expect(calls.value).toBe(3);
+    expect(policies).toEqual([
+      undefined,
+      { thinking: 'strip' },
+      { thinking: 'strip', media: 'degraded' },
+    ]);
+    expect(projectionLabels(records)).toEqual([
+      undefined,
+      'thinking-stripped',
+      'media-degraded-thinking-stripped',
+    ]);
+  });
+
+  it('composes the whole ladder into the fully repaired projection label', async () => {
+    const calls = { value: 0 };
+    const policies: (ProjectionPolicy | undefined)[] = [];
+    const { service, dispatcher, records } = createService(
+      createRequester(calls, STRUCTURAL_400, [
+        THINKING_SIGNATURE_400,
+        BODY_TOO_LARGE_413,
+        BODY_TOO_LARGE_413,
+      ]),
+      recordPolicies(policies),
+    );
+
+    await service.request({ source: { type: 'turn', turnId: 1, step: 1 } });
+    await dispatcher.flush();
+
+    expect(calls.value).toBe(5);
+    expect(policies).toEqual([
+      undefined,
+      { structure: 'strict' },
+      { structure: 'strict', thinking: 'strip' },
+      { structure: 'strict', thinking: 'strip', media: 'degraded' },
+      { structure: 'strict', thinking: 'strip', media: { strip: expect.anything() } },
+    ]);
+    expect(projectionLabels(records)).toEqual([
+      undefined,
+      'strict',
+      'strict-thinking-stripped',
+      'strict-media-degraded-thinking-stripped',
+      'strict-media-stripped-thinking-stripped',
     ]);
   });
 });

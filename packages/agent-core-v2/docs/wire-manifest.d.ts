@@ -24,7 +24,7 @@
 // cross-reducers), blobs (the folding states whose blob codec offloads inline
 // media to blob storage), owner (the source file declaring the class).
 
-// Index (58 record types)
+// Index (59 record types)
 //   config.update                      profile                                               src/agent/profile/profileOps.ts
 //   context.append_loop_event          contextMemory, turn                                   src/agent/contextMemory/contextEvents.ts
 //   context.append_message             contextMemory, plan, task.notificationDelivery        src/agent/contextMemory/contextEvents.ts
@@ -46,6 +46,7 @@
 //   interruptionReminder.recorded      interruptionReminder                                  src/agent/interruptionReminder/interruptionReminderOps.ts
 //   llm.media_stripped                 llmRequester.mediaStrippedTurns                       src/agent/llmRequester/llmRequestOps.ts
 //   llm.request                        llm.requestTrace                                      src/agent/llmRequester/llmRequestOps.ts
+//   llm.thinking_stripped              llmRequester.thinkingStripped                         src/agent/llmRequester/llmRequestOps.ts
 //   llm.tools_snapshot                 llm.requestTrace                                      src/agent/llmRequester/llmRequestOps.ts
 //   mcp.tools_discovered               mcp.discovery                                         src/agent/mcp/mcpDiscoveryOps.ts
 //   permission.record_approval_result  permissionRules                                       src/agent/permissionRules/permissionRulesOps.ts
@@ -375,8 +376,17 @@ interface LlmRequestPayload {
   messageCount: number;
   turnStep?: string;
   attempt?: string;
-  projection?: 'strict' | 'media-degraded' | 'media-stripped' | 'strict-media-degraded' | 'strict-media-stripped';
+  projection?: 'strict' | 'media-degraded' | 'media-stripped' | 'strict-media-degraded' | 'strict-media-stripped' | 'thinking-stripped' | 'strict-thinking-stripped' | 'media-degraded-thinking-stripped' | 'media-stripped-thinking-stripped' | 'strict-media-degraded-thinking-stripped' | 'strict-media-stripped-thinking-stripped';
   droppedCount?: number;
+}
+
+/**
+ * states: llmRequester.thinkingStripped
+ * owner: src/agent/llmRequester/llmRequestOps.ts
+ */
+interface LlmThinkingStrippedPayload {
+  _name: 'llm.thinking_stripped';
+  agentId: string;
 }
 
 /**
@@ -880,6 +890,7 @@ interface WirePayloadMap {
   "interruptionReminder.recorded": InterruptionReminderRecordedPayload;
   "llm.media_stripped": LlmMediaStrippedPayload;
   "llm.request": LlmRequestPayload;
+  "llm.thinking_stripped": LlmThinkingStrippedPayload;
   "llm.tools_snapshot": LlmToolsSnapshotPayload;
   "mcp.tools_discovered": McpToolsDiscoveredPayload;
   "permission.record_approval_result": PermissionRecordApprovalResultPayload;

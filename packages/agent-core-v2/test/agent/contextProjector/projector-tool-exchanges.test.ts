@@ -662,6 +662,244 @@ describe('projector tool-exchange normalization', () => {
     });
   });
 
+  describe('thinking strip projection', () => {
+    function thinkingAssistant(
+      content: ContextMessage['content'],
+      toolCallIds: readonly string[] = [],
+    ): ContextMessage {
+      return {
+        role: 'assistant',
+        content: [...content],
+        toolCalls: toolCallIds.map((id) => ({
+          type: 'function',
+          id,
+          name: 'Lookup',
+          arguments: '{}',
+        })),
+      };
+    }
+
+    function imageMessage(url: string): ContextMessage {
+      return {
+        role: 'user',
+        content: [{ type: 'image_url', imageUrl: { url } }],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      };
+    }
+
+    function projectStripped(history: readonly ContextMessage[]): readonly Message[] {
+      return projector.project(history, { thinking: 'strip' });
+    }
+
+    function roles(messages: readonly Message[]): string[] {
+      return messages.map((message) =>
+        message.role === 'tool' ? `tool:${message.toolCallId}` : message.role,
+      );
+    }
+
+    it('drops every think part from every message, signed and unsigned alike', () => {
+      const history = [
+        user('u1'),
+        thinkingAssistant([
+          { type: 'think', think: 'unsigned reasoning' },
+          { type: 'text', text: 'first answer' },
+        ]),
+        user('u2'),
+        thinkingAssistant([
+          { type: 'think', think: 'signed reasoning', encrypted: 'sig' },
+          { type: 'text', text: 'second answer' },
+        ]),
+      ];
+
+      const projected = projectStripped(history);
+
+      expect(projected.map((message) => message.content)).toEqual([
+        [{ type: 'text', text: 'u1' }],
+        [{ type: 'text', text: 'first answer' }],
+        [{ type: 'text', text: 'u2' }],
+        [{ type: 'text', text: 'second answer' }],
+      ]);
+    });
+
+    it('keeps text parts and tool calls untouched', () => {
+      const history = [
+        user('go'),
+        thinkingAssistant(
+          [
+            { type: 'think', think: 'planning', encrypted: 'sig' },
+            { type: 'text', text: 'calling the tool' },
+          ],
+          ['c1'],
+        ),
+        toolResult('c1', 'one'),
+      ];
+
+      const projected = projectStripped(history);
+
+      expect(roles(projected)).toEqual(['user', 'assistant', 'tool:c1']);
+      expect(projected[1]?.content).toEqual([{ type: 'text', text: 'calling the tool' }]);
+      expect(projected[1]?.toolCalls).toEqual([
+        { type: 'function', id: 'c1', name: 'Lookup', arguments: '{}' },
+      ]);
+      expect(projected[2]?.content).toEqual([{ type: 'text', text: 'one' }]);
+    });
+
+    it('drops a message left with nothing sendable at the projector', () => {
+      const history = [
+        user('u1'),
+        thinkingAssistant([{ type: 'think', think: 'signed reasoning', encrypted: 'sig' }]),
+      ];
+
+      const projected = projectStripped(history);
+
+      expect(roles(projected)).toEqual(['user']);
+      expect(projected.every((message) => message.content.length > 0)).toBe(true);
+    });
+
+    it('keeps a stripped assistant that still carries tool calls so its result stays paired', () => {
+      const history = [
+        user('go'),
+        thinkingAssistant([{ type: 'think', think: 'only reasoning', encrypted: 'sig' }], ['c1']),
+        toolResult('c1', 'one'),
+      ];
+
+      const projected = projectStripped(history);
+
+      expect(roles(projected)).toEqual(['user', 'assistant', 'tool:c1']);
+      expect(projected[1]?.content).toEqual([]);
+      expect(projected[1]?.toolCalls).toEqual([
+        { type: 'function', id: 'c1', name: 'Lookup', arguments: '{}' },
+      ]);
+    });
+
+    it('never drops a tool result whose only part was a think block', () => {
+      const history: ContextMessage[] = [
+        user('go'),
+        assistant('', ['c1']),
+        {
+          role: 'tool',
+          content: [{ type: 'think', think: 'tool-side reasoning', encrypted: 'sig' }],
+          toolCalls: [],
+          toolCallId: 'c1',
+        },
+      ];
+
+      const projected = projectStripped(history);
+
+      expect(roles(projected)).toEqual(['user', 'assistant', 'tool:c1']);
+      expect(projected[2]?.content).toEqual([]);
+    });
+
+    it('keeps a schema-only message the strip empties because it still declares tools', () => {
+      const schema = schemaMessage('Lookup');
+      const history: ContextMessage[] = [
+        user('u1'),
+        { ...schema, content: [{ type: 'think', think: 'schema reasoning', encrypted: 'sig' }] },
+      ];
+
+      const projected = projectStripped(history);
+
+      expect(roles(projected)).toEqual(['user', 'system']);
+      expect(projected[1]?.content).toEqual([]);
+      expect(projected[1]?.tools).toEqual(schema.tools);
+    });
+
+    it('leaves the projection unchanged when the thinking policy is absent', () => {
+      const history = [
+        user('u1'),
+        thinkingAssistant([
+          { type: 'think', think: 'unsigned reasoning' },
+          { type: 'text', text: 'answer' },
+        ]),
+        thinkingAssistant([{ type: 'think', think: '', encrypted: 'sig' }]),
+      ];
+
+      const baseline = projector.project(history);
+
+      expect(baseline.map((message) => message.content)).toEqual([
+        [{ type: 'text', text: 'u1' }],
+        [
+          { type: 'think', think: 'unsigned reasoning' },
+          { type: 'text', text: 'answer' },
+        ],
+        [{ type: 'think', think: '', encrypted: 'sig' }],
+      ]);
+      expect(projector.project(history, { thinking: undefined })).toEqual(baseline);
+    });
+
+    it('leaves a history without think parts identical to the default projection', () => {
+      const history = [user('go'), assistant('', ['c1']), toolResult('c1', 'one'), user('next')];
+
+      expect(projectStripped(history)).toEqual(project(history));
+    });
+
+    it('projects an empty history to an empty result', () => {
+      expect(projectStripped([])).toEqual([]);
+    });
+
+    it('does not report the strip as a projection repair', () => {
+      const history = [
+        user('u1'),
+        thinkingAssistant([{ type: 'think', think: 'signed reasoning', encrypted: 'sig' }]),
+      ];
+
+      projectStripped(history);
+
+      expect(repairPayloads(warnings)).toEqual([]);
+      expect(telemetryRecords).toEqual([]);
+    });
+
+    it('strips after structure: strict has merged consecutive assistants', () => {
+      const history = [
+        user('u1'),
+        thinkingAssistant([{ type: 'think', think: 'signed reasoning', encrypted: 'sig' }]),
+        thinkingAssistant([{ type: 'text', text: 'answer' }]),
+      ];
+
+      const projected = projector.project(history, { structure: 'strict', thinking: 'strip' });
+
+      expect(roles(projected)).toEqual(['user', 'assistant']);
+      expect(projected[1]?.content).toEqual([{ type: 'text', text: 'answer' }]);
+    });
+
+    it('drops a strict-projected assistant the strip empties, keeping the head user message', () => {
+      const history = [
+        user('u1'),
+        thinkingAssistant([{ type: 'think', think: 'signed reasoning', encrypted: 'sig' }]),
+        user('u2'),
+      ];
+
+      const projected = projector.project(history, { structure: 'strict', thinking: 'strip' });
+
+      expect(roles(projected)).toEqual(['user', 'user']);
+      expect(projected.map((message) => message.content)).toEqual([
+        [{ type: 'text', text: 'u1' }],
+        [{ type: 'text', text: 'u2' }],
+      ]);
+    });
+
+    it('composes with the media axis, stripping think parts and degrading older media', () => {
+      const history = [
+        imageMessage('data:image/png;base64,OLD1'),
+        thinkingAssistant([
+          { type: 'think', think: 'signed reasoning', encrypted: 'sig' },
+          { type: 'text', text: 'looking' },
+        ]),
+        imageMessage('data:image/png;base64,KEEP1'),
+        imageMessage('data:image/png;base64,KEEP2'),
+      ];
+
+      const projected = projector.project(history, { thinking: 'strip', media: 'degraded' });
+      const parts = projected.flatMap((message) => message.content);
+
+      expect(parts.some((part) => part.type === 'think')).toBe(false);
+      expect(
+        parts.filter((part) => part.type === 'image_url').map((part) => part.imageUrl.url),
+      ).toEqual(['data:image/png;base64,KEEP1', 'data:image/png;base64,KEEP2']);
+    });
+  });
+
   describe('project with media: degraded policy', () => {
     function imageMessage(url: string): ContextMessage {
       return {

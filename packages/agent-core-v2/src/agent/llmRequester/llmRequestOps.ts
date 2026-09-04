@@ -38,6 +38,20 @@ export interface LlmToolsSnapshot {
   readonly tools: readonly LlmRequestToolSchema[];
 }
 
+export const llmRequestProjectionSchema = z.enum([
+  'strict',
+  'media-degraded',
+  'media-stripped',
+  'strict-media-degraded',
+  'strict-media-stripped',
+  'thinking-stripped',
+  'strict-thinking-stripped',
+  'media-degraded-thinking-stripped',
+  'media-stripped-thinking-stripped',
+  'strict-media-degraded-thinking-stripped',
+  'strict-media-stripped-thinking-stripped',
+]);
+
 const llmRequestSchema = z.object({
   agentId: z.string(),
   kind: z.enum(['loop', 'compaction']),
@@ -57,7 +71,7 @@ const llmRequestSchema = z.object({
   messageCount: z.number(),
   turnStep: z.string().optional(),
   attempt: z.string().optional(),
-  projection: z.enum(['strict', 'media-degraded', 'media-stripped', 'strict-media-degraded', 'strict-media-stripped']).optional(),
+  projection: llmRequestProjectionSchema.optional(),
   droppedCount: z.number().optional(),
 });
 
@@ -92,7 +106,13 @@ export interface LlmRequest {
     | 'media-degraded'
     | 'media-stripped'
     | 'strict-media-degraded'
-    | 'strict-media-stripped';
+    | 'strict-media-stripped'
+    | 'thinking-stripped'
+    | 'strict-thinking-stripped'
+    | 'media-degraded-thinking-stripped'
+    | 'media-stripped-thinking-stripped'
+    | 'strict-media-degraded-thinking-stripped'
+    | 'strict-media-stripped-thinking-stripped';
   readonly droppedCount?: number;
 }
 
@@ -109,6 +129,19 @@ export class MediaStripped extends AgentEvent2<z.infer<typeof mediaStrippedSchem
 export interface MediaStripped {
   readonly agentId: string;
   readonly keys: readonly string[];
+}
+
+const thinkingStrippedSchema = z.object({
+  agentId: z.string(),
+});
+
+export class ThinkingStripped extends AgentEvent2<z.infer<typeof thinkingStrippedSchema>> {
+  static override readonly type = 'llm.thinking_stripped';
+  static override readonly durable = true;
+  static override readonly schema = thinkingStrippedSchema;
+}
+export interface ThinkingStripped {
+  readonly agentId: string;
 }
 
 export const llmRequestTraceKey = defineState(

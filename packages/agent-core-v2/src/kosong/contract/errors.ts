@@ -450,6 +450,19 @@ export function isRecoverableRequestStructureError(error: unknown): boolean {
   return STRUCTURAL_REQUEST_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
 }
 
+const THINKING_BLOCK_MESSAGE_PATTERNS = [
+  /invalid\s+['"`]?signature['"`]?\s+in\s+['"`]?thinking['"`]?\s+block/,
+  /thinking[\s\S]*blocks in the latest assistant message cannot be modified/,
+] as const;
+
+export function isThinkingSignatureError(error: unknown): boolean {
+  if (!(error instanceof APIStatusError)) return false;
+  if (error instanceof APIContextOverflowError) return false;
+  if (error.statusCode !== 400 && error.statusCode !== 422) return false;
+  const lowerMessage = error.message.toLowerCase();
+  return THINKING_BLOCK_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+}
+
 export function isProviderRateLimitError(error: unknown): boolean {
   if (error instanceof APIProviderQuotaExhaustedError) return false;
   if (error instanceof APIProviderRateLimitError) return true;

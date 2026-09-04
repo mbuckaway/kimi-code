@@ -6,6 +6,7 @@ import {
   degradeOlderMediaParts,
   project,
   stripMediaPartsBySnapshot,
+  stripThinkingParts,
   type ProjectionAnomaly,
 } from '../../../src/agent/context/projector';
 import type { ContextMessage } from '../../../src/agent/context/types';
@@ -647,6 +648,226 @@ describe('project drops vacuous (thinking-only) messages', () => {
     const anomalies: ProjectionAnomaly[] = [];
     project([user('u1'), emptyAssistant(), user('u2')], { onAnomaly: (a) => anomalies.push(a) });
     expect(anomalies).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Signed thinking is protocol-tagged, but the projector stays protocol-agnostic
+// ---------------------------------------------------------------------------
+//
+// `ThinkPart.encrypted` now carries an `encryptedProtocol` provenance tag, and
+// the provider adapters read it through `encryptedForProtocol` so a blob minted
+// by one wire is never replayed as another's signature. The projector runs
+// BEFORE a provider is chosen and has no protocol in scope, so its two
+// `encrypted` predicates — `isVacuousContentPart` and `wireSendableContent` —
+// deliberately gate on presence only. These tests pin that split: the projector
+// keeps every signed block regardless of tag, and the adapter decides.
+
+function taggedThinkPart(
+  think: string,
+  encrypted: string,
+  encryptedProtocol: 'anthropic' | 'openai' | 'openai_responses' | 'google-genai',
+): ContentPart {
+  return { type: 'think', think, encrypted, encryptedProtocol };
+}
+
+describe('project signed-thinking predicates are provenance-agnostic', () => {
+  it.each(['anthropic', 'openai', 'openai_responses', 'google-genai'] as const)(
+    'keeps an empty think block signed by %s (isVacuousContentPart)',
+    (protocol) => {
+      const part = taggedThinkPart('', 'blob', protocol);
+
+      const projected = project([user('u1'), thinkingAssistant([part])]);
+
+      expect(projected.map((m) => m.role)).toEqual(['user', 'assistant']);
+      expect(projected[1]?.content).toEqual([part]);
+    },
+  );
+
+  it.each(['anthropic', 'openai', 'openai_responses', 'google-genai'] as const)(
+    'keeps a whitespace-only think block signed by %s (isVacuousContentPart)',
+    (protocol) => {
+      const part = taggedThinkPart('   ', 'blob', protocol);
+
+      const projected = project([user('u1'), thinkingAssistant([part]), user('u2')]);
+
+      expect(projected.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    },
+  );
+
+  it('keeps a foreign-tagged signed think block as the sole content of a message (wireSendableContent)', () => {
+    // The adapter, not the projector, drops the unusable blob: kosong's
+    // Anthropic adapter falls through to its unsigned branch and its
+    // `shouldKeepConvertedMessage` guard removes an assistant message left
+    // with no blocks, so nothing invalid reaches the wire.
+    const part = taggedThinkPart('reasoning from the previous model', 'blob', 'openai_responses');
+
+    const projected = project([user('u1'), thinkingAssistant([part])]);
+
+    expect(projected.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(projected[1]?.content).toEqual([part]);
+  });
+
+  it('still drops an unsigned think block regardless of a stray tag', () => {
+    // A tag with no blob is not a signature; the part stays unsendable.
+    const projected = project([
+      user('u1'),
+      thinkingAssistant([
+        { type: 'think', think: 'reasoning', encryptedProtocol: 'anthropic' } as ContentPart,
+      ]),
+    ]);
+
+    expect(projected.map((m) => m.role)).toEqual(['user']);
+  });
+
+  it('preserves the provenance tag verbatim through projection', () => {
+    const part = taggedThinkPart('reasoning', 'blob', 'google-genai');
+
+    const projected = project([user('u1'), thinkingAssistant([part, textPart('answer')])]);
+
+    expect(projected[1]?.content).toEqual([part, textPart('answer')]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripThinkingParts — the v1 thinking-stripped recovery projection
+// ---------------------------------------------------------------------------
+
+describe('stripThinkingParts', () => {
+  it('removes every think part from every message, signed and unsigned alike', () => {
+    const messages = project([
+      user('u1'),
+      thinkingAssistant([thinkPart('unsigned'), textPart('first answer')]),
+      user('u2'),
+      thinkingAssistant([thinkPart('signed', 'sig'), textPart('second answer')]),
+    ]);
+
+    const stripped = stripThinkingParts(messages);
+
+    expect(stripped.map((m) => m.content)).toEqual([
+      [textPart('u1')],
+      [textPart('first answer')],
+      [textPart('u2')],
+      [textPart('second answer')],
+    ]);
+  });
+
+  it('removes a foreign-tagged signed think part too', () => {
+    const messages = project([
+      user('u1'),
+      thinkingAssistant([
+        taggedThinkPart('reasoning', 'gAAAAABfernet', 'openai_responses'),
+        textPart('answer'),
+      ]),
+    ]);
+
+    const stripped = stripThinkingParts(messages);
+
+    expect(stripped[1]?.content).toEqual([textPart('answer')]);
+    expect(JSON.stringify(stripped)).not.toContain('gAAAAABfernet');
+  });
+
+  it('keeps text parts and tool calls untouched', () => {
+    const messages = project([
+      user('go'),
+      {
+        role: 'assistant',
+        content: [thinkPart('planning', 'sig'), textPart('calling the tool')],
+        toolCalls: [{ type: 'function', id: 'a', name: 'Run', arguments: '{}' }],
+      },
+      tool('a'),
+    ]);
+
+    const stripped = stripThinkingParts(messages);
+
+    expect(stripped.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(stripped[1]?.content).toEqual([textPart('calling the tool')]);
+    expect(stripped[1]?.toolCalls).toEqual([
+      { type: 'function', id: 'a', name: 'Run', arguments: '{}' },
+    ]);
+  });
+
+  it('keeps an assistant the strip empties when it still carries tool calls', () => {
+    // Dropping it would orphan the following tool result and trade a thinking
+    // 400 for an adjacency 400.
+    const messages = project([
+      user('go'),
+      {
+        role: 'assistant',
+        content: [thinkPart('only reasoning', 'sig')],
+        toolCalls: [{ type: 'function', id: 'a', name: 'Run', arguments: '{}' }],
+      },
+      tool('a'),
+    ]);
+
+    const stripped = stripThinkingParts(messages);
+
+    expect(stripped.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(stripped[1]?.content).toEqual([]);
+  });
+
+  it('drops an assistant message the strip leaves with nothing sendable', () => {
+    const messages = project([user('u1'), thinkingAssistant([thinkPart('signed', 'sig')])]);
+
+    const stripped = stripThinkingParts(messages);
+
+    expect(stripped.map((m) => m.role)).toEqual(['user']);
+  });
+
+  it('never drops a tool result whose only part was a think block', () => {
+    const messages: Message[] = [
+      { role: 'user', content: [textPart('go')], toolCalls: [] },
+      {
+        role: 'assistant',
+        content: [],
+        toolCalls: [{ type: 'function', id: 'a', name: 'Run', arguments: '{}' }],
+      },
+      {
+        role: 'tool',
+        content: [thinkPart('tool-side reasoning', 'sig')],
+        toolCalls: [],
+        toolCallId: 'a',
+      },
+    ];
+
+    const stripped = stripThinkingParts(messages);
+
+    expect(stripped.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(stripped[2]?.content).toEqual([]);
+  });
+
+  it('returns the identical array reference when no message carries thinking', () => {
+    const messages = project([user('go'), assistant(['a']), tool('a'), user('next')]);
+
+    expect(stripThinkingParts(messages)).toBe(messages);
+  });
+
+  it('returns an empty result for an empty history', () => {
+    expect(stripThinkingParts([])).toEqual([]);
+  });
+
+  it('does not mutate the messages it is given', () => {
+    const messages = project([
+      user('u1'),
+      thinkingAssistant([thinkPart('signed', 'sig'), textPart('answer')]),
+    ]);
+    const before = structuredClone(messages);
+
+    stripThinkingParts(messages);
+
+    expect(messages).toEqual(before);
+  });
+
+  it('is idempotent — a second strip changes nothing', () => {
+    const messages = project([
+      user('u1'),
+      thinkingAssistant([thinkPart('signed', 'sig'), textPart('answer')]),
+      thinkingAssistant([thinkPart('dropped', 'sig')]),
+    ]);
+
+    const once = stripThinkingParts(messages);
+
+    expect(stripThinkingParts(once)).toEqual(once);
   });
 });
 

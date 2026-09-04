@@ -218,8 +218,9 @@ export interface AgentRecordEvents {
     turnStep?: string;
     attempt?: string;
     /** Set when this request is a fallback resend (strict rebuild,
-     * media-degraded rebuild, or media-stripped rebuild). */
-    projection?: 'strict' | 'media-degraded' | 'media-stripped';
+     * media-degraded rebuild, media-stripped rebuild, or thinking-stripped
+     * rebuild). */
+    projection?: 'strict' | 'media-degraded' | 'media-stripped' | 'thinking-stripped';
     /** Compaction only: messages dropped so far by overflow/empty shrinking. */
     droppedCount?: number;
   };

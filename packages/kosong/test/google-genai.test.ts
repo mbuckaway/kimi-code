@@ -6,7 +6,7 @@ import {
   APITimeoutError,
   ChatProviderError,
 } from '#/errors';
-import type { Message, StreamedMessagePart, ToolCall } from '#/message';
+import type { ContentPart, Message, StreamedMessagePart, ToolCall } from '#/message';
 import {
   convertGoogleGenAIError,
   GoogleGenAIChatProvider,
@@ -151,6 +151,118 @@ describe('GoogleGenAIChatProvider', () => {
           parts: [{ text: '', thought: true, thoughtSignature: 'thought-signature' }],
         },
       ]);
+    });
+
+    // -----------------------------------------------------------------------
+    // Reasoning-blob provenance
+    // -----------------------------------------------------------------------
+    //
+    // `thoughtSignature` is Google's own opaque token. Sending an Anthropic
+    // signature or an OpenAI Fernet blob in that slot would be a foreign blob
+    // replayed as ours — the same class of bug that yields
+    // "Invalid `signature` in `thinking` block" on the Anthropic wire.
+    describe('reasoning-blob provenance', () => {
+      const GOOGLE_THOUGHT_SIGNATURE = 'CpEBCkYIBRgCIkBnb29nbGUtdGhvdWdodC1zaWduYXR1cmU=';
+      const ANTHROPIC_SIGNATURE = 'CAIShQ0KjgEIBRgCIkCanthropic-signature-probe';
+      const OPENAI_RESPONSES_FERNET =
+        'gAAAAABpQ29wZW5haS1mZXJuZXQtcmVhc29uaW5nLWJsb2ItcHJvYmU=';
+
+      async function captureThoughtParts(think: ContentPart): Promise<unknown[]> {
+        const provider = createProvider({ stream: false });
+        const body = await captureRequestBody(provider, '', [], [
+          { role: 'assistant', content: [think], toolCalls: [] },
+        ]);
+        const contents = body['contents'] as Array<{ parts: unknown[] }>;
+        return contents[0]!.parts;
+      }
+
+      async function collectThoughtParts(part: Record<string, unknown>): Promise<StreamedMessagePart[]> {
+        const provider = createProvider({ stream: false });
+        ((provider as any)._client.models as Record<string, unknown>)['generateContent'] = vi
+          .fn()
+          .mockResolvedValue({
+            candidates: [{ content: { role: 'model', parts: [part] } }],
+          });
+
+        return collectParts(await provider.generate('', [], []));
+      }
+
+      it('emits thoughtSignature for a blob tagged google-genai', async () => {
+        const parts = await captureThoughtParts({
+          type: 'think',
+          think: 'reasoned',
+          encrypted: GOOGLE_THOUGHT_SIGNATURE,
+          encryptedProtocol: 'google-genai',
+        });
+
+        expect(parts).toEqual([
+          { text: 'reasoned', thought: true, thoughtSignature: GOOGLE_THOUGHT_SIGNATURE },
+        ]);
+      });
+
+      it('emits thoughtSignature for an untagged blob (legacy history stays compatible)', async () => {
+        const parts = await captureThoughtParts({
+          type: 'think',
+          think: 'reasoned',
+          encrypted: GOOGLE_THOUGHT_SIGNATURE,
+        });
+
+        expect(parts).toEqual([
+          { text: 'reasoned', thought: true, thoughtSignature: GOOGLE_THOUGHT_SIGNATURE },
+        ]);
+      });
+
+      it.each([
+        ['anthropic', ANTHROPIC_SIGNATURE],
+        ['openai_responses', OPENAI_RESPONSES_FERNET],
+        ['openai', 'openai-chat-reasoning-blob-probe'],
+      ] as const)('withholds a blob tagged %s from thoughtSignature', async (tag, blob) => {
+        const parts = await captureThoughtParts({
+          type: 'think',
+          think: 'reasoned',
+          encrypted: blob,
+          encryptedProtocol: tag,
+        });
+
+        // Only the signature is dropped; the reasoning text still round-trips.
+        expect(parts).toEqual([{ text: 'reasoned', thought: true }]);
+        expect(JSON.stringify(parts)).not.toContain(blob);
+      });
+
+      it('tags a thought signature from a non-stream response as google-genai', async () => {
+        const parts = await collectThoughtParts({
+          text: 'reasoned',
+          thought: true,
+          thoughtSignature: GOOGLE_THOUGHT_SIGNATURE,
+        });
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: 'reasoned',
+            encrypted: GOOGLE_THOUGHT_SIGNATURE,
+            encryptedProtocol: 'google-genai',
+          },
+        ]);
+      });
+
+      it('leaves a thought part without a signature untagged', async () => {
+        const parts = await collectThoughtParts({ text: 'reasoned', thought: true });
+
+        expect(parts).toEqual([{ type: 'think', think: 'reasoned' }]);
+      });
+
+      it('leaves a thought part with an empty signature untagged', async () => {
+        // Boundary: `thoughtSignature: ''` is already treated as absent by the
+        // adapter, so there is no blob to label.
+        const parts = await collectThoughtParts({
+          text: 'reasoned',
+          thought: true,
+          thoughtSignature: '',
+        });
+
+        expect(parts).toEqual([{ type: 'think', think: 'reasoned' }]);
+      });
     });
 
     it('maps json_schema response format to response config', async () => {
@@ -1141,7 +1253,12 @@ describe('GoogleGenAIChatProvider', () => {
       const parts = await collectParts(stream);
 
       expect(parts).toEqual([
-        { type: 'think', think: '', encrypted: 'thought-signature' },
+        {
+          type: 'think',
+          think: '',
+          encrypted: 'thought-signature',
+          encryptedProtocol: 'google-genai',
+        },
         {
           type: 'function',
           id: expect.stringMatching(/^lookup_/),

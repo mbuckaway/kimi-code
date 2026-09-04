@@ -12,7 +12,7 @@ import {
   APIStatusError,
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
-import type { Message } from '#/kosong/contract/message';
+import type { Message, ThinkPart } from '#/kosong/contract/message';
 import type {
   ChatProvider,
   GenerateOptions,
@@ -613,6 +613,7 @@ async function captureGoogleBody(
 async function captureResponsesBody(
   provider: ChatProvider,
   options?: GenerateOptions,
+  history: Message[] = PROBE_HISTORY,
 ): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> | undefined;
   const client = sdkClient(provider) as { responses: { create: unknown } };
@@ -620,7 +621,7 @@ async function captureResponsesBody(
     captured = params as Record<string, unknown>;
     return Promise.resolve(responsesEventStream());
   });
-  await drain(await provider.generate('', [], PROBE_HISTORY, options));
+  await drain(await provider.generate('', [], history, options));
   if (captured === undefined) throw new Error('expected responses.create to be called');
   return captured;
 }
@@ -740,6 +741,287 @@ describe('reasoning-only assistant history projection', () => {
     expect(contents[0]).toEqual({
       role: 'model',
       parts: [{ text: 'earlier reasoning', thought: true }],
+    });
+  });
+});
+
+const ANTHROPIC_SIGNATURE = 'ErUBCkYIBRgCIkCanthropic-thinking-signature-probe';
+const OPENAI_RESPONSES_BLOB = 'gAAAAABpQ29wZW5haS1mZXJuZXQtcmVhc29uaW5nLXByb2Jl';
+const GOOGLE_THOUGHT_SIGNATURE = 'CpEBCkYIBRgCIkBnb29nbGUtdGhvdWdodC1zaWduYXR1cmU=';
+
+function thinkOnlyHistory(think: ThinkPart): Message[] {
+  return [{ role: 'assistant', content: [think], toolCalls: [] }, ...PROBE_HISTORY];
+}
+
+describe('think provenance tagging across providers (encryptedProtocol)', () => {
+  it('drops a foreign-tagged think part from the Anthropic wire', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'anthropic',
+      modelName: 'claude-opus-4-6',
+      apiKey: 'sk-probe',
+    });
+
+    const { params } = await captureAnthropicBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: OPENAI_RESPONSES_BLOB,
+        encryptedProtocol: 'openai_responses',
+      }),
+    );
+    const messages = params['messages'] as Array<Record<string, unknown>>;
+
+    expect(messages.map((message) => message['role'])).toEqual(['user']);
+    expect(JSON.stringify(params)).not.toContain(OPENAI_RESPONSES_BLOB);
+  });
+
+  it('keeps an anthropic-tagged think part as a signed thinking block on the Anthropic wire', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'anthropic',
+      modelName: 'claude-opus-4-6',
+      apiKey: 'sk-probe',
+    });
+
+    const { params } = await captureAnthropicBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: ANTHROPIC_SIGNATURE,
+        encryptedProtocol: 'anthropic',
+      }),
+    );
+    const messages = params['messages'] as Array<Record<string, unknown>>;
+
+    expect(messages[0]).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'earlier reasoning', signature: ANTHROPIC_SIGNATURE },
+      ],
+    });
+  });
+
+  it('keeps an untagged think part as a signed thinking block on the Anthropic wire', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'anthropic',
+      modelName: 'claude-opus-4-6',
+      apiKey: 'sk-probe',
+    });
+
+    const { params } = await captureAnthropicBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: ANTHROPIC_SIGNATURE,
+      }),
+    );
+    const messages = params['messages'] as Array<Record<string, unknown>>;
+
+    expect(messages[0]).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'earlier reasoning', signature: ANTHROPIC_SIGNATURE },
+      ],
+    });
+  });
+
+  it('omits encrypted_content for a foreign-tagged think part on the Responses wire', async () => {
+    const provider = new OpenAIResponsesChatProvider({ model: 'gpt-4.1', apiKey: 'sk-probe' });
+
+    const body = await captureResponsesBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: ANTHROPIC_SIGNATURE,
+        encryptedProtocol: 'anthropic',
+      }),
+    );
+    const input = body['input'] as Array<Record<string, unknown>>;
+
+    expect(input[0]).toEqual({
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: 'earlier reasoning' }],
+      encrypted_content: undefined,
+    });
+    expect(JSON.stringify(body)).not.toContain(ANTHROPIC_SIGNATURE);
+  });
+
+  it('keeps encrypted_content for an openai_responses-tagged think part on the Responses wire', async () => {
+    const provider = new OpenAIResponsesChatProvider({ model: 'gpt-4.1', apiKey: 'sk-probe' });
+
+    const body = await captureResponsesBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: OPENAI_RESPONSES_BLOB,
+        encryptedProtocol: 'openai_responses',
+      }),
+    );
+    const input = body['input'] as Array<Record<string, unknown>>;
+
+    expect(input[0]).toEqual({
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: 'earlier reasoning' }],
+      encrypted_content: OPENAI_RESPONSES_BLOB,
+    });
+  });
+
+  it('keeps encrypted_content for an untagged think part on the Responses wire', async () => {
+    const provider = new OpenAIResponsesChatProvider({ model: 'gpt-4.1', apiKey: 'sk-probe' });
+
+    const body = await captureResponsesBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: OPENAI_RESPONSES_BLOB,
+      }),
+    );
+    const input = body['input'] as Array<Record<string, unknown>>;
+
+    expect(input[0]).toEqual({
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: 'earlier reasoning' }],
+      encrypted_content: OPENAI_RESPONSES_BLOB,
+    });
+  });
+
+  it('does not merge distinct foreign-tagged think parts into one reasoning item', async () => {
+    const provider = new OpenAIResponsesChatProvider({ model: 'gpt-4.1', apiKey: 'sk-probe' });
+
+    const history: Message[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'think',
+            think: 'first',
+            encrypted: ANTHROPIC_SIGNATURE,
+            encryptedProtocol: 'anthropic',
+          },
+          {
+            type: 'think',
+            think: 'second',
+            encrypted: GOOGLE_THOUGHT_SIGNATURE,
+            encryptedProtocol: 'google-genai',
+          },
+        ],
+        toolCalls: [],
+      },
+      ...PROBE_HISTORY,
+    ];
+
+    const body = await captureResponsesBody(provider, undefined, history);
+    const input = body['input'] as Array<Record<string, unknown>>;
+
+    expect(input.filter((item) => item['type'] === 'reasoning')).toEqual([
+      {
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: 'first' }],
+        encrypted_content: undefined,
+      },
+      {
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: 'second' }],
+        encrypted_content: undefined,
+      },
+    ]);
+  });
+
+  it('omits thoughtSignature for a foreign-tagged think part on the Google GenAI wire', async () => {
+    const provider = new GoogleGenAIChatProvider({
+      model: 'gemini-2.5-flash',
+      apiKey: 'sk-probe',
+      stream: false,
+    });
+
+    const body = await captureGoogleBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: OPENAI_RESPONSES_BLOB,
+        encryptedProtocol: 'openai_responses',
+      }),
+    );
+    const contents = body['contents'] as Array<Record<string, unknown>>;
+
+    expect(contents[0]).toEqual({
+      role: 'model',
+      parts: [{ text: 'earlier reasoning', thought: true }],
+    });
+    expect(JSON.stringify(body)).not.toContain(OPENAI_RESPONSES_BLOB);
+  });
+
+  it('keeps thoughtSignature for a google-genai-tagged think part on the Google GenAI wire', async () => {
+    const provider = new GoogleGenAIChatProvider({
+      model: 'gemini-2.5-flash',
+      apiKey: 'sk-probe',
+      stream: false,
+    });
+
+    const body = await captureGoogleBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: GOOGLE_THOUGHT_SIGNATURE,
+        encryptedProtocol: 'google-genai',
+      }),
+    );
+    const contents = body['contents'] as Array<Record<string, unknown>>;
+
+    expect(contents[0]).toEqual({
+      role: 'model',
+      parts: [
+        {
+          text: 'earlier reasoning',
+          thought: true,
+          thoughtSignature: GOOGLE_THOUGHT_SIGNATURE,
+        },
+      ],
+    });
+  });
+
+  it('keeps thoughtSignature for an untagged think part on the Google GenAI wire', async () => {
+    const provider = new GoogleGenAIChatProvider({
+      model: 'gemini-2.5-flash',
+      apiKey: 'sk-probe',
+      stream: false,
+    });
+
+    const body = await captureGoogleBody(
+      provider,
+      undefined,
+      thinkOnlyHistory({
+        type: 'think',
+        think: 'earlier reasoning',
+        encrypted: GOOGLE_THOUGHT_SIGNATURE,
+      }),
+    );
+    const contents = body['contents'] as Array<Record<string, unknown>>;
+
+    expect(contents[0]).toEqual({
+      role: 'model',
+      parts: [
+        {
+          text: 'earlier reasoning',
+          thought: true,
+          thoughtSignature: GOOGLE_THOUGHT_SIGNATURE,
+        },
+      ],
     });
   });
 });

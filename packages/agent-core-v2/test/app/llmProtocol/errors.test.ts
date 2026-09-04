@@ -13,6 +13,7 @@ import {
   isProviderRateLimitError,
   isRecoverableRequestStructureError,
   isRetryableGenerateError,
+  isThinkingSignatureError,
   isToolExchangeAdjacencyError,
   normalizeAPIStatusError,
   parseRetryAfterMs,
@@ -714,6 +715,120 @@ describe('isRecoverableRequestStructureError', () => {
     expect(isRecoverableRequestStructureError(new APIStatusError(401, 'unauthorized'))).toBe(false);
     expect(isRecoverableRequestStructureError(new APIStatusError(400, 'Bad request'))).toBe(false);
     expect(isRecoverableRequestStructureError(new Error('roles must alternate'))).toBe(false);
+  });
+});
+
+const ANTHROPIC_INVALID_THINKING_SIGNATURE =
+  'messages.1.content.0: Invalid `signature` in `thinking` block';
+
+const ANTHROPIC_THINKING_PREFIX_MISMATCH =
+  'messages.3.content.0: Invalid `signature` in `thinking` block. The block is bound to a ' +
+  'different conversation. Remove the block, or set ' +
+  '`thinking.block_binding.prefix_mismatch_behavior` to "drop_block".';
+
+const ANTHROPIC_THINKING_PREFIX_MISMATCH_BETA =
+  `${ANTHROPIC_THINKING_PREFIX_MISMATCH} That setting requires the ` +
+  '`thinking-binding-controls-2026-08-01` value in the `anthropic-beta` header.';
+
+const ANTHROPIC_LATEST_ASSISTANT_THINKING_MODIFIED =
+  'messages.5.content.0: `thinking` or `redacted_thinking` blocks in the latest assistant ' +
+  'message cannot be modified. These blocks must remain as they were in the original response.';
+
+const THINKING_CONFIGURATION_REJECTIONS = [
+  '"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and ' +
+    '"output_config.effort" to control thinking behavior.',
+  '"thinking.type.disabled" is not supported for this model.',
+  'adaptive thinking is not supported on this model',
+  'block_binding: Extra inputs are not permitted',
+  'tool_choice: type "tool" and "any" are not supported for this model.',
+  'This model does not support assistant message prefill. The conversation must end with a user message.',
+];
+
+describe('isThinkingSignatureError', () => {
+  it.each([
+    ['the bare invalid-signature 400', ANTHROPIC_INVALID_THINKING_SIGNATURE],
+    ['the prefix-mismatch invalid-signature 400', ANTHROPIC_THINKING_PREFIX_MISMATCH],
+    ['the prefix-mismatch 400 with the beta-header suffix', ANTHROPIC_THINKING_PREFIX_MISMATCH_BETA],
+    ['the modified-latest-assistant-thinking 400', ANTHROPIC_LATEST_ASSISTANT_THINKING_MODIFIED],
+  ])('matches %s', (_label, message) => {
+    expect(isThinkingSignatureError(new APIStatusError(400, message))).toBe(true);
+  });
+
+  it('also matches a 422 with the same shape', () => {
+    expect(
+      isThinkingSignatureError(new APIStatusError(422, ANTHROPIC_INVALID_THINKING_SIGNATURE)),
+    ).toBe(true);
+    expect(
+      isThinkingSignatureError(
+        new APIStatusError(422, ANTHROPIC_LATEST_ASSISTANT_THINKING_MODIFIED),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches on a substring, independent of the messages.{i}.content.{j} prefix', () => {
+    expect(
+      isThinkingSignatureError(
+        new APIStatusError(400, 'messages.417.content.12: Invalid `signature` in `thinking` block'),
+      ),
+    ).toBe(true);
+    expect(
+      isThinkingSignatureError(new APIStatusError(400, 'Invalid `signature` in `thinking` block')),
+    ).toBe(true);
+  });
+
+  it.each(THINKING_CONFIGURATION_REJECTIONS)(
+    'does not match the configuration-family rejection "%s"',
+    (message) => {
+      expect(isThinkingSignatureError(new APIStatusError(400, message))).toBe(false);
+    },
+  );
+
+  it('does not match a context-overflow 400 or an unrelated 400', () => {
+    expect(
+      isThinkingSignatureError(
+        new APIContextOverflowError(400, ANTHROPIC_INVALID_THINKING_SIGNATURE),
+      ),
+    ).toBe(false);
+    expect(isThinkingSignatureError(new APIStatusError(400, 'Bad request'))).toBe(false);
+    expect(
+      isThinkingSignatureError(new APIStatusError(400, 'messages: roles must alternate')),
+    ).toBe(false);
+  });
+
+  it.each([401, 413, 429, 500])('does not match a %i outside the 400/422 window', (statusCode) => {
+    expect(
+      isThinkingSignatureError(new APIStatusError(statusCode, ANTHROPIC_INVALID_THINKING_SIGNATURE)),
+    ).toBe(false);
+  });
+
+  it('does not match non-APIStatusError values', () => {
+    expect(isThinkingSignatureError(new Error(ANTHROPIC_INVALID_THINKING_SIGNATURE))).toBe(false);
+    expect(isThinkingSignatureError(ANTHROPIC_INVALID_THINKING_SIGNATURE)).toBe(false);
+    expect(isThinkingSignatureError({ statusCode: 400, message: 'Invalid `signature`' })).toBe(
+      false,
+    );
+    expect(isThinkingSignatureError(null)).toBe(false);
+    expect(isThinkingSignatureError(undefined)).toBe(false);
+  });
+});
+
+describe('thinking-signature errors stay out of the strict re-projection ladder', () => {
+  it.each([
+    ANTHROPIC_INVALID_THINKING_SIGNATURE,
+    ANTHROPIC_THINKING_PREFIX_MISMATCH,
+    ANTHROPIC_THINKING_PREFIX_MISMATCH_BETA,
+    ANTHROPIC_LATEST_ASSISTANT_THINKING_MODIFIED,
+  ])('is not classified as a recoverable request-structure error: "%s"', (message) => {
+    expect(isRecoverableRequestStructureError(new APIStatusError(400, message))).toBe(false);
+  });
+
+  it.each([
+    ANTHROPIC_INVALID_THINKING_SIGNATURE,
+    ANTHROPIC_THINKING_PREFIX_MISMATCH,
+    ANTHROPIC_THINKING_PREFIX_MISMATCH_BETA,
+    ANTHROPIC_LATEST_ASSISTANT_THINKING_MODIFIED,
+  ])('is not classified as a tool-exchange adjacency error: "%s"', (message) => {
+    expect(isToolExchangeAdjacencyError(new APIStatusError(400, message))).toBe(false);
   });
 });
 
