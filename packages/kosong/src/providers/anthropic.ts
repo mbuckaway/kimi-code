@@ -8,7 +8,7 @@ import {
   throwIfAbortError,
 } from '#/errors';
 import type { ContentPart, Message, StreamedMessagePart, ToolCall } from '#/message';
-import { isToolDeclarationOnlyMessage } from '#/message';
+import { encryptedForProtocol, isToolDeclarationOnlyMessage } from '#/message';
 import type {
   ChatProvider,
   FinishReason,
@@ -531,6 +531,14 @@ function convertMessage(message: Message, model: string): MessageParam {
       // valid signature and always supplies one, so Anthropic-sourced history
       // always takes this branch.
       //
+      // Foreign-signed: the blob belongs to another wire (the user switched
+      // models mid-session and the history carries an OpenAI Responses Fernet
+      // token or a Google thoughtSignature). Anthropic verifies signatures
+      // cryptographically and answers `400 ... Invalid `signature` in
+      // `thinking` block` — which, since history is replayed every turn,
+      // poisons the session permanently. `encryptedForProtocol` withholds such
+      // a blob so the part falls through to the unsigned handling below.
+      //
       // Unsigned: still PRESERVE the thinking, emitted *without* a `signature`
       // field. Anthropic-compatible backends (e.g. Kimi) stream thinking with
       // no signature_delta, yet reject a tool-call turn whose thinking is gone
@@ -538,11 +546,12 @@ function convertMessage(message: Message, model: string): MessageParam {
       // here is what broke multi-step tool use on those backends. Claude
       // models reject unsigned thinking blocks, so those are only preserved
       // for non-Claude Anthropic-compatible models.
-      if (part.encrypted !== undefined) {
+      const signature = encryptedForProtocol(part, 'anthropic');
+      if (signature !== undefined) {
         blocks.push({
           type: 'thinking',
           thinking: part.think,
-          signature: part.encrypted,
+          signature,
         } satisfies ThinkingBlockParam);
       } else if (shouldPreserveUnsignedThinking(model)) {
         blocks.push({ type: 'thinking', thinking: part.think } as unknown as ThinkingBlockParam);
@@ -761,12 +770,22 @@ class AnthropicStreamedMessage implements StreamedMessage {
           break;
         case 'thinking':
           yield block.signature !== undefined
-            ? { type: 'think' as const, think: block.thinking ?? '', encrypted: block.signature }
+            ? {
+                type: 'think' as const,
+                think: block.thinking ?? '',
+                encrypted: block.signature,
+                encryptedProtocol: 'anthropic' as const,
+              }
             : { type: 'think' as const, think: block.thinking ?? '' };
           break;
         case 'redacted_thinking':
           yield block.data !== undefined
-            ? { type: 'think' as const, think: '', encrypted: block.data }
+            ? {
+                type: 'think' as const,
+                think: '',
+                encrypted: block.data,
+                encryptedProtocol: 'anthropic' as const,
+              }
             : { type: 'think' as const, think: '' };
           break;
         case 'tool_use':
@@ -819,6 +838,7 @@ class AnthropicStreamedMessage implements StreamedMessage {
                 type: 'think',
                 think: '',
                 encrypted: (block as unknown as { data: string }).data,
+                encryptedProtocol: 'anthropic',
               };
               break;
             case 'tool_use':
@@ -861,6 +881,7 @@ class AnthropicStreamedMessage implements StreamedMessage {
                 type: 'think',
                 think: '',
                 encrypted: delta.signature,
+                encryptedProtocol: 'anthropic',
               };
               break;
           }

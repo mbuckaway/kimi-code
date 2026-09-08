@@ -1,3 +1,5 @@
+import type { Protocol } from '#/kosong/protocol/protocol';
+
 import type { Tool } from './tool';
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
@@ -11,6 +13,14 @@ export interface ThinkPart {
   type: 'think';
   think: string;
   encrypted?: string;
+  encryptedProtocol?: Protocol;
+}
+
+export function encryptedForProtocol(part: ThinkPart, protocol: Protocol): string | undefined {
+  if (part.encryptedProtocol !== undefined && part.encryptedProtocol !== protocol) {
+    return undefined;
+  }
+  return part.encrypted;
 }
 
 export interface ImageURLPart {
@@ -104,6 +114,7 @@ export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessag
     target.think += source.think;
     if (source.encrypted !== undefined) {
       target.encrypted = source.encrypted;
+      target.encryptedProtocol = source.encryptedProtocol;
     }
     return true;
   }

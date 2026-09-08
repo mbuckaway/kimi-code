@@ -27,7 +27,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (App: 0 keys · Workspace: 6 keys · Session: 9 keys · Agent: 80 keys)
+// Index (App: 0 keys · Workspace: 6 keys · Session: 9 keys · Agent: 81 keys)
 //   App
 //   Workspace
 //     workspaceDirs.ephemeralDirs          src/workspace/workspaceDirs/workspaceDirsService.ts
@@ -71,6 +71,7 @@
 //     llmRequester.lastConfigLogSignature             src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.mediaDegradedTurns                 src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.mediaStrippedTurns                 src/agent/llmRequester/llmRequesterService.ts
+//     llmRequester.thinkingStripped                   src/agent/llmRequester/llmRequesterService.ts
 //     llmRequester.turnConfigs                        src/agent/llmRequester/llmRequesterService.ts
 //     loop.disposing                                  src/agent/loop/loopService.ts
 //     loop.lastRequestTraceId                         src/agent/loop/loopService.ts
@@ -1051,6 +1052,7 @@ export interface AgentStateSnapshot {
       type: 'think';
       think: string;
       encrypted?: string;
+      encryptedProtocol?: 'anthropic' | 'openai' | 'openai_responses' | 'google-genai';
     } | /* ImageURLPart — packages/agent-core-v2/src/kosong/contract/message.ts */ {
       type: 'image_url';
       imageUrl: {
@@ -1197,6 +1199,8 @@ export interface AgentStateSnapshot {
   'llmRequester.mediaDegradedTurns': Set<number>;
   // replayable · durable — folds: MediaStripped
   'llmRequester.mediaStrippedTurns': readonly string[];
+  // replayable · durable — folds: ThinkingStripped
+  'llmRequester.thinkingStripped': boolean;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {
       readonly modelAlias: string;
@@ -1265,6 +1269,7 @@ export interface AgentStateSnapshot {
     type: 'think';
     think: string;
     encrypted?: string;
+    encryptedProtocol?: 'anthropic' | 'openai' | 'openai_responses' | 'google-genai';
   } | /* ImageURLPart — packages/agent-core-v2/src/kosong/contract/message.ts */ {
     type: 'image_url';
     imageUrl: {

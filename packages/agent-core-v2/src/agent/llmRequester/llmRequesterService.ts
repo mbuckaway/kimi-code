@@ -29,6 +29,7 @@ import {
   isImageFormatError,
   isRecoverableRequestStructureError,
   isRetryableGenerateError,
+  isThinkingSignatureError,
 } from '#/kosong/contract/errors';
 import { isToolCall, type Message, type StreamedMessagePart } from '#/kosong/contract/message';
 import { type ThinkingEffort } from '#/kosong/contract/provider';
@@ -72,9 +73,11 @@ import {
 } from './toolCallIdNormalizer';
 import {
   LlmRequest,
+  llmRequestProjectionSchema,
   llmRequestTraceKey,
   LlmToolsSnapshot,
   MediaStripped,
+  ThinkingStripped,
   type LlmRequestPayload,
   type LlmRequestToolSchema,
 } from './llmRequestOps';
@@ -154,6 +157,12 @@ export const llmRequesterMediaStrippedTurnsKey = defineState(
       }
     }
   });
+export const llmRequesterThinkingStrippedKey = defineState(
+  'llmRequester.thinkingStripped',
+  (): boolean => false,
+)
+  .replayable({ schema: z.boolean() })
+  .on(ThinkingStripped, () => true);
 export const llmRequesterEmittedThinkingEffortWarningsKey = defineState<Set<string>>(
   'llmRequester.emittedThinkingEffortWarnings',
   () => new Set(),
@@ -188,6 +197,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.states.contributeState(llmRequesterTurnConfigsKey);
     this.states.contributeState(llmRequesterMediaDegradedTurnsKey);
     this.states.contributeState(llmRequesterMediaStrippedTurnsKey);
+    this.states.contributeState(llmRequesterThinkingStrippedKey);
     this.states.contributeState(llmRequesterEmittedThinkingEffortWarningsKey);
   }
 
@@ -330,12 +340,15 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.toolCallIdNormalizer.seedFrom(this.context.get());
     const shaped = this.toolSelect.shapeHistory(request.messages);
     const recoveredStrip = this.mediaStripSnapshotForTurn(request.source);
-    let policy: ProjectionPolicy | undefined =
+    const recoveredMedia: ProjectionPolicy | undefined =
       recoveredStrip !== undefined
         ? { media: { strip: recoveredStrip } }
         : this.isRecoveryTurn(this.mediaDegradedTurns, request.source)
           ? { media: 'degraded' }
           : undefined;
+    let policy: ProjectionPolicy | undefined = this.thinkingStrippedForTurn(request.source)
+      ? { ...recoveredMedia, thinking: 'strip' }
+      : recoveredMedia;
     const captureMediaStripPolicy = (): { readonly strip: MediaStripSnapshot } => {
       const snapshot = this.projector.captureMediaStripSnapshot(shaped);
       this.markMediaStrippedRecoveryTurn(snapshot, request.source);
@@ -551,6 +564,27 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       });
       return { ...policy, structure: 'strict' };
     }
+    if (isThinkingSignatureError(raw)) {
+      if (policy?.thinking === undefined) {
+        signal?.throwIfAborted();
+        this.log.warn(
+          'provider rejected a thinking block signature; resending with thinking stripped',
+          {
+            model: request.model.name,
+            ...request.logFields,
+          },
+        );
+        this.markThinkingStrippedRecovery(request.source);
+        return { ...policy, thinking: 'strip' };
+      }
+      this.log.warn(
+        'provider still rejects thinking blocks after a full thinking strip; no projection recovery left',
+        {
+          model: request.model.name,
+          ...request.logFields,
+        },
+      );
+    }
     return undefined;
   }
 
@@ -619,6 +653,16 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         agentId: this.scopeContext.agentId,
         keys: [...mediaStripSnapshotKeys(snapshot)],
       }),
+    );
+  }
+
+  private thinkingStrippedForTurn(_source: AgentLLMRequestSource | undefined): boolean {
+    return this.states.get(llmRequesterThinkingStrippedKey);
+  }
+
+  private markThinkingStrippedRecovery(_source: AgentLLMRequestSource | undefined): void {
+    void this.dispatcher.dispatch(
+      new ThinkingStripped({ agentId: this.scopeContext.agentId }),
     );
   }
 
@@ -853,30 +897,45 @@ function numberField(fields: AgentLLMRequestLogFields, key: string): number | un
 
 type LlmRequestProjection = NonNullable<LlmRequestPayload['projection']>;
 
+type ProjectionStructureAxis = 'default' | 'strict';
+type ProjectionMediaAxis = 'default' | 'media-degraded' | 'media-stripped';
+type ProjectionThinkingAxis = 'default' | 'thinking-stripped';
+
+const PROJECTION_NAMES = {
+  'default|default|default': undefined,
+  'default|default|thinking-stripped': 'thinking-stripped',
+  'default|media-degraded|default': 'media-degraded',
+  'default|media-degraded|thinking-stripped': 'media-degraded-thinking-stripped',
+  'default|media-stripped|default': 'media-stripped',
+  'default|media-stripped|thinking-stripped': 'media-stripped-thinking-stripped',
+  'strict|default|default': 'strict',
+  'strict|default|thinking-stripped': 'strict-thinking-stripped',
+  'strict|media-degraded|default': 'strict-media-degraded',
+  'strict|media-degraded|thinking-stripped': 'strict-media-degraded-thinking-stripped',
+  'strict|media-stripped|default': 'strict-media-stripped',
+  'strict|media-stripped|thinking-stripped': 'strict-media-stripped-thinking-stripped',
+} as const satisfies Record<
+  `${ProjectionStructureAxis}|${ProjectionMediaAxis}|${ProjectionThinkingAxis}`,
+  LlmRequestProjection | undefined
+>;
+
 function projectionNameOf(policy: ProjectionPolicy | undefined): LlmRequestProjection | undefined {
-  if (policy?.structure === 'strict') {
-    if (policy.media === 'degraded') return 'strict-media-degraded';
-    if (typeof policy.media === 'object') return 'strict-media-stripped';
-    return 'strict';
-  }
   if (policy === undefined) return undefined;
-  if (policy.media === 'degraded') return 'media-degraded';
-  if (typeof policy.media === 'object') return 'media-stripped';
-  return undefined;
+  const structure: ProjectionStructureAxis = policy.structure === 'strict' ? 'strict' : 'default';
+  const media: ProjectionMediaAxis =
+    policy.media === 'degraded'
+      ? 'media-degraded'
+      : typeof policy.media === 'object'
+        ? 'media-stripped'
+        : 'default';
+  const thinking: ProjectionThinkingAxis =
+    policy.thinking === 'strip' ? 'thinking-stripped' : 'default';
+  return PROJECTION_NAMES[`${structure}|${media}|${thinking}`];
 }
 
 function projectionField(fields: AgentLLMRequestLogFields): LlmRequestProjection | undefined {
-  const value = fields['projection'];
-  switch (value) {
-    case 'strict':
-    case 'media-degraded':
-    case 'media-stripped':
-    case 'strict-media-degraded':
-    case 'strict-media-stripped':
-      return value;
-    default:
-      return undefined;
-  }
+  const parsed = llmRequestProjectionSchema.safeParse(fields['projection']);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function fingerprint(content: string): string {

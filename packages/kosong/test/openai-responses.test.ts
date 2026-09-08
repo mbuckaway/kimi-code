@@ -403,6 +403,285 @@ describe('OpenAIResponsesChatProvider', () => {
       expect(reasoningItems[1]).toMatchObject({ encrypted_content: 'enc_2' });
     });
 
+    // -----------------------------------------------------------------------
+    // Reasoning-blob provenance
+    // -----------------------------------------------------------------------
+    //
+    // `reasoning.encrypted_content` is an OpenAI Fernet token (`gAAAAAB…`).
+    // Replaying an Anthropic signature or a Google thoughtSignature in that
+    // slot is meaningless to the Responses API, so a foreign-tagged blob is
+    // withheld. Untagged blobs stay compatible (legacy history).
+    describe('reasoning-blob provenance', () => {
+      const OPENAI_RESPONSES_FERNET =
+        'gAAAAABpQ29wZW5haS1mZXJuZXQtcmVhc29uaW5nLWJsb2ItcHJvYmU=';
+      const ANTHROPIC_SIGNATURE = 'CAIShQ0KjgEIBRgCIkCanthropic-signature-probe';
+      const GOOGLE_THOUGHT_SIGNATURE = 'CpEBCkYIBRgCIkBnb29nbGUtdGhvdWdodC1zaWduYXR1cmU=';
+
+      async function captureReasoningItems(
+        content: ContentPart[],
+      ): Promise<Array<Record<string, unknown>>> {
+        const provider = createProvider();
+        const body = await captureRequestBody(provider, '', [], [
+          { role: 'assistant', content, toolCalls: [] },
+        ]);
+        const input = body['input'] as Array<Record<string, unknown>>;
+        return input.filter((item) => item['type'] === 'reasoning');
+      }
+
+      async function collectNonStreamParts(
+        output: unknown[],
+      ): Promise<StreamedMessagePart[]> {
+        const provider = createProvider();
+        (provider as any)._stream = false;
+        ((provider as any)._client.responses as unknown as Record<string, unknown>)['create'] = vi
+          .fn()
+          .mockResolvedValue({
+            id: 'resp_provenance',
+            object: 'response',
+            status: 'completed',
+            output,
+            usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+          });
+
+        const stream = await provider.generate('', [], []);
+        const parts: StreamedMessagePart[] = [];
+        for await (const part of stream) parts.push(part);
+        return parts;
+      }
+
+      it('keeps encrypted_content for a blob tagged openai_responses', async () => {
+        const items = await captureReasoningItems([
+          {
+            type: 'think',
+            think: 'reasoned',
+            encrypted: OPENAI_RESPONSES_FERNET,
+            encryptedProtocol: 'openai_responses',
+          },
+        ]);
+
+        expect(items).toEqual([
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'reasoned' }],
+            encrypted_content: OPENAI_RESPONSES_FERNET,
+          },
+        ]);
+      });
+
+      it('keeps encrypted_content for an untagged blob (legacy history stays compatible)', async () => {
+        const items = await captureReasoningItems([
+          { type: 'think', think: 'reasoned', encrypted: OPENAI_RESPONSES_FERNET },
+        ]);
+
+        expect(items).toEqual([
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'reasoned' }],
+            encrypted_content: OPENAI_RESPONSES_FERNET,
+          },
+        ]);
+      });
+
+      it.each([
+        ['anthropic', ANTHROPIC_SIGNATURE],
+        ['google-genai', GOOGLE_THOUGHT_SIGNATURE],
+        ['openai', 'openai-chat-reasoning-blob-probe'],
+      ] as const)('withholds a blob tagged %s from encrypted_content', async (tag, blob) => {
+        const items = await captureReasoningItems([
+          { type: 'think', think: 'reasoned', encrypted: blob, encryptedProtocol: tag },
+        ]);
+
+        expect(items).toEqual([
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'reasoned' }],
+            encrypted_content: undefined,
+          },
+        ]);
+        expect(JSON.stringify(items)).not.toContain(blob);
+      });
+
+      it('aggregates consecutive think parts that share both blob and tag', async () => {
+        const items = await captureReasoningItems([
+          {
+            type: 'think',
+            think: 'first',
+            encrypted: OPENAI_RESPONSES_FERNET,
+            encryptedProtocol: 'openai_responses',
+          },
+          {
+            type: 'think',
+            think: 'second',
+            encrypted: OPENAI_RESPONSES_FERNET,
+            encryptedProtocol: 'openai_responses',
+          },
+        ]);
+
+        expect(items).toEqual([
+          {
+            type: 'reasoning',
+            summary: [
+              { type: 'summary_text', text: 'first' },
+              { type: 'summary_text', text: 'second' },
+            ],
+            encrypted_content: OPENAI_RESPONSES_FERNET,
+          },
+        ]);
+      });
+
+      it('does not merge same-blob think parts carrying different tags', async () => {
+        // Grouping on `encrypted` alone would silently fuse two parts of
+        // different provenance into one reasoning item.
+        const items = await captureReasoningItems([
+          { type: 'think', think: 'first', encrypted: 'shared', encryptedProtocol: 'openai_responses' },
+          { type: 'think', think: 'second', encrypted: 'shared', encryptedProtocol: 'anthropic' },
+        ]);
+
+        expect(items).toEqual([
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'first' }],
+            encrypted_content: 'shared',
+          },
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'second' }],
+            encrypted_content: undefined,
+          },
+        ]);
+      });
+
+      it('does not merge a tagged think part with an untagged one carrying the same blob', async () => {
+        const items = await captureReasoningItems([
+          { type: 'think', think: 'first', encrypted: 'shared' },
+          { type: 'think', think: 'second', encrypted: 'shared', encryptedProtocol: 'openai_responses' },
+        ]);
+
+        expect(items).toEqual([
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'first' }],
+            encrypted_content: 'shared',
+          },
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'second' }],
+            encrypted_content: 'shared',
+          },
+        ]);
+      });
+
+      it('does not merge two distinct foreign-tagged think parts that both serialize to undefined', async () => {
+        const items = await captureReasoningItems([
+          { type: 'think', think: 'first', encrypted: ANTHROPIC_SIGNATURE, encryptedProtocol: 'anthropic' },
+          {
+            type: 'think',
+            think: 'second',
+            encrypted: GOOGLE_THOUGHT_SIGNATURE,
+            encryptedProtocol: 'google-genai',
+          },
+        ]);
+
+        expect(items).toEqual([
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'first' }],
+            encrypted_content: undefined,
+          },
+          {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: 'second' }],
+            encrypted_content: undefined,
+          },
+        ]);
+      });
+
+      it('tags a non-stream reasoning item as openai_responses', async () => {
+        const parts = await collectNonStreamParts([
+          {
+            type: 'reasoning',
+            encrypted_content: OPENAI_RESPONSES_FERNET,
+            summary: [{ type: 'summary_text', text: 'Step 1' }],
+          },
+        ]);
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: 'Step 1',
+            encrypted: OPENAI_RESPONSES_FERNET,
+            encryptedProtocol: 'openai_responses',
+          },
+        ]);
+      });
+
+      it('tags a summary-less non-stream reasoning item as openai_responses', async () => {
+        const parts = await collectNonStreamParts([
+          { type: 'reasoning', encrypted_content: OPENAI_RESPONSES_FERNET, summary: [] },
+        ]);
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: '',
+            encrypted: OPENAI_RESPONSES_FERNET,
+            encryptedProtocol: 'openai_responses',
+          },
+        ]);
+      });
+
+      it('leaves a non-stream reasoning item without encrypted_content untagged', async () => {
+        const parts = await collectNonStreamParts([
+          { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Step 1' }] },
+        ]);
+
+        expect(parts).toEqual([{ type: 'think', think: 'Step 1' }]);
+      });
+
+      it('tags a streamed response.output_item.done reasoning item as openai_responses', async () => {
+        const stream = new OpenAIResponsesStreamedMessage(
+          makeAsyncIterable([
+            {
+              type: 'response.output_item.done',
+              item: {
+                type: 'reasoning',
+                id: 'reasoning_item_1',
+                encrypted_content: OPENAI_RESPONSES_FERNET,
+              },
+            },
+          ]),
+          true,
+        );
+
+        const parts = await collectStreamParts(stream);
+
+        expect(parts).toEqual([
+          {
+            type: 'think',
+            think: '',
+            encrypted: OPENAI_RESPONSES_FERNET,
+            encryptedProtocol: 'openai_responses',
+          },
+        ]);
+      });
+
+      it('leaves a streamed response.output_item.done reasoning item without encrypted_content untagged', async () => {
+        const stream = new OpenAIResponsesStreamedMessage(
+          makeAsyncIterable([
+            {
+              type: 'response.output_item.done',
+              item: { type: 'reasoning', id: 'reasoning_item_2' },
+            },
+          ]),
+          true,
+        );
+
+        const parts = await collectStreamParts(stream);
+
+        expect(parts).toEqual([{ type: 'think', think: '' }]);
+      });
+    });
+
     it('toolMessageConversion=extract_text flattens tool result content to a plain string', async () => {
       const provider = new OpenAIResponsesChatProvider({
         model: 'gpt-4.1',
@@ -1312,8 +1591,18 @@ describe('OpenAIResponsesChatProvider', () => {
       for await (const p of stream) parts.push(p);
 
       expect(parts).toEqual([
-        { type: 'think', think: 'Step 1', encrypted: 'enc_token_abc' },
-        { type: 'think', think: 'Step 2', encrypted: 'enc_token_abc' },
+        {
+          type: 'think',
+          think: 'Step 1',
+          encrypted: 'enc_token_abc',
+          encryptedProtocol: 'openai_responses',
+        },
+        {
+          type: 'think',
+          think: 'Step 2',
+          encrypted: 'enc_token_abc',
+          encryptedProtocol: 'openai_responses',
+        },
         { type: 'text', text: 'done' },
       ]);
     });
@@ -1339,7 +1628,14 @@ describe('OpenAIResponsesChatProvider', () => {
       const parts: StreamedMessagePart[] = [];
       for await (const part of stream) parts.push(part);
 
-      expect(parts).toEqual([{ type: 'think', think: '', encrypted: 'enc_empty' }]);
+      expect(parts).toEqual([
+        {
+          type: 'think',
+          think: '',
+          encrypted: 'enc_empty',
+          encryptedProtocol: 'openai_responses',
+        },
+      ]);
     });
 
     it('non-stream reasoning without encrypted_content yields ThinkPart without encrypted field', async () => {
@@ -1700,7 +1996,7 @@ describe('OpenAIResponsesChatProvider', () => {
         { type: 'think', think: '' },
         { type: 'think', think: 'Thinking about' },
         { type: 'think', think: ' the answer...' },
-        { type: 'think', think: '', encrypted: 'enc_xyz' },
+        { type: 'think', think: '', encrypted: 'enc_xyz', encryptedProtocol: 'openai_responses' },
         { type: 'text', text: '42' },
       ]);
     });
@@ -1876,7 +2172,14 @@ describe('OpenAIResponsesChatProvider', () => {
       const parts: StreamedMessagePart[] = [];
       for await (const p of stream) parts.push(p);
 
-      expect(parts).toEqual([{ type: 'think', think: '', encrypted: 'enc_done' }]);
+      expect(parts).toEqual([
+        {
+          type: 'think',
+          think: '',
+          encrypted: 'enc_done',
+          encryptedProtocol: 'openai_responses',
+        },
+      ]);
     });
 
     it('yields ThinkPart from response.output_item.done reasoning item without encrypted_content', async () => {

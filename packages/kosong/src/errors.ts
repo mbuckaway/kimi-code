@@ -608,6 +608,36 @@ export function isRecoverableRequestStructureError(error: unknown): boolean {
   return STRUCTURAL_REQUEST_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
 }
 
+// Anthropic rejects a replayed history whose `thinking` blocks it cannot accept
+// back: an unverifiable `signature`, a block bound to a different conversation
+// prefix, or thinking blocks in the latest assistant message that were altered
+// since the original response. All are deterministic 4xx replay failures on
+// history that is re-sent every turn, so an unclassified one bricks the session
+// permanently. The remedy is specific — drop the offending thinking blocks and
+// resend — which is why these patterns are deliberately kept OUT of
+// STRUCTURAL_REQUEST_MESSAGE_PATTERNS: the strict re-projection those trigger
+// does not touch thinking blocks, so it would burn a retry and fail identically.
+//
+// Matching is substring-based: the wire message carries a
+// `messages.{i}.content.{j}: ` position prefix, and the prefix-mismatch variant
+// appends a remedy sentence (and sometimes a required-beta-header sentence) that
+// the first anchored pattern covers for free. The configuration family
+// ("thinking.type.enabled" is not supported, `block_binding: Extra inputs are
+// not permitted`, …) must NOT match — those need a request-shape change, not a
+// history repair.
+const THINKING_BLOCK_MESSAGE_PATTERNS = [
+  /invalid\s+['"`]?signature['"`]?\s+in\s+['"`]?thinking['"`]?\s+block/,
+  /thinking[\s\S]*blocks in the latest assistant message cannot be modified/,
+] as const;
+
+export function isThinkingSignatureError(error: unknown): boolean {
+  if (!(error instanceof APIStatusError)) return false;
+  if (error instanceof APIContextOverflowError) return false;
+  if (error.statusCode !== 400 && error.statusCode !== 422) return false;
+  const lowerMessage = error.message.toLowerCase();
+  return THINKING_BLOCK_MESSAGE_PATTERNS.some((pattern) => pattern.test(lowerMessage));
+}
+
 export function isProviderRateLimitError(error: unknown): boolean {
   // Quota exhaustion is a 429 but not a rate limit: the rate-limit reactions
   // (retry, requeue, suspend) cannot help until the account is recharged.

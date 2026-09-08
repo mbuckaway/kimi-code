@@ -12,6 +12,7 @@ export interface MediaStripSnapshot {
 export interface ProjectionPolicy {
   readonly structure?: 'strict';
   readonly media?: 'degraded' | { readonly strip: MediaStripSnapshot };
+  readonly thinking?: 'strip';
 }
 
 export interface IAgentContextProjectorService {

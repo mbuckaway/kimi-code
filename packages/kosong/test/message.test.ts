@@ -10,10 +10,12 @@ import type {
   ToolCallPart,
   VideoURLPart,
 } from '#/message';
+import type { Protocol } from '#/message';
 import {
   createAssistantMessage,
   createToolMessage,
   createUserMessage,
+  encryptedForProtocol,
   extractText,
   getTextContent,
   isContentPart,
@@ -21,6 +23,11 @@ import {
   isToolCallPart,
   mergeInPlace,
 } from '#/message';
+import {
+  encryptedForProtocol as barrelEncryptedForProtocol,
+  isThinkingSignatureError as barrelIsThinkingSignatureError,
+} from '#/index';
+import { isThinkingSignatureError } from '#/errors';
 import { describe, expect, it } from 'vitest';
 describe('createUserMessage', () => {
   it('creates a user message with single text part', () => {
@@ -289,6 +296,145 @@ describe('type guards', () => {
     expect(isToolCallPart(part)).toBe(false);
   });
 });
+// ---------------------------------------------------------------------------
+// Reasoning-blob provenance (`ThinkPart.encryptedProtocol`)
+// ---------------------------------------------------------------------------
+//
+// `encrypted` is ONE untagged slot written by three mutually incompatible
+// producers: Anthropic puts its `signature` there, the OpenAI Responses API its
+// Fernet `reasoning.encrypted_content`, Google its `thoughtSignature`. Replaying
+// a foreign blob as our own signature is what produced
+// `400 messages.1.content.0: Invalid `signature` in `thinking` block` after a
+// mid-session model switch. The tag makes provenance explicit; an ABSENT tag is
+// deliberately treated as compatible (legacy history predates the field, and we
+// refuse to sniff blob formats).
+const ALL_PROTOCOLS: readonly Protocol[] = [
+  'anthropic',
+  'openai',
+  'openai_responses',
+  'google-genai',
+];
+
+const MISMATCHED_PAIRS: ReadonlyArray<readonly [Protocol, Protocol]> = ALL_PROTOCOLS.flatMap(
+  (tag) => ALL_PROTOCOLS.filter((wire) => wire !== tag).map((wire) => [tag, wire] as const),
+);
+
+describe('encryptedForProtocol', () => {
+  it.each(ALL_PROTOCOLS)('returns an untagged blob for the %s wire (legacy = compatible)', (wire) => {
+    const part: ThinkPart = { type: 'think', think: 'reasoning', encrypted: 'blob' };
+
+    expect(encryptedForProtocol(part, wire)).toBe('blob');
+  });
+
+  it.each(ALL_PROTOCOLS)('returns a blob tagged %s for its own wire', (wire) => {
+    const part: ThinkPart = {
+      type: 'think',
+      think: 'reasoning',
+      encrypted: 'blob',
+      encryptedProtocol: wire,
+    };
+
+    expect(encryptedForProtocol(part, wire)).toBe('blob');
+  });
+
+  it.each(MISMATCHED_PAIRS)('withholds a blob tagged %s from the %s wire', (tag, wire) => {
+    const part: ThinkPart = {
+      type: 'think',
+      think: 'reasoning',
+      encrypted: 'blob',
+      encryptedProtocol: tag,
+    };
+
+    expect(encryptedForProtocol(part, wire)).toBeUndefined();
+  });
+
+  it('returns undefined when the part carries no blob and no tag', () => {
+    const part: ThinkPart = { type: 'think', think: 'reasoning' };
+
+    expect(encryptedForProtocol(part, 'anthropic')).toBeUndefined();
+  });
+
+  it('returns undefined when the part carries a matching tag but no blob', () => {
+    const part: ThinkPart = {
+      type: 'think',
+      think: 'reasoning',
+      encryptedProtocol: 'anthropic',
+    };
+
+    expect(encryptedForProtocol(part, 'anthropic')).toBeUndefined();
+  });
+
+  it('returns undefined when the part carries a foreign tag but no blob', () => {
+    const part: ThinkPart = {
+      type: 'think',
+      think: 'reasoning',
+      encryptedProtocol: 'openai_responses',
+    };
+
+    expect(encryptedForProtocol(part, 'anthropic')).toBeUndefined();
+  });
+
+  it('treats an explicitly undefined tag as untagged, not as a mismatch', () => {
+    const part: ThinkPart = {
+      type: 'think',
+      think: 'reasoning',
+      encrypted: 'blob',
+      encryptedProtocol: undefined,
+    };
+
+    expect(encryptedForProtocol(part, 'google-genai')).toBe('blob');
+  });
+
+  it('passes through an empty-string blob when untagged (present-but-empty boundary)', () => {
+    const part: ThinkPart = { type: 'think', think: 'reasoning', encrypted: '' };
+
+    expect(encryptedForProtocol(part, 'anthropic')).toBe('');
+  });
+
+  it('withholds an empty-string blob tagged for a foreign wire', () => {
+    const part: ThinkPart = {
+      type: 'think',
+      think: 'reasoning',
+      encrypted: '',
+      encryptedProtocol: 'google-genai',
+    };
+
+    expect(encryptedForProtocol(part, 'anthropic')).toBeUndefined();
+  });
+
+  it('does not mutate the part it inspects', () => {
+    const part: ThinkPart = {
+      type: 'think',
+      think: 'reasoning',
+      encrypted: 'blob',
+      encryptedProtocol: 'anthropic',
+    };
+
+    encryptedForProtocol(part, 'openai');
+
+    expect(part).toEqual({
+      type: 'think',
+      think: 'reasoning',
+      encrypted: 'blob',
+      encryptedProtocol: 'anthropic',
+    });
+  });
+});
+
+describe('package barrel', () => {
+  // `isThinkingSignatureError` and `encryptedForProtocol` are consumed by
+  // `@moonshot-ai/agent-core` through the package root, not through `#/...`
+  // subpaths. A missing re-export here is invisible inside kosong and only
+  // breaks the downstream build, so pin both.
+  it('re-exports encryptedForProtocol from the package root', () => {
+    expect(barrelEncryptedForProtocol).toBe(encryptedForProtocol);
+  });
+
+  it('re-exports isThinkingSignatureError from the package root', () => {
+    expect(barrelIsThinkingSignatureError).toBe(isThinkingSignatureError);
+  });
+});
+
 describe('mergeInPlace', () => {
   it('merges TextPart + TextPart', () => {
     const target: TextPart = { type: 'text', text: 'hello' };
@@ -317,6 +463,46 @@ describe('mergeInPlace', () => {
     const source: ThinkPart = { type: 'think', think: ' more' };
     expect(mergeInPlace(target, source)).toBe(false);
     expect(target.think).toBe('done');
+  });
+
+  it('carries the provenance tag along with the blob it labels', () => {
+    // The tag must never be separated from its blob: a latched blob with a
+    // lost tag reads as untagged, i.e. compatible with every wire — exactly
+    // the pre-fix behaviour that replays a foreign signature.
+    const target: ThinkPart = { type: 'think', think: 'thought' };
+    const source: ThinkPart = {
+      type: 'think',
+      think: '',
+      encrypted: 'sig-123',
+      encryptedProtocol: 'anthropic',
+    };
+
+    expect(mergeInPlace(target, source)).toBe(true);
+    expect(target).toEqual({
+      type: 'think',
+      think: 'thought',
+      encrypted: 'sig-123',
+      encryptedProtocol: 'anthropic',
+    });
+  });
+
+  it('latches an untagged blob without inventing a tag', () => {
+    const target: ThinkPart = { type: 'think', think: 'thought' };
+    const source: ThinkPart = { type: 'think', think: '', encrypted: 'sig-123' };
+
+    expect(mergeInPlace(target, source)).toBe(true);
+    expect(target.encrypted).toBe('sig-123');
+    expect(target.encryptedProtocol).toBeUndefined();
+  });
+
+  it('leaves the target tag untouched when the source carries no blob', () => {
+    const target: ThinkPart = { type: 'think', think: 'a' };
+    const source: ThinkPart = { type: 'think', think: 'b', encryptedProtocol: 'google-genai' };
+
+    expect(mergeInPlace(target, source)).toBe(true);
+    expect(target.think).toBe('ab');
+    expect(target.encrypted).toBeUndefined();
+    expect(target.encryptedProtocol).toBeUndefined();
   });
 
   it('merges ToolCall + ToolCallPart (null -> part)', () => {

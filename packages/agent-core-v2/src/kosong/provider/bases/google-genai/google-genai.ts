@@ -7,7 +7,7 @@ import {
   normalizeAPIStatusError,
 } from '#/kosong/contract/errors';
 import type { Message, StreamedMessagePart, ThinkPart, ToolCall } from '#/kosong/contract/message';
-import { isToolDeclarationOnlyMessage } from '#/kosong/contract/message';
+import { encryptedForProtocol, isToolDeclarationOnlyMessage } from '#/kosong/contract/message';
 import type {
   ChatProvider,
   FinishReason,
@@ -225,8 +225,9 @@ function messageToGoogleGenAI(message: Message): GoogleContent {
         break;
       case 'think': {
         const thoughtPart: GooglePart = { text: part.think, thought: true };
-        if (part.encrypted !== undefined && part.encrypted.length > 0) {
-          thoughtPart.thoughtSignature = part.encrypted;
+        const thoughtSignature = encryptedForProtocol(part, 'google-genai');
+        if (thoughtSignature !== undefined && thoughtSignature.length > 0) {
+          thoughtPart.thoughtSignature = thoughtSignature;
         }
         parts.push(thoughtPart);
         break;
@@ -516,6 +517,7 @@ export class GoogleGenAIStreamedMessage implements StreamedMessage {
           const thinkPart: ThinkPart = { type: 'think', think: p['text'] };
           if (typeof thoughtSignature === 'string' && thoughtSignature.length > 0) {
             thinkPart.encrypted = thoughtSignature;
+            thinkPart.encryptedProtocol = 'google-genai';
           }
           parts.push(thinkPart);
         } else if (p['text']) {

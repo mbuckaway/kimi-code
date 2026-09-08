@@ -43,6 +43,7 @@ import { USER_PROMPT_ORIGIN, type PromptOrigin } from '../context';
 import {
   captureMediaStripSnapshot,
   stripMediaPartsBySnapshot,
+  stripThinkingParts,
 } from '../context/projector';
 import { renderUserPromptHookBlockResult, renderUserPromptHookResult } from '../../session/hooks';
 import { canonicalTelemetryArgs, isPlainRecord } from './canonical-args';
@@ -862,6 +863,11 @@ export class TurnFlow {
       }
       return stripMediaPartsBySnapshot(messages, this.mediaStripAccumulator);
     };
+    // Composed on top of `buildMessages`, so it inherits whatever media the
+    // strip accumulator has already removed this session: recovering from a
+    // thinking rejection must not silently reintroduce media the provider has
+    // already rejected.
+    const buildMessagesThinkingStripped = (): Message[] => stripThinkingParts(buildMessages());
     while (true) {
       signal.throwIfAborted();
       const model = this.agent.config.model;
@@ -878,6 +884,7 @@ export class TurnFlow {
           buildMessagesStrict: () => this.agent.context.strictMessages,
           buildMessagesMediaDegraded: () => this.agent.context.mediaDegradedMessages,
           buildMessagesMediaStripped,
+          buildMessagesThinkingStripped,
           dispatchEvent: this.buildDispatchEvent(turnId),
           // Re-read per step (not snapshotted per turn) so a select_tools load
           // is dispatchable on the very next step of the same turn.

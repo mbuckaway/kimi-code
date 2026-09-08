@@ -12,9 +12,14 @@ import type {
   ContentPart,
   Message,
   StreamedMessagePart,
+  ThinkPart,
   ToolCall,
 } from '#/kosong/contract/message';
-import { extractText, isToolDeclarationOnlyMessage } from '#/kosong/contract/message';
+import {
+  encryptedForProtocol,
+  extractText,
+  isToolDeclarationOnlyMessage,
+} from '#/kosong/contract/message';
 import type {
   ChatProvider,
   FinishReason,
@@ -583,14 +588,17 @@ function convertMessage(
       if (part === undefined) break;
       if (part.type === 'think') {
         flushPendingParts();
-        const encryptedValue = part.encrypted;
+        const encryptedRaw = part.encrypted;
+        const encryptedTag = part.encryptedProtocol;
+        const encryptedValue = encryptedForProtocol(part, 'openai_responses');
         const summaries: unknown[] = [{ type: 'summary_text', text: part.think }];
         i += 1;
         while (i < n) {
           const nextPart = message.content[i];
           if (nextPart === undefined) break;
           if (nextPart.type !== 'think') break;
-          if (nextPart.encrypted !== encryptedValue) break;
+          if (nextPart.encrypted !== encryptedRaw) break;
+          if (nextPart.encryptedProtocol !== encryptedTag) break;
           summaries.push({ type: 'summary_text', text: nextPart.think });
           i += 1;
         }
@@ -766,19 +774,21 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           const text = readStringField(summary, 'text');
           if (text === undefined) continue;
           hasReasoningSummary = true;
-          const thinkPart: StreamedMessagePart = {
+          const thinkPart: ThinkPart = {
             type: 'think',
             think: text,
           };
           if (outputItem.encryptedContent !== undefined) {
-            (thinkPart as { encrypted: string }).encrypted = outputItem.encryptedContent;
+            thinkPart.encrypted = outputItem.encryptedContent;
+            thinkPart.encryptedProtocol = 'openai_responses';
           }
           yield thinkPart;
         }
         if (!hasReasoningSummary) {
-          const thinkPart: StreamedMessagePart = { type: 'think', think: '' };
+          const thinkPart: ThinkPart = { type: 'think', think: '' };
           if (outputItem.encryptedContent !== undefined) {
-            (thinkPart as { encrypted: string }).encrypted = outputItem.encryptedContent;
+            thinkPart.encrypted = outputItem.encryptedContent;
+            thinkPart.encryptedProtocol = 'openai_responses';
           }
           yield thinkPart;
         }
@@ -917,9 +927,10 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             const item = readResponseOutputItem(chunk['item'], `${type}.item`);
             const outputIndex = readNumberField(chunk, 'output_index');
             if (item.type === 'reasoning') {
-              const thinkPart: StreamedMessagePart = { type: 'think', think: '' };
+              const thinkPart: ThinkPart = { type: 'think', think: '' };
               if (item.encryptedContent !== undefined) {
-                (thinkPart as { encrypted: string }).encrypted = item.encryptedContent;
+                thinkPart.encrypted = item.encryptedContent;
+                thinkPart.encryptedProtocol = 'openai_responses';
               }
               yield thinkPart;
             } else if (item.type === 'function_call' && typeof item.arguments === 'string') {

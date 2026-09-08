@@ -3,6 +3,7 @@ export {
   createAssistantMessage,
   createToolMessage,
   createUserMessage,
+  encryptedForProtocol,
   extractText,
   isContentPart,
   isToolCall,
@@ -15,6 +16,7 @@ export type {
   FilePart,
   ImageURLPart,
   Message,
+  Protocol,
   Role,
   StreamedMessagePart,
   TextPart,
@@ -86,6 +88,7 @@ export {
   isRecoverableRequestStructureError,
   isRequestTooLargeStatusError,
   isRetryableGenerateError,
+  isThinkingSignatureError,
   isToolExchangeAdjacencyError,
   throwIfAbortError,
 } from './errors';

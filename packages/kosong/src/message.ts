@@ -7,10 +7,51 @@ export interface TextPart {
   text: string;
 }
 
+/**
+ * Wire protocol that owns a reasoning blob's format.
+ *
+ * A subset of {@link ProviderType}: only these four wires produce or consume an
+ * opaque reasoning blob. `kimi` speaks the OpenAI chat wire and `vertexai` the
+ * Google one, and neither emits a blob of its own, so they have no entry here.
+ */
+export type Protocol = 'anthropic' | 'openai' | 'openai_responses' | 'google-genai';
+
 export interface ThinkPart {
   type: 'think';
   think: string;
-  encrypted?: string; // Provider-specific reasoning signature
+  /**
+   * Provider-specific reasoning signature — ONE opaque slot written by
+   * mutually incompatible producers: Anthropic's `signature`, the OpenAI
+   * Responses API's Fernet `reasoning.encrypted_content`, Google's
+   * `thoughtSignature`. Always read it through
+   * {@link encryptedForProtocol}, never directly, when serializing to a wire.
+   */
+  encrypted?: string;
+  /**
+   * Which wire produced {@link encrypted}. Absent means "unknown, assume
+   * compatible": history recorded before this field existed must keep working,
+   * and we deliberately do not sniff blob formats. Set by every adapter that
+   * emits a blob, so a mid-session model switch cannot hand one provider
+   * another's blob as its own signature (Anthropic verifies it and answers
+   * `400 ... Invalid \`signature\` in \`thinking\` block`, permanently
+   * poisoning the replayed history).
+   */
+  encryptedProtocol?: Protocol;
+}
+
+/**
+ * The reasoning blob of `part` if `protocol` may legitimately receive it back,
+ * otherwise `undefined`.
+ *
+ * An untagged blob is treated as compatible with every wire — see
+ * {@link ThinkPart.encryptedProtocol}. Callers that get `undefined` must fall
+ * back to their unsigned-thinking behaviour rather than emitting the raw blob.
+ */
+export function encryptedForProtocol(part: ThinkPart, protocol: Protocol): string | undefined {
+  if (part.encryptedProtocol !== undefined && part.encryptedProtocol !== protocol) {
+    return undefined;
+  }
+  return part.encrypted;
 }
 
 export interface ImageURLPart {
@@ -165,7 +206,11 @@ export function isToolCallPart(part: StreamedMessagePart): part is ToolCallPart 
  *
  * Supported combinations:
  * - TextPart + TextPart -> concatenate text
- * - ThinkPart + ThinkPart -> concatenate think (refuse if target.encrypted already set)
+ * - ThinkPart + ThinkPart -> concatenate think (refuse if target.encrypted already
+ *   set), latching the source's reasoning blob together with its
+ *   {@link ThinkPart.encryptedProtocol} provenance tag. The two always travel as
+ *   a pair: a blob that loses its tag reads as untagged, i.e. compatible with
+ *   every wire, which is exactly the replay bug the tag exists to prevent.
  * - ToolCall + ToolCallPart -> append arguments
  *
  * **Routing for parallel tool calls**: When OpenAI (or compatible) APIs stream
@@ -193,6 +238,7 @@ export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessag
     target.think += source.think;
     if (source.encrypted !== undefined) {
       target.encrypted = source.encrypted;
+      target.encryptedProtocol = source.encryptedProtocol;
     }
     return true;
   }

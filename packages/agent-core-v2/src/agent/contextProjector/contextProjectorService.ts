@@ -20,6 +20,7 @@ import {
 import {
   project,
   projectStrict,
+  stripThinkingParts,
   summarizeProjectionRepairs,
   type OnAnomaly,
   type ProjectionAnomaly,
@@ -57,10 +58,11 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
       messages,
       policy.structure === 'strict' ? projectStrict : project,
     );
+    const thought = policy.thinking === 'strip' ? stripThinkingParts(projected) : projected;
     const media = policy.media;
-    if (media === undefined) return projected;
-    if (media === 'degraded') return degradeOlderMediaParts(projected, MEDIA_DEGRADE_KEEP_RECENT);
-    return stripMediaPartsBySnapshot(projected, media.strip);
+    if (media === undefined) return thought;
+    if (media === 'degraded') return degradeOlderMediaParts(thought, MEDIA_DEGRADE_KEEP_RECENT);
+    return stripMediaPartsBySnapshot(thought, media.strip);
   }
 
   captureMediaStripSnapshot(messages: readonly ContextMessage[]): MediaStripSnapshot {

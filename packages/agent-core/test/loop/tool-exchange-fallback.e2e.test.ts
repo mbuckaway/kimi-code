@@ -50,6 +50,29 @@ const OPENAI_ROLE_TOOL_400 = new APIStatusError(
   "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'",
 );
 
+// Verbatim from the live Anthropic API after a mid-session model switch left an
+// OpenAI Responses Fernet blob (`gAAAAAB…`) in a ThinkPart's `encrypted` slot,
+// which the Anthropic adapter then replayed as its own `signature`.
+const THINKING_SIGNATURE_400 = new APIStatusError(
+  400,
+  'messages.1.content.0: Invalid `signature` in `thinking` block',
+);
+
+// The sibling replay rejection: the latest assistant turn's thinking blocks
+// were altered since the original response.
+const THINKING_MODIFIED_400 = new APIStatusError(
+  400,
+  'messages.5.content.0: thinking or redacted_thinking blocks in the latest assistant message ' +
+    'cannot be modified',
+);
+
+// The configuration family, which must NOT trigger a strip: the request shape
+// is wrong, and no amount of history repair fixes it.
+const THINKING_CONFIG_400 = new APIStatusError(
+  400,
+  'thinking.type.enabled is not supported for this model',
+);
+
 function userMessage(text: string): Message {
   return { role: 'user', content: [{ type: 'text', text }], toolCalls: [] };
 }
@@ -437,6 +460,141 @@ describe('executeLoopStep — request-too-large media-degraded fallback', () => 
     expect(attempts).toBe(3);
   });
 
+  it('gives up when the all-media-stripped resend from an already-degraded step is rejected', async () => {
+    // Step 1 recovers via the degraded projection; step 2 starts degraded, is
+    // rejected again, and its final all-media-stripped attempt also fails —
+    // the request cannot be reduced further, so that error propagates.
+    const echo = new EchoTool();
+    const llm = new FakeLLM({ responses: [] });
+    const strippedRejection = new APIRequestTooLargeError(413, 'still too large after stripping');
+    let attempts = 0;
+    llm.chat = async (params) => {
+      llm.calls.push(params);
+      attempts += 1;
+      if (attempts === 1) throw REQUEST_TOO_LARGE;
+      if (attempts === 2) {
+        return makeToolUseResponse([makeToolCall('echo', { text: 'hi' }, 'tc-1')]);
+      }
+      if (attempts === 3) throw REQUEST_TOO_LARGE;
+      throw strippedRejection;
+    };
+    const sink = new CollectingSink({});
+    const context = new RecordingContext({ messages: [userMessage('normal projection')] });
+    const degradedMessages = [userMessage('media-degraded projection')];
+    const strippedMessages = [userMessage('media-stripped projection')];
+    const input: RunTurnInput = {
+      turnId: 'turn-1',
+      signal: new AbortController().signal,
+      llm,
+      buildMessages: context.buildMessages,
+      buildMessagesMediaDegraded: () => degradedMessages,
+      buildMessagesMediaStripped: () => strippedMessages,
+      tools: [echo],
+      dispatchEvent: createLoopEventDispatcher({
+        appendTranscriptRecord: context.appendTranscriptRecord,
+        emitLiveEvent: sink.emit,
+      }),
+    };
+
+    await expect(runTurn(input)).rejects.toBe(strippedRejection);
+
+    expect(attempts).toBe(4);
+    expect(llm.calls[3]?.messages).toBe(strippedMessages);
+    expect(llm.calls[3]?.requestLogFields).toMatchObject({ projection: 'media-stripped' });
+  });
+
+  it('ranks the degraded projection above the thinking-stripped one once both latch', async () => {
+    // Both latches can be set within one turn. Media wins for later steps: the
+    // thinking-stripped rebuild carries full media and would deterministically
+    // re-earn the 413, whose inner ladder has no thinking rung to fall back on.
+    const echo = new EchoTool();
+    const llm = new FakeLLM({ responses: [] });
+    let attempts = 0;
+    llm.chat = async (params) => {
+      llm.calls.push(params);
+      attempts += 1;
+      // Step 1: thinking 400 -> stripped resend -> tool call.
+      if (attempts === 1) throw THINKING_SIGNATURE_400;
+      if (attempts === 2) {
+        return makeToolUseResponse([makeToolCall('echo', { text: 'a' }, 'tc-1')]);
+      }
+      // Step 2 (already thinking-stripped): 413 -> degraded resend -> tool call.
+      if (attempts === 3) throw REQUEST_TOO_LARGE;
+      if (attempts === 4) {
+        return makeToolUseResponse([makeToolCall('echo', { text: 'b' }, 'tc-2')]);
+      }
+      return makeEndTurnResponse('done');
+    };
+    const sink = new CollectingSink({});
+    const context = new RecordingContext({ messages: [userMessage('normal projection')] });
+    const degradedMessages = [userMessage('media-degraded projection')];
+    const thinkingStrippedMessages = [userMessage('thinking-stripped projection')];
+    const input: RunTurnInput = {
+      turnId: 'turn-1',
+      signal: new AbortController().signal,
+      llm,
+      buildMessages: context.buildMessages,
+      buildMessagesMediaDegraded: () => degradedMessages,
+      buildMessagesThinkingStripped: () => thinkingStrippedMessages,
+      tools: [echo],
+      dispatchEvent: createLoopEventDispatcher({
+        appendTranscriptRecord: context.appendTranscriptRecord,
+        emitLiveEvent: sink.emit,
+      }),
+    };
+
+    const result = await runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(llm.calls[0]?.messages).toEqual([userMessage('normal projection')]);
+    expect(llm.calls[1]?.messages).toBe(thinkingStrippedMessages);
+    expect(llm.calls[2]?.messages).toBe(thinkingStrippedMessages);
+    expect(llm.calls[3]?.messages).toBe(degradedMessages);
+    // Step 3 builds from the media projection, not the thinking-stripped one.
+    expect(llm.calls[4]?.messages).toBe(degradedMessages);
+    expect(llm.calls[4]?.requestLogFields).toMatchObject({ projection: 'media-degraded' });
+    expect(echo.calls).toHaveLength(2);
+  });
+
+  it('propagates a thinking rejection raised by the media-degraded resend (v1 ladder is flat)', async () => {
+    // Documents a real v1 limitation: the 413 rung's inner recovery handles
+    // only media errors, so a thinking 400 surfacing there is not caught by the
+    // sibling thinking rung. v2's policy object composes the two axes; v1's
+    // if/else-if chain cannot, and deepening the nesting is not worth it for
+    // the legacy engine.
+    const llm = new FakeLLM({ responses: [] });
+    let attempts = 0;
+    llm.chat = async (params) => {
+      llm.calls.push(params);
+      attempts += 1;
+      if (attempts === 1) throw REQUEST_TOO_LARGE;
+      throw THINKING_SIGNATURE_400;
+    };
+    const sink = new CollectingSink({});
+    const context = new RecordingContext({ messages: [userMessage('normal projection')] });
+    let thinkingCount = 0;
+    const input: RunTurnInput = {
+      turnId: 'turn-1',
+      signal: new AbortController().signal,
+      llm,
+      buildMessages: context.buildMessages,
+      buildMessagesMediaDegraded: () => [userMessage('media-degraded projection')],
+      buildMessagesThinkingStripped: () => {
+        thinkingCount += 1;
+        return [userMessage('thinking-stripped projection')];
+      },
+      dispatchEvent: createLoopEventDispatcher({
+        appendTranscriptRecord: context.appendTranscriptRecord,
+        emitLiveEvent: sink.emit,
+      }),
+    };
+
+    await expect(runTurn(input)).rejects.toBe(THINKING_SIGNATURE_400);
+
+    expect(attempts).toBe(2);
+    expect(thinkingCount).toBe(0);
+  });
+
   it('keeps using the degraded projection for later steps of the same turn', async () => {
     // Step 1 is rejected with a 413 and recovers via the degraded projection,
     // then issues a tool call; step 2 must build from the degraded projection
@@ -470,5 +628,292 @@ describe('executeLoopStep — request-too-large media-degraded fallback', () => 
     expect(harness.normalCalls.count).toBe(1);
     expect(harness.degradedCalls.count).toBe(2);
     expect(echo.calls).toHaveLength(1);
+  });
+});
+
+/**
+ * Thinking-stripped resend.
+ *
+ * `ThinkPart.encrypted` is one untagged slot written by three incompatible
+ * providers. Switching models mid-session used to hand Anthropic another
+ * provider's blob as its own `signature`; Anthropic verifies it and answers
+ * `400 messages.1.content.0: Invalid \`signature\` in \`thinking\` block`. The
+ * offending block sits in the replayed history, so every later turn re-earns
+ * the same 400 and the session is permanently bricked.
+ *
+ * The rung resends ONCE with every think part removed from every message
+ * (text and tool calls kept). A total strip is verified against the live API
+ * as accepted even when the latest assistant turn carried thinking plus
+ * `tool_use`, so there is no special-casing by position or error subtype.
+ *
+ * v1 has no durable recovery state: the latch is a `runTurn` local, so a
+ * session re-pays one 400 per turn. v1 is reachable only via
+ * `KIMI_CODE_LEGACY_FLAG` / the VS Code `kimi.useAgentCoreV1` setting, so that
+ * cost is accepted rather than papered over with a persistence layer.
+ */
+describe('executeLoopStep — thinking-signature stripped-thinking fallback', () => {
+  interface ThinkingHarness {
+    readonly input: RunTurnInput;
+    readonly llm: FakeLLM;
+    readonly thinkingCalls: { count: number };
+    readonly thinkingStrippedMessages: Message[];
+    readonly strictCalls: { count: number };
+    readonly normalCalls: { count: number };
+  }
+
+  function makeThinkingHarness(
+    error: unknown,
+    extra: { readonly withBuilder?: boolean; readonly tools?: RunTurnInput['tools'] } = {},
+  ): ThinkingHarness {
+    const llm = new FakeLLM({
+      responses: [makeEndTurnResponse('unused'), makeEndTurnResponse('recovered')],
+      throwOnIndex: { index: 0, error },
+    });
+    const sink = new CollectingSink({});
+    const normalMessages: Message[] = [userMessage('normal projection')];
+    const context = new RecordingContext({ messages: normalMessages });
+    const normalCalls = { count: 0 };
+    const buildMessages: LoopMessageBuilder = () => {
+      normalCalls.count += 1;
+      return normalMessages;
+    };
+    const thinkingStrippedMessages: Message[] = [userMessage('thinking-stripped projection')];
+    const thinkingCalls = { count: 0 };
+    const buildMessagesThinkingStripped: LoopMessageBuilder = () => {
+      thinkingCalls.count += 1;
+      return thinkingStrippedMessages;
+    };
+    const strictCalls = { count: 0 };
+    const buildMessagesStrict: LoopMessageBuilder = () => {
+      strictCalls.count += 1;
+      return [userMessage('strict projection')];
+    };
+    const input: RunTurnInput = {
+      turnId: 'turn-1',
+      signal: new AbortController().signal,
+      llm,
+      buildMessages,
+      buildMessagesStrict,
+      buildMessagesThinkingStripped:
+        extra.withBuilder === false ? undefined : buildMessagesThinkingStripped,
+      tools: extra.tools,
+      dispatchEvent: createLoopEventDispatcher({
+        appendTranscriptRecord: context.appendTranscriptRecord,
+        emitLiveEvent: sink.emit,
+      }),
+    };
+    return { input, llm, thinkingCalls, thinkingStrippedMessages, strictCalls, normalCalls };
+  }
+
+  it('resends once with thinking stripped after an invalid-signature 400 and recovers', async () => {
+    const { input, llm, thinkingCalls, thinkingStrippedMessages, strictCalls } =
+      makeThinkingHarness(THINKING_SIGNATURE_400);
+
+    const result = await runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    // Exactly two provider calls: the rejected one and the stripped resend —
+    // and the strict builder is never consulted, because a strict
+    // re-projection does not touch thinking blocks and would fail identically.
+    expect(llm.callCount).toBe(2);
+    expect(thinkingCalls.count).toBe(1);
+    expect(strictCalls.count).toBe(0);
+    expect(llm.calls[0]?.messages).toEqual([userMessage('normal projection')]);
+    expect(llm.calls[1]?.messages).toBe(thinkingStrippedMessages);
+  });
+
+  it('labels the stripped resend with the thinking-stripped projection', async () => {
+    const { input, llm } = makeThinkingHarness(THINKING_SIGNATURE_400);
+
+    await runTurn(input);
+
+    expect(llm.calls[1]?.requestLogFields).toMatchObject({ projection: 'thinking-stripped' });
+  });
+
+  it('resends once after a latest-assistant-thinking-modified 400 and recovers', async () => {
+    const { input, llm, thinkingCalls, thinkingStrippedMessages } = makeThinkingHarness(
+      THINKING_MODIFIED_400,
+    );
+
+    const result = await runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(llm.callCount).toBe(2);
+    expect(thinkingCalls.count).toBe(1);
+    expect(llm.calls[1]?.messages).toBe(thinkingStrippedMessages);
+  });
+
+  it('does not strip for an Anthropic thinking CONFIGURATION 400 — the error propagates', async () => {
+    // A request-shape problem, not a poisoned history: stripping cannot help.
+    const { input, llm, thinkingCalls } = makeThinkingHarness(THINKING_CONFIG_400);
+
+    await expect(runTurn(input)).rejects.toThrow(APIStatusError);
+
+    expect(llm.callCount).toBe(1);
+    expect(thinkingCalls.count).toBe(0);
+  });
+
+  it('does not strip for an unrelated 400 — the error propagates', async () => {
+    const { input, llm, thinkingCalls } = makeThinkingHarness(new APIStatusError(400, 'Bad request'));
+
+    await expect(runTurn(input)).rejects.toThrow(/Bad request/);
+
+    expect(llm.callCount).toBe(1);
+    expect(thinkingCalls.count).toBe(0);
+  });
+
+  it('propagates the 400 unchanged when the host supplied no thinking-stripped builder', async () => {
+    const { input, llm, strictCalls } = makeThinkingHarness(THINKING_SIGNATURE_400, {
+      withBuilder: false,
+    });
+
+    await expect(runTurn(input)).rejects.toBe(THINKING_SIGNATURE_400);
+
+    expect(llm.callCount).toBe(1);
+    expect(strictCalls.count).toBe(0);
+  });
+
+  it('resends only once: a stripped rebuild that is also rejected gives up (no loop)', async () => {
+    const llm = new FakeLLM({ responses: [] });
+    let calls = 0;
+    llm.chat = async () => {
+      calls += 1;
+      throw THINKING_SIGNATURE_400;
+    };
+    const sink = new CollectingSink({});
+    const context = new RecordingContext({ messages: [userMessage('normal')] });
+    let thinkingCount = 0;
+    const input: RunTurnInput = {
+      turnId: 'turn-1',
+      signal: new AbortController().signal,
+      llm,
+      buildMessages: context.buildMessages,
+      buildMessagesThinkingStripped: () => {
+        thinkingCount += 1;
+        return [userMessage('thinking-stripped')];
+      },
+      dispatchEvent: createLoopEventDispatcher({
+        appendTranscriptRecord: context.appendTranscriptRecord,
+        emitLiveEvent: sink.emit,
+      }),
+    };
+
+    await expect(runTurn(input)).rejects.toBe(THINKING_SIGNATURE_400);
+    expect(calls).toBe(2); // first attempt + one stripped resend, then give up
+    expect(thinkingCount).toBe(1);
+  });
+
+  it('keeps using the thinking-stripped projection for later steps of the same turn', async () => {
+    // Step 1 is rejected and recovers via the strip, then issues a tool call;
+    // step 2 must build from the stripped projection directly — the poisoned
+    // block is still in history and would earn a fresh 400 on every step.
+    const echo = new EchoTool();
+    const llm = new FakeLLM({
+      responses: [
+        makeEndTurnResponse('unused'),
+        makeToolUseResponse([makeToolCall('echo', { text: 'hi' }, 'tc-1')]),
+        makeEndTurnResponse('done'),
+      ],
+      throwOnIndex: { index: 0, error: THINKING_SIGNATURE_400 },
+    });
+    const harness = makeThinkingHarness(THINKING_SIGNATURE_400, { tools: [echo] });
+    const input: RunTurnInput = { ...harness.input, llm, tools: [echo] };
+
+    const result = await runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(llm.callCount).toBe(3);
+    expect(llm.calls[0]?.messages).toEqual([userMessage('normal projection')]);
+    expect(llm.calls[1]?.messages).toBe(harness.thinkingStrippedMessages);
+    expect(llm.calls[2]?.messages).toBe(harness.thinkingStrippedMessages);
+    expect(harness.normalCalls.count).toBe(1);
+    expect(harness.thinkingCalls.count).toBe(2);
+    expect(echo.calls).toHaveLength(1);
+  });
+
+  it('propagates without a duplicate resend when the step is already thinking-stripped', async () => {
+    // Step 2 already builds from the stripped projection; re-sending the very
+    // same messages could not change the outcome, so the 400 propagates.
+    const echo = new EchoTool();
+    const llm = new FakeLLM({ responses: [] });
+    let attempts = 0;
+    llm.chat = async (params) => {
+      llm.calls.push(params);
+      attempts += 1;
+      if (attempts === 1) throw THINKING_SIGNATURE_400;
+      if (attempts === 2) {
+        return makeToolUseResponse([makeToolCall('echo', { text: 'hi' }, 'tc-1')]);
+      }
+      throw THINKING_SIGNATURE_400;
+    };
+    const sink = new CollectingSink({});
+    const context = new RecordingContext({ messages: [userMessage('normal projection')] });
+    const thinkingStrippedMessages = [userMessage('thinking-stripped projection')];
+    let thinkingCount = 0;
+    const input: RunTurnInput = {
+      turnId: 'turn-1',
+      signal: new AbortController().signal,
+      llm,
+      buildMessages: context.buildMessages,
+      buildMessagesThinkingStripped: () => {
+        thinkingCount += 1;
+        return thinkingStrippedMessages;
+      },
+      tools: [echo],
+      dispatchEvent: createLoopEventDispatcher({
+        appendTranscriptRecord: context.appendTranscriptRecord,
+        emitLiveEvent: sink.emit,
+      }),
+    };
+
+    await expect(runTurn(input)).rejects.toBe(THINKING_SIGNATURE_400);
+
+    // Step 1 attempt + stripped resend + step 2 (already stripped, no resend).
+    expect(attempts).toBe(3);
+    expect(thinkingCount).toBe(2);
+    expect(llm.calls[2]?.messages).toBe(thinkingStrippedMessages);
+    expect(llm.calls[2]?.requestLogFields).toMatchObject({ projection: 'thinking-stripped' });
+  });
+
+  it('re-pays one 400 on the next turn — v1 keeps no recovery state across turns', async () => {
+    // Documents the accepted v1 limitation: `thinkingStrippedActive` is a
+    // `runTurn` local, so a fresh turn starts from the normal projection again.
+    const first = makeThinkingHarness(THINKING_SIGNATURE_400);
+    await runTurn(first.input);
+    const second = makeThinkingHarness(THINKING_SIGNATURE_400);
+
+    await runTurn(second.input);
+
+    expect(second.llm.callCount).toBe(2);
+    expect(second.llm.calls[0]?.messages).toEqual([userMessage('normal projection')]);
+    expect(second.thinkingCalls.count).toBe(1);
+  });
+
+  it('still routes a structural 400 to the strict builder, not the thinking one', async () => {
+    const { input, llm, strictCalls, thinkingCalls } = makeThinkingHarness(ADJACENCY_400);
+
+    const result = await runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(llm.callCount).toBe(2);
+    expect(strictCalls.count).toBe(1);
+    expect(thinkingCalls.count).toBe(0);
+  });
+
+  it('still routes a 413 to the media builder, not the thinking one', async () => {
+    const harness = makeThinkingHarness(
+      new APIRequestTooLargeError(413, 'Request exceeds the maximum size'),
+    );
+    const degradedMessages = [userMessage('media-degraded projection')];
+    const input: RunTurnInput = {
+      ...harness.input,
+      buildMessagesMediaDegraded: () => degradedMessages,
+    };
+
+    const result = await runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(harness.llm.calls[1]?.messages).toBe(degradedMessages);
+    expect(harness.thinkingCalls.count).toBe(0);
   });
 });

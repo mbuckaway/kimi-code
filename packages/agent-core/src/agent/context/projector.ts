@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { ContentPart, Message, TextPart } from '@moonshot-ai/kosong';
+import type { ContentPart, Message, TextPart, ThinkPart } from '@moonshot-ai/kosong';
 
 import { ErrorCodes, KimiError } from '../../errors';
 import { renderToolResultForModel } from './tool-result-render';
@@ -451,28 +451,48 @@ function prepareMessageForProjection(
 }
 
 /**
+ * True when a thinking part carries a reasoning blob at all.
+ *
+ * The single place both `encrypted` predicates below agree on, so they cannot
+ * drift apart. Presence only — deliberately NOT provenance-aware. A blob now
+ * carries an `encryptedProtocol` tag (kosong's `encryptedForProtocol`) so a
+ * signature minted by one wire is never replayed as another's, but that check
+ * needs a target protocol and the projector runs before one is chosen. The
+ * projector therefore preserves every blob and the adapter decides: on a
+ * mismatch kosong's Anthropic base falls through to its unsigned-thinking
+ * branch, and its own empty-message guard removes any assistant message that
+ * leaves behind.
+ */
+function hasReasoningBlob(part: ThinkPart): boolean {
+  return part.encrypted !== undefined;
+}
+
+/**
  * True when a content part carries nothing the provider wire can represent:
  * an empty or whitespace-only text block, or an empty thinking block with no
- * provider signature. A signed thinking block (`encrypted`) is never vacuous
- * — reasoning providers require it back verbatim — and media parts always
- * carry content.
+ * provider signature. A thinking block carrying a reasoning blob is never
+ * vacuous — reasoning providers require it back, and whether this particular
+ * wire may have it back is the adapter's call, not ours (see
+ * {@link hasReasoningBlob}). Media parts always carry content.
  */
 function isVacuousContentPart(part: ContentPart): boolean {
   if (part.type === 'text') return part.text.trim().length === 0;
-  if (part.type === 'think') return part.encrypted === undefined && part.think.trim().length === 0;
+  if (part.type === 'think') return !hasReasoningBlob(part) && part.think.trim().length === 0;
   return false;
 }
 
 /**
  * The parts of a message that the provider wire can actually carry as
- * message content. Unencrypted thinking blocks are excluded: every protocol
+ * message content. Blob-less thinking blocks are excluded: every protocol
  * base moves them out of `content` (OpenAI → `reasoning_content`, Anthropic →
- * `thinking` blocks), so a message whose only parts are unencrypted thinking
- * would reach the wire with neither content nor tool_calls. Signed thinking
- * (`encrypted`) must survive — reasoning providers require it back verbatim.
+ * `thinking` blocks), so a message whose only parts are blob-less thinking
+ * would reach the wire with neither content nor tool_calls. Thinking that
+ * carries a reasoning blob must survive — reasoning providers require it back,
+ * and the per-protocol usability of that blob is decided downstream (see
+ * {@link hasReasoningBlob}).
  */
 function wireSendableContent(content: readonly ContentPart[]): ContentPart[] {
-  return content.filter((part) => part.type !== 'think' || part.encrypted !== undefined);
+  return content.filter((part) => part.type !== 'think' || hasReasoningBlob(part));
 }
 
 function canMergeUserMessage(message: ContextMessage): boolean {
@@ -662,6 +682,63 @@ export function stripMediaPartsBySnapshot(
     return messageChanged ? { ...message, content } : message;
   });
   return changed ? result : (messages as Message[]);
+}
+
+/**
+ * Remove EVERY thinking part from every message, keeping text and tool calls.
+ *
+ * This is the thinking-stripped projection used to resend a request the
+ * provider rejected because it cannot accept its own `thinking` blocks back —
+ * an unverifiable `signature` (a reasoning blob minted by a different wire and
+ * replayed here after a mid-session model switch), or thinking in the latest
+ * assistant message that was altered since the original response. The offending
+ * block lives in history that is replayed every turn, so without this the
+ * session stays wedged on the same 400 forever.
+ *
+ * The strip is TOTAL, with no special-casing by position or error subtype: a
+ * full strip is accepted by the live API even when the latest assistant turn
+ * carried thinking alongside `tool_use`, on both adaptive and
+ * extended-thinking models, and guessing which single block is poison from the
+ * error text is not possible.
+ *
+ * A message the strip empties is dropped only when it has nothing else to
+ * carry — an assistant that still holds tool calls stays, or its tool results
+ * would be orphaned and a thinking 400 would be traded for an adjacency 400.
+ * Purely read-side: the stored history keeps its thinking. Untouched messages
+ * are returned by reference, and a history with no thinking at all returns the
+ * input array itself.
+ */
+export function stripThinkingParts(messages: readonly Message[]): Message[] {
+  if (!messages.some(hasThinkPart)) return messages as Message[];
+  const result: Message[] = [];
+  for (const message of messages) {
+    if (!hasThinkPart(message)) {
+      result.push(message);
+      continue;
+    }
+    const stripped: Message = {
+      ...message,
+      content: message.content.filter((part) => part.type !== 'think'),
+    };
+    if (isWireSendableMessage(stripped)) result.push(stripped);
+  }
+  return result;
+}
+
+function hasThinkPart(message: Message): boolean {
+  return message.content.some((part) => part.type === 'think');
+}
+
+/**
+ * True when a message still has something to say after the strip: a tool result
+ * (dropping it would orphan its call), any tool call, a tool-schema payload, or
+ * at least one non-vacuous content part.
+ */
+function isWireSendableMessage(message: Message): boolean {
+  if (message.role === 'tool') return true;
+  if (message.toolCalls.length > 0) return true;
+  if (message.tools !== undefined && message.tools.length > 0) return true;
+  return !message.content.every(isVacuousContentPart);
 }
 
 /**
