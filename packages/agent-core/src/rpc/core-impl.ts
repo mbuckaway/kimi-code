@@ -493,6 +493,9 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       if (config.defaultPlanMode === true) {
         await mainAgent.planMode.enter();
       }
+      if (config.defaultSwarmMode === true) {
+        mainAgent.swarmMode.enter('manual');
+      }
       await session.writeMetadata();
       await session.flushMetadata();
     } catch (error) {
