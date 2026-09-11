@@ -18,7 +18,6 @@ import {
   parsePattern,
   type PermissionRuleMatchExecution,
 } from '../../src/agent/permission/matches-rule';
-import { AgentSwarmExclusiveDenyPermissionPolicy } from '../../src/agent/permission/policies/agent-swarm-exclusive-deny';
 import { AutoModeApprovePermissionPolicy } from '../../src/agent/permission/policies/auto-mode-approve';
 import { AutoModeAskUserQuestionDenyPermissionPolicy } from '../../src/agent/permission/policies/auto-mode-ask-user-question-deny';
 import { FallbackAskPermissionPolicy } from '../../src/agent/permission/policies/fallback-ask';
@@ -756,7 +755,6 @@ describe('Permission policy chain', () => {
   it('keeps built-in policies in document order', () => {
     expect(createPermissionDecisionPolicies({} as Agent).map((policy) => policy.name)).toEqual([
       'pre-tool-call-hook',
-      'agent-swarm-exclusive-deny',
       'auto-mode-ask-user-question-deny',
       'plan-mode-guard-deny',
       'user-configured-deny',
@@ -775,43 +773,6 @@ describe('Permission policy chain', () => {
       'git-cwd-write-approve',
       'fallback-ask',
     ]);
-  });
-
-  it('denies invalid AgentSwarm batches before auto-mode approval', async () => {
-    const { manager, requestApproval, telemetryTrack } = makePermissionManager(async () => ({
-      decision: 'approved',
-    }));
-    manager.mode = 'auto';
-    const agentSwarmCall = toolCall('call_agent_swarm', 'AgentSwarm', {
-      description: 'Review files',
-      prompt_template: 'Review {{item}}',
-      items: ['src/a.ts', 'src/b.ts'],
-    });
-    const readCall = toolCall('call_read', 'Read', { path: 'src/a.ts' });
-
-    await expect(
-      manager.beforeToolCall(
-        hookContext({
-          id: 'call_agent_swarm',
-          toolName: 'AgentSwarm',
-          toolCalls: [agentSwarmCall, readCall],
-        }),
-      ),
-    ).resolves.toMatchObject({
-      block: true,
-      reason: expect.stringContaining('AgentSwarm must be the only tool call'),
-    });
-
-    expect(requestApproval).not.toHaveBeenCalled();
-    expect(telemetryTrack).toHaveBeenCalledWith(
-      'permission_policy_decision',
-      expect.objectContaining({
-        policy_name: 'agent-swarm-exclusive-deny',
-        tool_name: 'AgentSwarm',
-        permission_mode: 'auto',
-        decision: 'deny',
-      }),
-    );
   });
 });
 
@@ -882,99 +843,6 @@ describe('Simple permission policy direct behavior', () => {
     ).toEqual({ kind: 'approve' });
     expect(
       policy.evaluate(hookContext({ id: 'call_agent_active', toolName: 'Agent' })),
-    ).toBeUndefined();
-  });
-
-  it('denies AgentSwarm mixed with other tool calls in the same response', () => {
-    const policy = new AgentSwarmExclusiveDenyPermissionPolicy();
-    const agentSwarmCall = toolCall('call_agent_swarm', 'AgentSwarm', {
-      description: 'Review files',
-      prompt_template: 'Review {{item}}',
-      items: ['src/a.ts', 'src/b.ts'],
-    });
-    const readCall = toolCall('call_read', 'Read', { path: 'src/a.ts' });
-
-    expect(
-      policy.evaluate(
-        hookContext({
-          id: 'call_agent_swarm',
-          toolName: 'AgentSwarm',
-          toolCalls: [agentSwarmCall, readCall],
-        }),
-      ),
-    ).toMatchObject({
-      kind: 'deny',
-      message: expect.stringContaining('AgentSwarm must be the only tool call'),
-      reason: {
-        agent_swarm_tool_calls: 1,
-        tool_calls: 2,
-      },
-    });
-    expect(
-      policy.evaluate(
-        hookContext({
-          id: 'call_read',
-          toolName: 'Read',
-          args: { path: 'src/a.ts' },
-          toolCalls: [agentSwarmCall, readCall],
-        }),
-      ),
-    ).toMatchObject({ kind: 'deny' });
-  });
-
-  it('denies multiple AgentSwarm calls with one-at-a-time guidance', () => {
-    const policy = new AgentSwarmExclusiveDenyPermissionPolicy();
-    const first = toolCall('call_agent_swarm_1', 'AgentSwarm', {
-      description: 'Review files',
-      prompt_template: 'Review {{item}}',
-      items: ['src/a.ts', 'src/b.ts'],
-    });
-    const second = toolCall('call_agent_swarm_2', 'AgentSwarm', {
-      description: 'Review tests',
-      prompt_template: 'Review {{item}}',
-      items: ['test/a.ts', 'test/b.ts'],
-    });
-
-    const result = policy.evaluate(
-      hookContext({
-        id: 'call_agent_swarm_1',
-        toolName: 'AgentSwarm',
-        toolCalls: [first, second],
-      }),
-    );
-
-    expect(result).toMatchObject({
-      kind: 'deny',
-      message: expect.stringContaining('Multiple AgentSwarm calls are not forbidden'),
-      reason: {
-        agent_swarm_tool_calls: 2,
-        tool_calls: 2,
-      },
-    });
-    expect(result).toMatchObject({
-      message: expect.stringContaining('call one AgentSwarm, wait for its result'),
-    });
-    expect(result).toMatchObject({
-      message: expect.stringContaining('merge the work into a single AgentSwarm'),
-    });
-  });
-
-  it('allows a single AgentSwarm call for later permission policies', () => {
-    const policy = new AgentSwarmExclusiveDenyPermissionPolicy();
-    const agentSwarmCall = toolCall('call_agent_swarm', 'AgentSwarm', {
-      description: 'Review files',
-      prompt_template: 'Review {{item}}',
-      items: ['src/a.ts', 'src/b.ts'],
-    });
-
-    expect(
-      policy.evaluate(
-        hookContext({
-          id: 'call_agent_swarm',
-          toolName: 'AgentSwarm',
-          toolCalls: [agentSwarmCall],
-        }),
-      ),
     ).toBeUndefined();
   });
 

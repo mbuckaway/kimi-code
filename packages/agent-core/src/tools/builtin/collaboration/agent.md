@@ -11,6 +11,8 @@ Usage notes:
 - A subagent's result is only visible to you, not to the user. When the user needs to see what a subagent produced, summarize the relevant parts yourself in your own reply.
 - Subagents use a fixed 30-minute timeout. If one times out, resume the same agent instead of starting over.
 
+When the work decomposes into independent parts, you MUST use `AgentSwarm` — not a single sequential `Agent` call. Partition the work and run it as one swarm.
+
 When NOT to use Agent: skip delegation for trivial work you can do directly — reading a file whose path you already know, searching a small known set of files, or any task that takes only a step or two. Delegation has a context-handoff cost; it pays off only when the task is substantial enough to outweigh it.
 
 Once a subagent is running, leave that scope to it: do not redo its searches or reads in parallel, and do not abandon it midway and finish the job manually. Both undo the context savings the delegation was meant to buy.

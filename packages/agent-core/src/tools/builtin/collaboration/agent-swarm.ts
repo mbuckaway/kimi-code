@@ -53,6 +53,13 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         `Values used to fill ${PROMPT_TEMPLATE_PLACEHOLDER}. Each item launches one new subagent.`,
       ),
+    prompts: z
+      .array(z.string().trim().min(1))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'Full prompts for distinct subagents, one subagent per prompt. Use this instead of items and prompt_template. Provide at least 2 prompts unless you pass resume_agent_ids, and every prompt must be distinct.',
+      ),
     resume_agent_ids: z
       .record(z.string().trim().min(1), z.string().trim().min(1))
       .optional()
@@ -67,7 +74,7 @@ export type AgentSwarmToolInput = z.infer<typeof AgentSwarmToolInputSchema>;
 interface AgentSwarmSpawnSpec {
   readonly kind: 'spawn';
   readonly index: number;
-  readonly item: string;
+  readonly item?: string;
   readonly prompt: string;
 }
 
@@ -120,7 +127,10 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
   }
 
   resolveExecution(args: AgentSwarmToolInput): ToolExecution {
-    const agentCount = (args.items?.length ?? 0) + Object.keys(args.resume_agent_ids ?? {}).length;
+    const agentCount =
+      (args.items?.length ?? 0) +
+      (args.prompts?.length ?? 0) +
+      Object.keys(args.resume_agent_ids ?? {}).length;
     return {
       accesses: ToolAccesses.all(),
       description: `Launching agent swarm: ${args.description}`,
@@ -200,17 +210,26 @@ function createAgentSwarmSpecs(
     prompt: prompt.trim(),
   }));
   const items = (args.items ?? []).map((item) => item.trim());
+  const prompts = (args.prompts ?? []).map((prompt) => prompt.trim());
+  const promptTemplate = normalizeOptionalString(args.prompt_template);
   const itemCount = items.length;
+  const promptCount = prompts.length;
   const resumeCount = resumeEntries.length;
-  const totalCount = resumeCount + itemCount;
-  if (!hasMinimumAgentSwarmInputs(itemCount, resumeCount)) {
-    throw new Error('AgentSwarm requires at least 2 items unless resume_agent_ids is provided.');
+  if (promptCount > 0 && (itemCount > 0 || promptTemplate !== undefined)) {
+    throw new Error('prompts cannot be combined with items or prompt_template.');
   }
-  if (totalCount > MAX_AGENT_SWARM_SUBAGENTS) {
+  const newCount = promptCount + itemCount;
+  if (!hasMinimumAgentSwarmInputs(newCount, resumeCount)) {
+    throw new Error(
+      promptCount > 0
+        ? 'AgentSwarm requires at least 2 prompts unless resume_agent_ids is provided.'
+        : 'AgentSwarm requires at least 2 items unless resume_agent_ids is provided.',
+    );
+  }
+  if (resumeCount + newCount > MAX_AGENT_SWARM_SUBAGENTS) {
     throw new Error(`AgentSwarm supports at most ${String(MAX_AGENT_SWARM_SUBAGENTS)} subagents.`);
   }
-  const promptTemplate = normalizeOptionalString(args.prompt_template);
-  if (items.length > 0 && promptTemplate === undefined) {
+  if (itemCount > 0 && promptTemplate === undefined) {
     throw new Error('prompt_template is required when items are provided.');
   }
   if (promptTemplate !== undefined && !promptTemplate.includes(PROMPT_TEMPLATE_PLACEHOLDER)) {
@@ -230,7 +249,20 @@ function createAgentSwarmSpecs(
       prompt: entry.prompt,
     });
   }
-  if (items.length > 0) {
+  if (promptCount > 0) {
+    prompts.forEach((prompt, index) => {
+      const previousIndex = seenPrompts.get(prompt);
+      if (previousIndex !== undefined) {
+        throw new Error('Duplicate subagent prompts. AgentSwarm requires distinct subagents.');
+      }
+      seenPrompts.set(prompt, index + 1);
+      specs.push({
+        kind: 'spawn',
+        index: specs.length + 1,
+        prompt,
+      });
+    });
+  } else if (items.length > 0) {
     const itemPromptTemplate = promptTemplate!;
     items.forEach((item, index) => {
       const prompt = itemPromptTemplate.split(PROMPT_TEMPLATE_PLACEHOLDER).join(item);

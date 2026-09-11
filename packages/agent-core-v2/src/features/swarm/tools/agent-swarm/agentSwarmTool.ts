@@ -45,7 +45,7 @@ const AGENT_SWARM_PARAMETERS_NO_MODEL = stripSubagentModelParameter(AGENT_SWARM_
 interface AgentSwarmSpawnSpec {
   readonly kind: 'spawn';
   readonly index: number;
-  readonly item: string;
+  readonly item?: string;
   readonly prompt: string;
 }
 
@@ -109,7 +109,10 @@ export class AgentSwarmTool implements IAgentSwarmTool {
   }
 
   resolveExecution(args: AgentSwarmToolInput): ToolExecution {
-    const agentCount = (args.items?.length ?? 0) + Object.keys(args.resume_agent_ids ?? {}).length;
+    const agentCount =
+      (args.items?.length ?? 0) +
+      (args.prompts?.length ?? 0) +
+      Object.keys(args.resume_agent_ids ?? {}).length;
     return {
       accesses: ToolAccesses.all(),
       description: `Launching agent swarm: ${args.description}`,
@@ -154,7 +157,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
       throw new Error2(ErrorCodes.VALIDATION_FAILED, FORK_WITH_RESUME_UNAVAILABLE);
     }
     let plan: SubagentSpawnPlan | undefined;
-    if ((args.items?.length ?? 0) > 0) {
+    if ((args.items?.length ?? 0) > 0 || (args.prompts?.length ?? 0) > 0) {
       if (fork) {
         const incompatible = forkIncompatibility(
           { subagent_type: args.subagent_type, model: args.model },
@@ -222,24 +225,34 @@ async function createAgentSwarmSpecs(
     prompt: prompt.trim(),
   }));
   const items = (args.items ?? []).map((item) => item.trim());
+  const prompts = (args.prompts ?? []).map((prompt) => prompt.trim());
+  const promptTemplate = normalizeOptionalString(args.prompt_template);
   const itemCount = items.length;
+  const promptCount = prompts.length;
   const resumeCount = resumeEntries.length;
-  const totalCount = resumeCount + itemCount;
-  if (!hasMinimumAgentSwarmInputs(itemCount, resumeCount)) {
+  if (promptCount > 0 && (itemCount > 0 || promptTemplate !== undefined)) {
     throw new Error2(
       ErrorCodes.VALIDATION_FAILED,
-      'AgentSwarm requires at least 2 items unless resume_agent_ids is provided.',
+      'prompts cannot be combined with items or prompt_template.',
     );
   }
-  if (totalCount > MAX_AGENT_SWARM_SUBAGENTS) {
+  const newCount = promptCount + itemCount;
+  if (!hasMinimumAgentSwarmInputs(newCount, resumeCount)) {
+    throw new Error2(
+      ErrorCodes.VALIDATION_FAILED,
+      promptCount > 0
+        ? 'AgentSwarm requires at least 2 prompts unless resume_agent_ids is provided.'
+        : 'AgentSwarm requires at least 2 items unless resume_agent_ids is provided.',
+    );
+  }
+  if (resumeCount + newCount > MAX_AGENT_SWARM_SUBAGENTS) {
     throw new Error2(
       ErrorCodes.VALIDATION_FAILED,
       `AgentSwarm supports at most ${String(MAX_AGENT_SWARM_SUBAGENTS)} subagents.`,
-      { details: { total: totalCount, max: MAX_AGENT_SWARM_SUBAGENTS } },
+      { details: { total: resumeCount + newCount, max: MAX_AGENT_SWARM_SUBAGENTS } },
     );
   }
-  const promptTemplate = normalizeOptionalString(args.prompt_template);
-  if (items.length > 0 && promptTemplate === undefined) {
+  if (itemCount > 0 && promptTemplate === undefined) {
     throw new Error2(
       ErrorCodes.VALIDATION_FAILED,
       'prompt_template is required when items are provided.',
@@ -264,7 +277,24 @@ async function createAgentSwarmSpecs(
       prompt: entry.prompt,
     });
   }
-  if (items.length > 0) {
+  if (promptCount > 0) {
+    prompts.forEach((prompt, index) => {
+      const previousIndex = seenPrompts.get(prompt);
+      if (previousIndex !== undefined) {
+        throw new Error2(
+          ErrorCodes.VALIDATION_FAILED,
+          'Duplicate subagent prompts. AgentSwarm requires distinct subagents.',
+          { details: { previousIndex, index: index + 1 } },
+        );
+      }
+      seenPrompts.set(prompt, index + 1);
+      specs.push({
+        kind: 'spawn',
+        index: specs.length + 1,
+        prompt,
+      });
+    });
+  } else if (items.length > 0) {
     const itemPromptTemplate = promptTemplate!;
     items.forEach((item, index) => {
       const prompt = itemPromptTemplate.split(PROMPT_TEMPLATE_PLACEHOLDER).join(item);

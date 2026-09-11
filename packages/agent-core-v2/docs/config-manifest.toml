@@ -117,7 +117,7 @@ default_plan_mode = false
 #   scope: core
 # ##########################################################################
 
-default_swarm_mode = false
+default_swarm_mode = true
 
 # ##########################################################################
 # experimental
