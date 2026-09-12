@@ -234,6 +234,7 @@ support_efforts = ["low", "high"]
   await writeFile(
     join(homeDir, "config.toml"),
     `default_model = "${MODEL_ALIAS}"
+default_swarm_mode = false
 
 [providers.local]
 type = "kimi"
