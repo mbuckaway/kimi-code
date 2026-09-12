@@ -19,6 +19,7 @@ import { Event } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
+import { getConfigSectionContributions } from '#/app/config/configSectionContributions';
 import { IFlagService } from '#/app/flag/flag';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
@@ -45,6 +46,8 @@ import { IWorkspaceInstructionsService } from '#/workspace/workspaceInstructions
 import { IWorkspaceMcpService } from '#/workspace/workspaceMcp/workspaceMcp';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
+import { ISessionSwarmService } from '#/features/swarm/session/sessionSwarm';
+import { DEFAULT_SWARM_MODE_SECTION } from '#/features/swarm/configSection';
 import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IModelService } from '#/kosong/model/model';
@@ -488,6 +491,23 @@ function configStub(values: Record<string, unknown> = {}): IConfigService {
     onDidChangeConfiguration: () => ({ dispose: () => {} }),
     onDidSectionChange: () => ({ dispose: () => {} }),
   } as unknown as IConfigService;
+}
+
+function registeredSectionDefault(domain: string): unknown {
+  return getConfigSectionContributions().find(
+    (contribution) => contribution.domain === domain,
+  )?.options.defaultValue;
+}
+
+function configStubWithRegisteredDefault(
+  domain: string,
+  values: Record<string, unknown> = {},
+): IConfigService {
+  const resolved =
+    values[domain] === undefined
+      ? { ...values, [domain]: registeredSectionDefault(domain) }
+      : values;
+  return configStub(resolved);
 }
 
 function modelCatalogStub(knownIds: readonly string[] = []): IModelCatalog {
@@ -2114,23 +2134,64 @@ describe('SessionLifecycleService', () => {
   });
 
   describe('defaultSwarmMode bootstrap', () => {
-    it('enters swarm mode on a fresh session when config.defaultSwarmMode is true', async () => {
+    it('registers the defaultSwarmMode section default as true', () => {
+      expect(registeredSectionDefault(DEFAULT_SWARM_MODE_SECTION)).toBe(true);
+    });
+
+    it('defers swarm mode to the main agent when config.defaultSwarmMode is true', async () => {
       const { lifecycle, enter, create } = agentLifecycleCapturingSwarmSpy();
+      const swarms = sessionSwarmSpy();
       const svc = await build([
         stubPair(IConfigService, configStub({ defaultSwarmMode: true })),
         stubPair(IAgentLifecycleService, lifecycle),
+        stubPair(ISessionSwarmService, swarms.service),
       ]);
 
       await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
 
-      expect(create).toHaveBeenCalledTimes(1);
-      expect(enter).toHaveBeenCalledWith('manual');
+      expect(create).not.toHaveBeenCalled();
+      expect(enter).not.toHaveBeenCalled();
+      expect(swarms.markDefaultSwarmModePending).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves swarm mode inactive when config.defaultSwarmMode is absent', async () => {
+    it('defers swarm mode to the main agent when config.defaultSwarmMode is unset', async () => {
+      const { lifecycle, enter, create } = agentLifecycleCapturingSwarmSpy();
+      const swarms = sessionSwarmSpy();
+      const svc = await build([
+        stubPair(IConfigService, configStubWithRegisteredDefault(DEFAULT_SWARM_MODE_SECTION)),
+        stubPair(IAgentLifecycleService, lifecycle),
+        stubPair(ISessionSwarmService, swarms.service),
+      ]);
+
+      await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+
+      expect(create).not.toHaveBeenCalled();
+      expect(enter).not.toHaveBeenCalled();
+      expect(swarms.markDefaultSwarmModePending).toHaveBeenCalledTimes(1);
+    });
+
+    it('enters swarm mode at create when the main agent already exists', async () => {
+      const { lifecycle, enter, create } = agentLifecycleCapturingSwarmSpy({
+        mainPreexists: true,
+      });
+      const swarms = sessionSwarmSpy();
+      const svc = await build([
+        stubPair(IConfigService, configStub({ defaultSwarmMode: true })),
+        stubPair(IAgentLifecycleService, lifecycle),
+        stubPair(ISessionSwarmService, swarms.service),
+      ]);
+
+      await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+
+      expect(create).not.toHaveBeenCalled();
+      expect(enter).toHaveBeenCalledWith('manual');
+      expect(swarms.markDefaultSwarmModePending).not.toHaveBeenCalled();
+    });
+
+    it('leaves swarm mode inactive when config.defaultSwarmMode is false', async () => {
       const { lifecycle, enter, create } = agentLifecycleCapturingSwarmSpy();
       const svc = await build([
-        stubPair(IConfigService, configStub({})),
+        stubPair(IConfigService, configStub({ defaultSwarmMode: false })),
         stubPair(IAgentLifecycleService, lifecycle),
       ]);
 
@@ -2162,6 +2223,22 @@ describe('SessionLifecycleService', () => {
     });
   });
 });
+
+function sessionSwarmSpy(): {
+  service: ISessionSwarmService;
+  markDefaultSwarmModePending: ReturnType<typeof vi.fn>;
+} {
+  const markDefaultSwarmModePending = vi.fn();
+  const service: ISessionSwarmService = {
+    _serviceBrand: undefined,
+    markDefaultSwarmModePending,
+    consumeDefaultSwarmModePending: () => false,
+    getSwarmItem: async () => undefined,
+    run: async () => [],
+    cancel: () => {},
+  };
+  return { service, markDefaultSwarmModePending };
+}
 
 function makeSwarmAgentHandle(agentId: string, swarmService: unknown): IAgentScopeHandle {
   return {

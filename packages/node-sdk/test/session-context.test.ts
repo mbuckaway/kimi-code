@@ -166,6 +166,7 @@ describe('Session context', () => {
   it('rejects whitespace-only imported content without mutating context', async () => {
     const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-context-empty-home-');
     const workDir = await makeTempDir(tempDirs, 'kimi-sdk-context-empty-work-');
+    await writeFile(join(homeDir, 'config.toml'), 'default_swarm_mode = false\n', 'utf-8');
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
 
     try {
@@ -216,6 +217,7 @@ async function writeTestConfig(homeDir: string, maxContextSize: number): Promise
     join(homeDir, 'config.toml'),
     `
 default_model = "test-model"
+default_swarm_mode = false
 
 [providers.local]
 type = "openai"

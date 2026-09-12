@@ -1,11 +1,8 @@
 import { Service } from '#/_base/di/service';
 import { activateReminderWhenReady } from '#/features/reminder/internal/reminderActivation';
-import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { TurnEnded } from '#/agent/loop/turnOps';
-import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
-import { denyToolExecution } from '#/agent/toolExecutor/beforeToolExecuteEvent';
-import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
@@ -14,6 +11,7 @@ import { IEventDispatcher } from '#/state/eventDispatcher';
 import { SwarmInjection } from './injection/swarmInjection';
 import { IAgentSwarmService, type SwarmModeTrigger } from './swarm';
 import { SwarmModeEnter, SwarmModeExit, swarmKey } from '../swarmOps';
+import { ISessionSwarmService } from '../session/sessionSwarm';
 
 export class AgentSwarmService extends Service implements IAgentSwarmService {
   declare readonly _serviceBrand: undefined;
@@ -23,13 +21,23 @@ export class AgentSwarmService extends Service implements IAgentSwarmService {
     @IAgentLifecycleService agentLifecycle: IAgentLifecycleService,
     @IEventBus eventBus: IEventBus,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
-    @IAgentToolApprovalService private readonly toolApproval: IAgentToolApprovalService,
-    @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IAgentScopeContext private readonly agentCtx: IAgentScopeContext,
     @IAgentStateService private readonly agentState: IAgentStateService,
+    @ISessionSwarmService private readonly sessionSwarm: ISessionSwarmService,
   ) {
     super();
     this.agentState.contributeState(swarmKey);
+    this._register(
+      this.dispatcher.hooks.onDidRestore.register('swarm', async (_ctx, next) => {
+        if (
+          this.agentCtx.agentId === MAIN_AGENT_ID &&
+          this.sessionSwarm.consumeDefaultSwarmModePending()
+        ) {
+          this.enter('manual');
+        }
+        await next();
+      }),
+    );
     this._register(
       activateReminderWhenReady(agentLifecycle, this.agentCtx, (reminder) =>
         new SwarmInjection(
@@ -44,25 +52,6 @@ export class AgentSwarmService extends Service implements IAgentSwarmService {
         if (this.shouldAutoExit) {
           this.exit();
         }
-      }),
-    );
-    this._register(
-      toolExecutor.onBeforeExecuteTool((event) => {
-        const agentSwarmCount = event.toolCalls.filter(
-          (toolCall) => toolCall.name === 'AgentSwarm',
-        ).length;
-        if (agentSwarmCount === 0 || (agentSwarmCount === 1 && event.toolCalls.length === 1)) {
-          return;
-        }
-        event.veto(
-          denyToolExecution(
-            this.toolApproval.formatDenyMessage(
-              agentSwarmCount > 1
-                ? multipleAgentSwarmDeniedMessage(event.toolCalls.length > agentSwarmCount)
-                : mixedAgentSwarmDeniedMessage(),
-            ),
-          ),
-        );
       }),
     );
   }
@@ -87,22 +76,4 @@ export class AgentSwarmService extends Service implements IAgentSwarmService {
     const trigger = this.agentState.get(swarmKey);
     return trigger === 'task' || trigger === 'tool';
   }
-}
-
-function multipleAgentSwarmDeniedMessage(hasOtherToolCalls: boolean): string {
-  const suffix = hasOtherToolCalls
-    ? ' AgentSwarm also must not be combined with other tools in the same response.'
-    : '';
-  return (
-    'AgentSwarm must be called one swarm at a time. Multiple AgentSwarm calls are not forbidden, ' +
-    'but issue them sequentially: call one AgentSwarm, wait for its result, then call the next; ' +
-    `or merge the work into a single AgentSwarm when one swarm can cover it.${suffix}`
-  );
-}
-
-function mixedAgentSwarmDeniedMessage(): string {
-  return (
-    'AgentSwarm must be the only tool call in a model response. Retry with a single AgentSwarm ' +
-    'call by itself, then call any other tools after it returns.'
-  );
 }

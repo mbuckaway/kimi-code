@@ -51,12 +51,23 @@ export class SessionSwarmService implements ISessionSwarmService {
   declare readonly _serviceBrand: undefined;
 
   private readonly inFlight = new Map<string, AbortController>();
+  private defaultSwarmModePending = false;
 
   constructor(
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @ISessionMetadata private readonly metadata: ISessionMetadata,
   ) {}
+
+  markDefaultSwarmModePending(): void {
+    this.defaultSwarmModePending = true;
+  }
+
+  consumeDefaultSwarmModePending(): boolean {
+    if (!this.defaultSwarmModePending) return false;
+    this.defaultSwarmModePending = false;
+    return true;
+  }
 
   async getSwarmItem(args: {
     readonly callerAgentId: string;

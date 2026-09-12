@@ -1250,6 +1250,15 @@ interface SessionParityPair {
   readonly workDir: string;
 }
 
+/**
+ * Minimal config.toml for the session-lifecycle parity cases that need a
+ * deterministic mode baseline: swarm mode off so neither engine carries the
+ * swarm-mode reminder into the compared history. `default_swarm_mode` is the
+ * only key — a model-less home stays model-less.
+ */
+const SWARM_OFF_CONFIG_TOML = `default_swarm_mode = false
+`;
+
 async function makeSessionParityPair(configToml?: string): Promise<SessionParityPair> {
   const v1HomeDir = await makeTempDir('kimi-sdk-parity-v1-home-');
   const v2HomeDir = await makeTempDir('kimi-sdk-parity-v2-home-');
@@ -1605,7 +1614,7 @@ describe('v1↔v2 session lifecycle parity', () => {
   });
 
   it('forkSession copies the session with merged metadata on both engines', async () => {
-    const pair = await makeSessionParityPair();
+    const pair = await makeSessionParityPair(SWARM_OFF_CONFIG_TOML);
     try {
       await createOnBoth(pair, {
         id: 'session_parity_source',
@@ -1649,7 +1658,7 @@ describe('v1↔v2 session lifecycle parity', () => {
   });
 
   it('forkSession truncates at the given turn index identically on both engines', async () => {
-    const pair = await makeSessionParityPair();
+    const pair = await makeSessionParityPair(SWARM_OFF_CONFIG_TOML);
     try {
       // Source metadata: a metadata-less fork reports `{}` on v1 vs an unset
       // field on v2 (pre-existing gap the full-fork case above never hits) —
@@ -1786,7 +1795,7 @@ describe('v1↔v2 session lifecycle parity', () => {
   });
 
   it('resumeSession returns the same session state modulo the pinned agents gap', async () => {
-    const pair = await makeSessionParityPair();
+    const pair = await makeSessionParityPair(SWARM_OFF_CONFIG_TOML);
     const extraDir = await makeTempDir('kimi-sdk-parity-extra-');
     try {
       await createOnBoth(pair, {
@@ -1821,7 +1830,7 @@ describe('v1↔v2 session lifecycle parity', () => {
   });
 
   it('reloadSession re-materializes a live session identically', async () => {
-    const pair = await makeSessionParityPair();
+    const pair = await makeSessionParityPair(SWARM_OFF_CONFIG_TOML);
     try {
       await createOnBoth(pair, {
         id: 'session_parity_reload',
@@ -1945,11 +1954,18 @@ describe('v1↔v2 session lifecycle parity', () => {
  * Agent fixture: a kimi-typed provider (strict thinking validation on both
  * engines) whose default model declares a thinking effort list, plus a
  * second provider/model for the setModel switch case.
+ *
+ * `default_swarm_mode` is pinned off: v1 injects the swarm-mode reminder into
+ * the context as soon as it enters swarm mode, while v2 reconciles it at the
+ * next step head, so a default-on swarm mode makes every raw history
+ * comparison differ by one injection that has nothing to do with the surface
+ * under test. The swarm surface itself has dedicated cases below.
  */
 const AGENT_CONFIG_TOML = `
 default_provider = "fixture-provider"
 default_model = "fixture-model"
 default_permission_mode = "auto"
+default_swarm_mode = false
 
 [providers.fixture-provider]
 type = "kimi"
@@ -2062,7 +2078,7 @@ describe('v1↔v2 agent interaction parity', () => {
         thinkingEffort: 'off',
         permission: 'manual',
         planMode: false,
-        swarmMode: false,
+        swarmMode: true,
         supermoonMode: false,
         contextTokens: 0,
         maxContextTokens: 0,
@@ -5301,7 +5317,7 @@ describe('v1↔v2 residual surface parity', () => {
   });
 
   it('startBtw forks a side-question child with the parent context on both engines', async () => {
-    const pair = await makeSessionParityPair();
+    const pair = await makeSessionParityPair(SWARM_OFF_CONFIG_TOML);
     try {
       await createOnBoth(pair, { id: 'session_parity_btw' });
       const sessionId = 'session_parity_btw';
@@ -5427,7 +5443,7 @@ describe('v1↔v2 residual surface parity', () => {
   });
 
   it('swarm() enters task-triggered swarm mode, prompts, and auto-exits after the turn', async () => {
-    const pair = await makeSessionParityPair();
+    const pair = await makeSessionParityPair(SWARM_OFF_CONFIG_TOML);
     try {
       await createOnBoth(pair, { id: 'session_parity_swarm_prompt' });
       const input = { sessionId: 'session_parity_swarm_prompt' } as const;

@@ -431,6 +431,12 @@ describe('server-v2 /api/v1 prompts', () => {
 
   it('leaves swarm and supermoon mode untouched when a prompt omits them', async () => {
     const id = await createSession(home as string);
+    await createMainAgent(id);
+
+    const profile = await call<unknown>('POST', `/api/v1/sessions/${id}/profile`, {
+      agent_config: { swarm_mode: false, supermoon_mode: false },
+    });
+    expect(profile.body.code).toBe(0);
 
     const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
       model: 'stub',

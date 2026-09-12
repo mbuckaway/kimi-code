@@ -85,6 +85,7 @@ describe('server-v2 /api/v1/sessions', () => {
 
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-sessions-'));
+    await writeFile(join(home, 'config.toml'), 'default_swarm_mode = false\n', 'utf8');
     server = await startServer({
       hostIdentity: TEST_HOST_IDENTITY,
       host: '127.0.0.1',

@@ -782,6 +782,8 @@ export function swarmServices(
     typeof swarmService === 'function'
       ? {
           _serviceBrand: undefined,
+          markDefaultSwarmModePending: () => {},
+          consumeDefaultSwarmModePending: () => false,
           getSwarmItem: async () => undefined,
           run: swarmService,
           cancel: () => {},

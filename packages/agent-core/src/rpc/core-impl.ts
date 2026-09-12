@@ -493,7 +493,9 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       if (config.defaultPlanMode === true) {
         await mainAgent.planMode.enter();
       }
-      if (config.defaultSwarmMode === true) {
+      // defaultSwarmMode has no schema default (that would serialize it into
+      // every config.toml), so an unset value means the default (on).
+      if (config.defaultSwarmMode !== false) {
         mainAgent.swarmMode.enter('manual');
       }
       await session.writeMetadata();

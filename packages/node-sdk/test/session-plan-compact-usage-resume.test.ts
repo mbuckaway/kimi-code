@@ -373,6 +373,7 @@ async function writeTestConfig(homeDir: string): Promise<void> {
     join(homeDir, 'config.toml'),
     `
 default_model = "test-model"
+default_swarm_mode = false
 
 [providers.local]
 type = "openai"

@@ -48,6 +48,8 @@ export interface SessionSwarmRunResult<T = unknown> {
 export interface ISessionSwarmService {
   readonly _serviceBrand: undefined;
 
+  markDefaultSwarmModePending(): void;
+  consumeDefaultSwarmModePending(): boolean;
   getSwarmItem(args: {
     readonly callerAgentId: string;
     readonly agentId: string;

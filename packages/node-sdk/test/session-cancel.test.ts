@@ -158,6 +158,7 @@ async function writeFakeModelConfig(homeDir: string): Promise<void> {
     join(homeDir, 'config.toml'),
     `
 default_model = "fake-model"
+default_swarm_mode = false
 
 [providers.local]
 type = "kimi"

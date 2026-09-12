@@ -50,5 +50,5 @@ export const DefaultSwarmModeSchema = z.boolean().optional();
 export type DefaultSwarmMode = z.infer<typeof DefaultSwarmModeSchema>;
 
 registerConfigSection(DEFAULT_SWARM_MODE_SECTION, DefaultSwarmModeSchema, {
-  defaultValue: false,
+  defaultValue: true,
 });

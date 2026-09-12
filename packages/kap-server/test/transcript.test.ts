@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -126,6 +126,7 @@ describe('server-v2 /api/v1/sessions/{sid}/transcript', () => {
 
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-transcript-'));
+    await writeFile(join(home, 'config.toml'), 'default_swarm_mode = false\n', 'utf8');
     const modelCatalog: IModelCatalog = {
       _serviceBrand: undefined,
       get: () => {

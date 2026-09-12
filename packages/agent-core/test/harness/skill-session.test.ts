@@ -200,7 +200,12 @@ describe('HarnessAPI session skills', () => {
 
     const records = await readMainWire(created.sessionDir);
     const prompt = records.find((record) => record['type'] === 'turn.prompt');
-    const userMessage = records.find((record) => record['type'] === 'context.append_message');
+    const userMessage = records.find(
+      (record) =>
+        record['type'] === 'context.append_message' &&
+        (record['message'] as { origin?: { kind?: string } } | undefined)?.origin?.kind ===
+          'skill_activation',
+    );
     const skillDir = toPosix(await realpath(join(workDir, '.kimi-code', 'skills', 'phase-one-review')));
     const expectedPrompt = [
       'User activated the skill "phase-one-review". Follow the loaded skill instructions.',
@@ -245,7 +250,10 @@ describe('HarnessAPI session skills', () => {
     );
 
     const context = await rpc.getContext({ sessionId: created.id, agentId: 'main' });
-    expect(context.history.at(0)).toMatchObject({
+    const skillMessage = context.history.find(
+      (entry) => entry.origin?.kind === 'skill_activation',
+    );
+    expect(skillMessage).toMatchObject({
       role: 'user',
       content: [{ type: 'text', text: expectedPrompt }],
       toolCalls: [],
@@ -446,7 +454,8 @@ describe('HarnessAPI session skills', () => {
     expect(second.events.some((event) => event.type === 'skill.activated')).toBe(false);
     const skillDir = toPosix(await realpath(join(workDir, '.kimi-code', 'skills', 'phase-one-review')));
     const context = await second.rpc.getContext({ sessionId: created.id, agentId: 'main' });
-    expect(context.history).toMatchObject([
+    const skillHistory = context.history.filter((entry) => entry.origin?.kind !== 'injection');
+    expect(skillHistory).toMatchObject([
       {
         role: 'user',
         content: [

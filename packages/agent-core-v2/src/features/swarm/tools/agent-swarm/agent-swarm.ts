@@ -36,6 +36,13 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         `Values used to fill ${PROMPT_TEMPLATE_PLACEHOLDER}. Each item launches one new subagent.`,
       ),
+    prompts: z
+      .array(z.string().trim().min(1))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'Full prompts for distinct subagents, one subagent per prompt. Use this instead of items and prompt_template. Provide at least 2 prompts unless you pass resume_agent_ids, and every prompt must be distinct.',
+      ),
     fork: z
       .boolean()
       .optional()
