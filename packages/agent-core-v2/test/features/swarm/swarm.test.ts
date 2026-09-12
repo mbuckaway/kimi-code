@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 
 import { type IAgentScopeHandle } from '#/_base/di/scope';
 import { LifecycleScope } from '#/app/scopes';
@@ -20,7 +20,7 @@ import { createReminderStub, lifecycleWithReminder } from '../reminder/stubs';
 import { AgentContextMemoryService } from '#/agent/contextMemory/contextMemoryService';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { DEFAULT_SWARM_TIMEOUT_MS, SWARM_SECTION } from '#/features/swarm/configSection';
-import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionSwarmService, type SessionSwarmRunResult, type SessionSwarmTask } from '#/features/swarm/session/sessionSwarm';import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
@@ -60,7 +60,7 @@ import { InMemoryStorageService } from '#/persistence/backends/memory/inMemorySt
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
-import { IEventBus } from '#/app/event/eventBus';
+import { IEventBus, ISessionEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
 import { IEventDispatcher } from '#/state/eventDispatcher';
@@ -130,7 +130,14 @@ function mockSwarmHost({
   readonly getSwarmItem?: (...args: any[]) => any;
 } = {}) {
   return {
-    swarmService: { _serviceBrand: undefined, getSwarmItem, run, cancel: vi.fn() },
+    swarmService: {
+      _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
+      getSwarmItem,
+      run,
+      cancel: vi.fn(),
+    },
     callerAgentId: 'main',
   };
 }
@@ -342,6 +349,8 @@ describe('AgentSwarmService', () => {
       await next();
     });
     ix.stub(ISessionSwarmService, {
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem: async () => undefined,
       run: async () => [],
       cancel: () => {},
@@ -610,6 +619,93 @@ describe('AgentSwarmService', () => {
     expect(decision).toBeUndefined();
     expect(permissionGateRan).toBe(true);
     expect(formatDenyMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentSwarmService default swarm mode', () => {
+  let disposables: DisposableStore;
+
+  beforeEach(() => {
+    disposables = new DisposableStore();
+  });
+  afterEach(() => disposables.dispose());
+
+  function host(
+    agentId: string,
+    pending: boolean,
+  ): {
+    readonly swarm: IAgentSwarmService;
+    readonly restore: () => Promise<void>;
+    readonly consumeDefaultSwarmModePending: Mock<() => boolean>;
+  } {
+    const ix = disposables.add(new TestInstantiationService());
+    ix.set(IEventBus, new SyncDescriptor(EventBusService));
+    ix.stub(ILogService, stubLog());
+    ix.stub(ISessionTokenCountingService, {
+      estimateText: () => 0,
+      estimateMessage: () => 0,
+      estimateMessages: () => 0,
+      recordTruncation: () => {},
+    } as unknown as ISessionTokenCountingService);
+    ix.set(IAgentContextMemoryService, new SyncDescriptor(AgentContextMemoryService));
+    ix.stub(IFileSystemStorageService, new InMemoryStorageService());
+    ix.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
+    ix.stub(IAgentLifecycleService, lifecycleWithReminder(createReminderStub()));
+    let taken = false;
+    const consumeDefaultSwarmModePending = vi.fn(() => {
+      if (taken || !pending) return false;
+      taken = true;
+      return true;
+    });
+    ix.stub(ISessionSwarmService, {
+      _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending,
+      getSwarmItem: async () => undefined,
+      run: async () => [],
+      cancel: () => {},
+    });
+    const scope = testWireScope('wire', `swarm-default-${agentId}`);
+    const eventBus = ix.get(IEventBus);
+    const agentCtx = makeAgentScopeContext({ agentId, agentScope: scope });
+    registerTestAgentWire(ix, scope, { log: ix.get(IAppendLogStore), eventBus });
+    (eventBus as ISessionEventBus).activateAgent(agentCtx.agentContext);
+    ix.stub(IAgentScopeContext, agentCtx);
+    const dispatcher = registerTestEventDispatcher(ix);
+    ix.set(IAgentSwarmService, new SyncDescriptor(AgentSwarmService));
+    return {
+      swarm: ix.get(IAgentSwarmService),
+      restore: () => dispatcher.restore(),
+      consumeDefaultSwarmModePending,
+    };
+  }
+
+  it('enters swarm mode when the main agent restores with a pending session default', async () => {
+    const { swarm, restore, consumeDefaultSwarmModePending } = host(MAIN_AGENT_ID, true);
+
+    expect(swarm.isActive).toBe(false);
+    await restore();
+
+    expect(consumeDefaultSwarmModePending).toHaveBeenCalledTimes(1);
+    expect(swarm.isActive).toBe(true);
+  });
+
+  it('never takes the pending session default for a subagent', async () => {
+    const { swarm, restore, consumeDefaultSwarmModePending } = host('agent-1', true);
+
+    await restore();
+
+    expect(consumeDefaultSwarmModePending).not.toHaveBeenCalled();
+    expect(swarm.isActive).toBe(false);
+  });
+
+  it('leaves swarm mode inactive when the session default is not pending', async () => {
+    const { swarm, restore, consumeDefaultSwarmModePending } = host(MAIN_AGENT_ID, false);
+
+    await restore();
+
+    expect(consumeDefaultSwarmModePending).toHaveBeenCalledTimes(1);
+    expect(swarm.isActive).toBe(false);
   });
 });
 

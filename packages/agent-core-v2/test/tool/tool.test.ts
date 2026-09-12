@@ -2935,6 +2935,8 @@ describe('AgentSwarm tool execution contract', () => {
     );
     const swarmService: ISessionSwarmService = {
       _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
       cancel: () => {},
@@ -3011,6 +3013,8 @@ describe('AgentSwarm tool execution contract', () => {
     );
     const swarmService: ISessionSwarmService = {
       _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
       cancel: () => {},
@@ -3072,6 +3076,8 @@ describe('AgentSwarm tool execution contract', () => {
     );
     const swarmService: ISessionSwarmService = {
       _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
       cancel: () => {},
@@ -3141,6 +3147,8 @@ describe('AgentSwarm tool execution contract', () => {
     );
     const swarmService: ISessionSwarmService = {
       _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem,
       run: runSwarm as ISessionSwarmService['run'],
       cancel: () => {},
@@ -3267,6 +3275,8 @@ describe('AgentSwarm tool execution contract', () => {
     );
     const swarmService: ISessionSwarmService = {
       _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
       cancel: () => {},
@@ -3314,6 +3324,8 @@ describe('AgentSwarm tool execution contract', () => {
     );
     const swarmService: ISessionSwarmService = {
       _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
       cancel: () => {},
@@ -3370,6 +3382,8 @@ describe('AgentSwarm tool execution contract', () => {
     );
     const swarmService: ISessionSwarmService = {
       _serviceBrand: undefined,
+      markDefaultSwarmModePending: () => {},
+      consumeDefaultSwarmModePending: () => false,
       getSwarmItem: async () => undefined,
       run: runSwarm as ISessionSwarmService['run'],
       cancel: () => {},

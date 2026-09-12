@@ -16,6 +16,7 @@ import { DEFAULT_PLAN_MODE_SECTION } from '#/features/plan/configSection';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { DEFAULT_SWARM_MODE_SECTION } from '#/features/swarm/configSection';
 import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
+import { ISessionSwarmService } from '#/features/swarm/session/sessionSwarm';
 import { LifecycleScope } from '#/app/scopes';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
@@ -214,12 +215,16 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
         await planHandle.accessor.get(IAgentPlanService).enter();
       }
       if (this.config.get<boolean>(DEFAULT_SWARM_MODE_SECTION) === true) {
-        const swarmAgent = main ?? (await ensureMainAgent(handle));
-        const swarmHandle = agents.handleOf(swarmAgent.agentId);
-        if (swarmHandle === undefined) {
-          throw new Error2(ErrorCodes.AGENT_NOT_FOUND, 'Main agent was not found');
+        const existingMain = agents.get(MAIN_AGENT_ID);
+        if (existingMain === undefined) {
+          handle.accessor.get(ISessionSwarmService).markDefaultSwarmModePending();
+        } else {
+          const swarmHandle = agents.handleOf(existingMain.agentId);
+          if (swarmHandle === undefined) {
+            throw new Error2(ErrorCodes.AGENT_NOT_FOUND, 'Main agent was not found');
+          }
+          swarmHandle.accessor.get(IAgentSwarmService).enter('manual');
         }
-        swarmHandle.accessor.get(IAgentSwarmService).enter('manual');
       }
       await this.appendSessionIndexEntry(sessionId, opts.workDir);
     } catch (error) {

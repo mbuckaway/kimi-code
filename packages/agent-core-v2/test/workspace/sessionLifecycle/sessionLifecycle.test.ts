@@ -46,6 +46,7 @@ import { IWorkspaceInstructionsService } from '#/workspace/workspaceInstructions
 import { IWorkspaceMcpService } from '#/workspace/workspaceMcp/workspaceMcp';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
+import { ISessionSwarmService } from '#/features/swarm/session/sessionSwarm';
 import { DEFAULT_SWARM_MODE_SECTION } from '#/features/swarm/configSection';
 import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
 import { IModelCatalog } from '#/kosong/model/catalog';
@@ -2137,30 +2138,54 @@ describe('SessionLifecycleService', () => {
       expect(registeredSectionDefault(DEFAULT_SWARM_MODE_SECTION)).toBe(true);
     });
 
-    it('enters swarm mode on a fresh session when config.defaultSwarmMode is true', async () => {
+    it('defers swarm mode to the main agent when config.defaultSwarmMode is true', async () => {
       const { lifecycle, enter, create } = agentLifecycleCapturingSwarmSpy();
+      const swarms = sessionSwarmSpy();
       const svc = await build([
         stubPair(IConfigService, configStub({ defaultSwarmMode: true })),
         stubPair(IAgentLifecycleService, lifecycle),
+        stubPair(ISessionSwarmService, swarms.service),
       ]);
 
       await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
 
-      expect(create).toHaveBeenCalledTimes(1);
-      expect(enter).toHaveBeenCalledWith('manual');
+      expect(create).not.toHaveBeenCalled();
+      expect(enter).not.toHaveBeenCalled();
+      expect(swarms.markDefaultSwarmModePending).toHaveBeenCalledTimes(1);
     });
 
-    it('enters swarm mode on a fresh session when config.defaultSwarmMode is unset', async () => {
+    it('defers swarm mode to the main agent when config.defaultSwarmMode is unset', async () => {
       const { lifecycle, enter, create } = agentLifecycleCapturingSwarmSpy();
+      const swarms = sessionSwarmSpy();
       const svc = await build([
         stubPair(IConfigService, configStubWithRegisteredDefault(DEFAULT_SWARM_MODE_SECTION)),
         stubPair(IAgentLifecycleService, lifecycle),
+        stubPair(ISessionSwarmService, swarms.service),
       ]);
 
       await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
 
-      expect(create).toHaveBeenCalledTimes(1);
+      expect(create).not.toHaveBeenCalled();
+      expect(enter).not.toHaveBeenCalled();
+      expect(swarms.markDefaultSwarmModePending).toHaveBeenCalledTimes(1);
+    });
+
+    it('enters swarm mode at create when the main agent already exists', async () => {
+      const { lifecycle, enter, create } = agentLifecycleCapturingSwarmSpy({
+        mainPreexists: true,
+      });
+      const swarms = sessionSwarmSpy();
+      const svc = await build([
+        stubPair(IConfigService, configStub({ defaultSwarmMode: true })),
+        stubPair(IAgentLifecycleService, lifecycle),
+        stubPair(ISessionSwarmService, swarms.service),
+      ]);
+
+      await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+
+      expect(create).not.toHaveBeenCalled();
       expect(enter).toHaveBeenCalledWith('manual');
+      expect(swarms.markDefaultSwarmModePending).not.toHaveBeenCalled();
     });
 
     it('leaves swarm mode inactive when config.defaultSwarmMode is false', async () => {
@@ -2198,6 +2223,22 @@ describe('SessionLifecycleService', () => {
     });
   });
 });
+
+function sessionSwarmSpy(): {
+  service: ISessionSwarmService;
+  markDefaultSwarmModePending: ReturnType<typeof vi.fn>;
+} {
+  const markDefaultSwarmModePending = vi.fn();
+  const service: ISessionSwarmService = {
+    _serviceBrand: undefined,
+    markDefaultSwarmModePending,
+    consumeDefaultSwarmModePending: () => false,
+    getSwarmItem: async () => undefined,
+    run: async () => [],
+    cancel: () => {},
+  };
+  return { service, markDefaultSwarmModePending };
+}
 
 function makeSwarmAgentHandle(agentId: string, swarmService: unknown): IAgentScopeHandle {
   return {

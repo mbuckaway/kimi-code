@@ -1,6 +1,6 @@
 import { Service } from '#/_base/di/service';
 import { activateReminderWhenReady } from '#/features/reminder/internal/reminderActivation';
-import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { TurnEnded } from '#/agent/loop/turnOps';
 import { IEventBus } from '#/app/event/eventBus';
@@ -11,6 +11,7 @@ import { IEventDispatcher } from '#/state/eventDispatcher';
 import { SwarmInjection } from './injection/swarmInjection';
 import { IAgentSwarmService, type SwarmModeTrigger } from './swarm';
 import { SwarmModeEnter, SwarmModeExit, swarmKey } from '../swarmOps';
+import { ISessionSwarmService } from '../session/sessionSwarm';
 
 export class AgentSwarmService extends Service implements IAgentSwarmService {
   declare readonly _serviceBrand: undefined;
@@ -22,9 +23,21 @@ export class AgentSwarmService extends Service implements IAgentSwarmService {
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentScopeContext private readonly agentCtx: IAgentScopeContext,
     @IAgentStateService private readonly agentState: IAgentStateService,
+    @ISessionSwarmService private readonly sessionSwarm: ISessionSwarmService,
   ) {
     super();
     this.agentState.contributeState(swarmKey);
+    this._register(
+      this.dispatcher.hooks.onDidRestore.register('swarm', async (_ctx, next) => {
+        if (
+          this.agentCtx.agentId === MAIN_AGENT_ID &&
+          this.sessionSwarm.consumeDefaultSwarmModePending()
+        ) {
+          this.enter('manual');
+        }
+        await next();
+      }),
+    );
     this._register(
       activateReminderWhenReady(agentLifecycle, this.agentCtx, (reminder) =>
         new SwarmInjection(
