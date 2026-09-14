@@ -25,6 +25,7 @@ import {
 import type { BackgroundTaskInfo, BackgroundTaskStatus } from '@moonshot-ai/kimi-code-sdk';
 
 import { SELECT_POINTER } from '@/tui/constant/symbols';
+import { BRAILLE_SPINNER_FRAMES, BRAILLE_SPINNER_INTERVAL_MS } from '#/tui/constant/rendering';
 import { currentTheme } from '#/tui/theme';
 import { printableChar } from '@/tui/utils/printable-key';
 import { sanitizeShellOutput } from '#/tui/utils/shell-output';
@@ -107,6 +108,21 @@ function formatRelativeTime(ts: number | null | undefined): string {
   if (hours < 24) return `${String(hours)}h ago`;
   const days = Math.floor(hours / 24);
   return `${String(days)}d ago`;
+}
+
+/**
+ * `⠋ running mm:ss` for a running row. The frame samples the wall clock, so
+ * the controller's 1 Hz poll re-renders advance the spinner without any state.
+ */
+function runningStatusText(startedAt: number, now: number): string {
+  const frameIndex =
+    Math.floor(now / BRAILLE_SPINNER_INTERVAL_MS) % BRAILLE_SPINNER_FRAMES.length;
+  const frame = BRAILLE_SPINNER_FRAMES[frameIndex] ?? '';
+  const elapsedSeconds = Math.floor(Math.max(0, now - startedAt) / 1000);
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  const clock = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${frame} ${STATUS_LABEL.running} ${clock}`;
 }
 
 function singleLine(text: string): string {
@@ -483,7 +499,10 @@ export class TasksBrowserApp extends Container implements Focusable {
       : currentTheme.fg(idColor, task.taskId);
     const idPad = ' '.repeat(Math.max(0, 17 - task.taskId.length));
 
-    const status = STATUS_LABEL[task.status];
+    const status =
+      task.status === 'running'
+        ? runningStatusText(task.startedAt, Date.now())
+        : STATUS_LABEL[task.status];
     const statusBadge = currentTheme.fg(statusColor(task.status), status);
 
     const prefix = `${pointerStyled}${idText}${idPad} ${statusBadge}`;

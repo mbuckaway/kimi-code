@@ -607,10 +607,11 @@ export class ToolCallComponent extends Container {
   private subagentResultSummary: string | undefined;
   private subagentError: string | undefined;
   private streamingProgressTimer: ReturnType<typeof setInterval> | undefined;
-  private subagentElapsedTimer: ReturnType<typeof setInterval> | undefined;
+  /** Advances the header braille frame and refreshes subagent elapsed seconds. */
+  private spinnerTimer: ReturnType<typeof setInterval> | undefined;
   private subagentStartedAtMs: number | undefined;
   private subagentEndedAtMs: number | undefined;
-  private subagentSpinnerFrame = 0;
+  private spinnerFrame = 0;
 
   // ── Live progress lines ──────────────────────────────────────────
   //
@@ -664,7 +665,7 @@ export class ToolCallComponent extends Container {
     this.buildContent();
     this.buildSubagentBlock();
     this.syncStreamingProgressTimer();
-    this.syncSubagentElapsedTimer();
+    this.syncSpinnerTimer();
     this.startDetachHintTimer();
   }
 
@@ -739,7 +740,7 @@ export class ToolCallComponent extends Container {
     this.stopDetachHintTimer();
     this.finalizeSubagentElapsedIfNeeded();
     this.syncStreamingProgressTimer();
-    this.syncSubagentElapsedTimer();
+    this.syncSpinnerTimer();
     this.headerText.setText(this.buildHeader());
     // rebuildBody (not rebuildContent) so the call preview re-renders
     // with the collapsed cap applied — Write streaming previews and
@@ -805,7 +806,7 @@ export class ToolCallComponent extends Container {
 
   dispose(): void {
     this.stopStreamingProgressTimer();
-    this.stopSubagentElapsedTimer();
+    this.stopSpinnerTimer();
     this.stopDetachHintTimer();
   }
 
@@ -1068,37 +1069,46 @@ export class ToolCallComponent extends Container {
     this.addChild(new Text(currentTheme.dim(DETACH_HINT_TEXT), 2, 0));
   }
 
-  private syncSubagentElapsedTimer(): void {
-    const phase = this.getDerivedSubagentPhase();
-    const shouldTick =
-      this.isSingleSubagentView() &&
-      this.subagentStartedAtMs !== undefined &&
-      (phase === 'queued' || phase === 'spawning' || phase === 'running');
-    if (!shouldTick) {
-      this.stopSubagentElapsedTimer();
+  private syncSpinnerTimer(): void {
+    if (!this.hasSpinningHeader()) {
+      this.stopSpinnerTimer();
       return;
     }
-    if (this.ui === undefined || this.subagentElapsedTimer !== undefined) return;
-    this.subagentElapsedTimer = setInterval(() => {
-      const latestPhase = this.getDerivedSubagentPhase();
-      if (latestPhase !== 'queued' && latestPhase !== 'spawning' && latestPhase !== 'running') {
-        this.stopSubagentElapsedTimer();
+    if (this.ui === undefined || this.spinnerTimer !== undefined) return;
+    this.spinnerTimer = setInterval(() => {
+      if (!this.hasSpinningHeader()) {
+        this.stopSpinnerTimer();
         return;
       }
       // Drives both the braille spinner in the header and the elapsed-seconds
       // refresh. Only the header text changes on a tick, so we avoid rebuilding
       // the body (which would defeat the per-component render caches).
-      this.subagentSpinnerFrame = (this.subagentSpinnerFrame + 1) % BRAILLE_SPINNER_FRAMES.length;
+      this.spinnerFrame = (this.spinnerFrame + 1) % BRAILLE_SPINNER_FRAMES.length;
       this.headerText.setText(this.buildHeader());
       this.notifySnapshotChange();
       this.ui?.requestRender();
     }, BRAILLE_SPINNER_INTERVAL_MS);
   }
 
-  private stopSubagentElapsedTimer(): void {
-    if (this.subagentElapsedTimer === undefined) return;
-    clearInterval(this.subagentElapsedTimer);
-    this.subagentElapsedTimer = undefined;
+  /** True while the header marker animates — a live subagent or a blocked WaitFor. */
+  private hasSpinningHeader(): boolean {
+    if (this.isWaitingForTask()) return true;
+    const phase = this.getDerivedSubagentPhase();
+    return (
+      this.isSingleSubagentView() &&
+      this.subagentStartedAtMs !== undefined &&
+      (phase === 'queued' || phase === 'spawning' || phase === 'running')
+    );
+  }
+
+  private isWaitingForTask(): boolean {
+    return this.toolCall.name === 'WaitFor' && this.result === undefined;
+  }
+
+  private stopSpinnerTimer(): void {
+    if (this.spinnerTimer === undefined) return;
+    clearInterval(this.spinnerTimer);
+    this.spinnerTimer = undefined;
   }
 
   private finalizeSubagentElapsedIfNeeded(): void {
@@ -1127,7 +1137,7 @@ export class ToolCallComponent extends Container {
     this.subagentPhase = meta.runInBackground ? 'backgrounded' : 'queued';
     this.subagentStartedAtMs = Date.now();
     this.subagentEndedAtMs = undefined;
-    this.syncSubagentElapsedTimer();
+    this.syncSpinnerTimer();
     this.headerText.setText(this.buildHeader());
     this.rebuildContent();
     this.notifySnapshotChange();
@@ -1148,7 +1158,7 @@ export class ToolCallComponent extends Container {
     ) {
       this.subagentPhase = 'running';
     }
-    this.syncSubagentElapsedTimer();
+    this.syncSpinnerTimer();
     this.headerText.setText(this.buildHeader());
     this.rebuildContent();
     this.notifySnapshotChange();
@@ -1175,7 +1185,7 @@ export class ToolCallComponent extends Container {
     if (this.subagentText.trim().length === 0 && this.subagentResultSummary !== undefined) {
       this.subagentText = this.subagentResultSummary;
     }
-    this.syncSubagentElapsedTimer();
+    this.syncSpinnerTimer();
     this.headerText.setText(this.buildHeader());
     this.rebuildContent();
     this.notifySnapshotChange();
@@ -1212,7 +1222,7 @@ export class ToolCallComponent extends Container {
     this.subagentPhase = 'failed';
     this.subagentEndedAtMs ??= Date.now();
     this.subagentError = payload.error;
-    this.syncSubagentElapsedTimer();
+    this.syncSpinnerTimer();
     this.headerText.setText(this.buildHeader());
     this.rebuildContent();
     this.notifySnapshotChange();
@@ -1260,7 +1270,7 @@ export class ToolCallComponent extends Container {
     if (phaseUnchanged && !errorChanged) return;
     this.backgroundTaskTerminalPhase = phase;
     this.subagentEndedAtMs ??= Date.now();
-    this.syncSubagentElapsedTimer();
+    this.syncSpinnerTimer();
     this.headerText.setText(this.buildHeader());
     this.rebuildContent();
     this.notifySnapshotChange();
@@ -1453,6 +1463,11 @@ export class ToolCallComponent extends Container {
       bullet = isError ? currentTheme.fg('error', '✗ ') : currentTheme.fg('success', STATUS_BULLET);
     } else if (isTruncated) {
       bullet = currentTheme.fg('error', '✗ ');
+    } else if (this.isWaitingForTask()) {
+      // WaitFor can block for minutes; a braille frame reads as alive where
+      // the static in-flight bullet looked frozen.
+      const frame = BRAILLE_SPINNER_FRAMES[this.spinnerFrame] ?? BRAILLE_SPINNER_FRAMES[0];
+      bullet = currentTheme.fg('primary', `${frame} `);
     } else {
       // Solid bullet for in-flight tools — the previous marker ↔ blank
       // toggle caused visible flicker on every re-render.
@@ -1852,17 +1867,17 @@ export class ToolCallComponent extends Container {
     if (phase === 'backgrounded') return currentTheme.dim('◐ ');
     // Active (queued / spawning / running): a braille spinner reads as alive
     // where a static bullet looked frozen.
-    const frame = BRAILLE_SPINNER_FRAMES[this.subagentSpinnerFrame] ?? BRAILLE_SPINNER_FRAMES[0];
+    const frame = BRAILLE_SPINNER_FRAMES[this.spinnerFrame] ?? BRAILLE_SPINNER_FRAMES[0];
     return currentTheme.fg('primary', `${frame} `);
   }
 
   private buildSingleSubagentBlock(): void {
     const phase = this.getDerivedSubagentPhase();
 
-    // Every state shares the same skeleton — header, a one-line tool summary,
+    // Every state shares the same skeleton — header, the per-sub-tool list,
     // and a fixed two-row content window — so the card height is identical
     // while running and after it finishes (no end-of-run shrink).
-    this.addChild(new Text(this.buildSingleSubagentSummaryLine(), 0, 0));
+    this.buildSingleSubagentToolList();
 
     if (phase === 'failed') {
       this.addChild(this.buildSingleSubagentResultWindow('error'));
@@ -1918,24 +1933,41 @@ export class ToolCallComponent extends Container {
     return undefined;
   }
 
-  private buildSingleSubagentSummaryLine(): string {
-    const toolCount = this.subToolActivities.size;
-    const countLabel = `${String(toolCount)} tool${toolCount === 1 ? '' : 's'}`;
-    const current = this.getCurrentSubToolActivity();
-    if (current === undefined) {
-      return currentTheme.dim(`  · ${countLabel}`);
+  /**
+   * Per-sub-tool rows, oldest first, matching the grouped card: finished and
+   * failed tools read as `Used <name> (<keyArg>)`, ongoing ones as
+   * `Using <name> (<keyArg>)`. `subToolActivities` grows without bound, so only
+   * the newest {@link MAX_SUB_TOOL_CALLS_SHOWN} rows render and the older ones
+   * are reported as a hidden count.
+   */
+  private buildSingleSubagentToolList(): void {
+    const activities = [...this.subToolActivities.values()].toSorted(
+      (a, b) => a.orderSeq - b.orderSeq,
+    );
+    const hidden = activities.length - MAX_SUB_TOOL_CALLS_SHOWN;
+    if (hidden > 0) {
+      const suffix = hidden > 1 ? 's' : '';
+      this.addChild(
+        new Text(
+          currentTheme.italic(currentTheme.dim(`  ${String(hidden)} more tool call${suffix} ...`)),
+          0,
+          0,
+        ),
+      );
     }
-    const verb = current.phase === 'ongoing' ? 'Using' : 'Used';
-    const keyArg = extractKeyArgument(current.name, current.args, this.workspaceDir);
-    const nameCol = currentTheme.fg('primary', current.name);
-    const argCol = keyArg ? currentTheme.dim(` (${keyArg})`) : '';
-    const mark =
-      current.phase === 'failed'
-        ? currentTheme.fg('error', ' ✗')
-        : current.phase === 'done'
-          ? currentTheme.fg('success', ' ✓')
-          : '';
-    return `${currentTheme.dim(`  · ${countLabel} · `)}${verb} ${nameCol}${argCol}${mark}`;
+    for (const activity of activities.slice(-MAX_SUB_TOOL_CALLS_SHOWN)) {
+      const mark =
+        activity.phase === 'failed'
+          ? currentTheme.fg('error', '✗')
+          : activity.phase === 'done'
+            ? currentTheme.fg('success', '✓')
+            : currentTheme.dim('…');
+      const verb = activity.phase === 'ongoing' ? 'Using' : 'Used';
+      const keyArg = extractKeyArgument(activity.name, activity.args, this.workspaceDir);
+      const nameCol = currentTheme.fg('primary', activity.name);
+      const argCol = keyArg ? currentTheme.dim(` (${keyArg})`) : '';
+      this.addChild(new Text(`  ${mark} ${verb} ${nameCol}${argCol}`, 0, 0));
+    }
   }
 
   private buildSingleSubagentActiveWindow(): Component {

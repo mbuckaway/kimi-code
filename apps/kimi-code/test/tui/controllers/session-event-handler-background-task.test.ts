@@ -7,6 +7,7 @@ import {
   type SubagentLifecycleEvent,
 } from '#/tui/controllers/subagent-event-handler';
 import { getBuiltInPalette } from '#/tui/theme';
+import type { TranscriptEntry } from '#/tui/types';
 
 function makeStreamingUIStub() {
   return {
@@ -27,14 +28,18 @@ function makeStreamingUIStub() {
 
 function makeSubagentHandler() {
   const backgroundTasks = new Map<string, never>();
+  const transcriptEntries: TranscriptEntry[] = [];
   const host = {
     state: {
       appState: { availableModels: {} },
       ui: { requestRender: vi.fn() },
       transcriptContainer: { addChild: vi.fn() },
+      transcriptEntries,
     },
     streamingUI: makeStreamingUIStub(),
-    appendTranscriptEntry: vi.fn(),
+    appendTranscriptEntry: vi.fn((entry: TranscriptEntry) => {
+      transcriptEntries.push(entry);
+    }),
     btwPanelController: { routeEvent: vi.fn(() => false) },
     updateActivityPane: vi.fn(),
   };
@@ -43,7 +48,7 @@ function makeSubagentHandler() {
     backgroundTaskTranscriptedTerminal: new Set(),
     syncBackgroundAgentBadge: vi.fn(),
   });
-  return { handler, backgroundTasks };
+  return { handler, backgroundTasks, transcriptEntries, host };
 }
 
 function spawnEvent(subagentId: string, runInBackground: boolean): SubagentLifecycleEvent {
@@ -67,6 +72,17 @@ function completedEvent(subagentId: string): SubagentLifecycleEvent {
     subagentId,
     parentToolCallId: `tc-${subagentId}`,
     resultSummary: 'done',
+  } as unknown as SubagentLifecycleEvent;
+}
+
+function failedEvent(subagentId: string, error: string): SubagentLifecycleEvent {
+  return {
+    sessionId: 's1',
+    agentId: 'main',
+    type: 'subagent.failed',
+    subagentId,
+    parentToolCallId: `tc-${subagentId}`,
+    error,
   } as unknown as SubagentLifecycleEvent;
 }
 
@@ -123,6 +139,7 @@ function makeSessionEventHost() {
       toolOutputExpanded: false,
       todoPanel: { getTodos: vi.fn(() => []) },
       transcriptContainer: { addChild: vi.fn() },
+      transcriptEntries: [],
       tasksBrowser: undefined,
       footer: { setBackgroundCounts: vi.fn() },
       ui: { requestRender: vi.fn() },
@@ -217,5 +234,67 @@ describe('SessionEventHandler — background.task.terminated', () => {
     );
 
     expect(store.get('agent-7')).toBeUndefined();
+  });
+});
+
+describe('SubAgentEventHandler — background agent transcript entries', () => {
+  const START_MS = 1_700_000_000_000;
+
+  it('records the agent id and start time on the started entry', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(START_MS);
+    const { handler, transcriptEntries } = makeSubagentHandler();
+
+    handler.handleLifecycleEvent(spawnEvent('bg-1', true));
+    vi.useRealTimers();
+
+    const status = transcriptEntries[0]?.backgroundAgentStatus;
+    expect(status?.phase).toBe('started');
+    expect(status?.agentId).toBe('bg-1');
+    expect(status?.startedAtMs).toBe(START_MS);
+  });
+
+  it('does not append a second entry when the background agent completes', () => {
+    const { handler, transcriptEntries } = makeSubagentHandler();
+    handler.handleLifecycleEvent(spawnEvent('bg-2', true));
+
+    handler.handleLifecycleEvent(completedEvent('bg-2'));
+
+    expect(transcriptEntries).toHaveLength(1);
+    expect(transcriptEntries[0]?.backgroundAgentStatus?.phase).toBe('started');
+    expect(handler.activityStore.get('bg-2')?.status).toBe('completed');
+    expect(handler.activityStore.get('bg-2')?.resultSummary).toBe('done');
+  });
+
+  it('does not append a second entry when the background agent fails, keeping the terminal side effects', () => {
+    const { handler, transcriptEntries, host } = makeSubagentHandler();
+    handler.handleLifecycleEvent(spawnEvent('bg-3', true));
+
+    handler.handleLifecycleEvent(failedEvent('bg-3', 'boom'));
+
+    expect(transcriptEntries).toHaveLength(1);
+    expect(transcriptEntries[0]?.backgroundAgentStatus?.phase).toBe('started');
+    expect(handler.activityStore.get('bg-3')?.status).toBe('failed');
+    expect(handler.activityStore.get('bg-3')?.error).toBe('boom');
+    expect(host.streamingUI.applyBackgroundTaskTerminalStatus).toHaveBeenCalledWith({
+      agentId: 'bg-3',
+      description: 'task bg-3',
+      status: 'failed',
+      errorText: 'boom',
+    });
+  });
+
+  it('appends a terminal entry when no live started entry exists for a resumed agent', () => {
+    const { handler, transcriptEntries } = makeSubagentHandler();
+    handler.backgroundAgentMetadata.set('bg-4', {
+      agentId: 'bg-4',
+      parentToolCallId: 'task-bg-4',
+      description: 'resumed task',
+    });
+
+    handler.handleLifecycleEvent(completedEvent('bg-4'));
+
+    expect(transcriptEntries).toHaveLength(1);
+    expect(transcriptEntries[0]?.backgroundAgentStatus?.phase).toBe('completed');
   });
 });

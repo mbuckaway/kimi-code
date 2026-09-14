@@ -1,6 +1,8 @@
 import type { Terminal } from '@moonshot-ai/pi-tui';
 import type { BackgroundTaskInfo, BackgroundTaskStatus, Event } from '@moonshot-ai/kimi-code-sdk';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { BRAILLE_SPINNER_FRAMES, BRAILLE_SPINNER_INTERVAL_MS } from '#/tui/constant/rendering';
 
 import {
   TasksBrowserApp,
@@ -85,6 +87,16 @@ function makeApp(
   columns = 120,
 ): TasksBrowserApp {
   return new TasksBrowserApp(makeProps(props), fakeTerminal(rows, columns));
+}
+
+/**
+ * The rendered body line that carries `taskId`. The list row shares that line
+ * with the first rows of the right-hand detail pane, so the returned text
+ * carries both.
+ */
+function rowFor(props: Partial<TasksBrowserProps>, taskId: string): string {
+  const lines = makeApp(props).render(120).map(strip);
+  return lines.find((line) => line.includes(taskId)) ?? '';
 }
 
 describe('TasksBrowserApp — full-screen rendering', () => {
@@ -339,6 +351,106 @@ describe('TasksBrowserApp — full-screen rendering', () => {
   it('falls back to a single line when the terminal is too small', () => {
     const out = strip(makeApp({}, 5, 30).render(30).join('\n'));
     expect(out).toContain('too small');
+  });
+});
+
+describe('TasksBrowserApp — running row live indicator', () => {
+  // Fixed epoch: 1_700_000_000_000 / BRAILLE_SPINNER_INTERVAL_MS lands exactly
+  // on frame index 0, so every expectation below is deterministic.
+  const NOW_MS = 1_700_000_000_000;
+
+  const frameAt = (now: number): string =>
+    BRAILLE_SPINNER_FRAMES[
+      Math.floor(now / BRAILLE_SPINNER_INTERVAL_MS) % BRAILLE_SPINNER_FRAMES.length
+    ] ?? '';
+
+  function runningRow(startedAt: number): string {
+    return rowFor(
+      {
+        tasks: [task({ taskId: 'bash-aaaaaaaa', status: 'running', startedAt })],
+        selectedTaskId: 'bash-aaaaaaaa',
+      },
+      'bash-aaaaaaaa',
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('renders a spinner frame and mm:ss elapsed on a running row', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+
+    const row = runningRow(NOW_MS - 5_000);
+
+    expect(row).toContain(`${frameAt(NOW_MS)} running 00:05`);
+  });
+
+  it('counts the elapsed clock and the spinner frame up on a later render', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+    const app = makeApp({
+      tasks: [task({ taskId: 'bash-aaaaaaaa', status: 'running', startedAt: NOW_MS - 5_000 })],
+      selectedTaskId: 'bash-aaaaaaaa',
+    });
+    const before = strip(app.render(120).join('\n'));
+
+    vi.setSystemTime(NOW_MS + 1_000);
+    const after = strip(app.render(120).join('\n'));
+
+    expect(before).toContain(`${frameAt(NOW_MS)} running 00:05`);
+    expect(after).toContain(`${frameAt(NOW_MS + 1_000)} running 00:06`);
+    expect(frameAt(NOW_MS)).not.toBe(frameAt(NOW_MS + 1_000));
+  });
+
+  it.each([
+    { elapsedMs: 0, clock: '00:00' },
+    { elapsedMs: 999, clock: '00:00' },
+    { elapsedMs: 1_000, clock: '00:01' },
+    { elapsedMs: 59_999, clock: '00:59' },
+    { elapsedMs: 60_000, clock: '01:00' },
+    { elapsedMs: 3_599_999, clock: '59:59' },
+    { elapsedMs: 3_600_000, clock: '60:00' },
+  ])('renders $elapsedMs ms of elapsed time as $clock', ({ elapsedMs, clock }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+
+    const row = runningRow(NOW_MS - elapsedMs);
+
+    expect(row).toContain(`running ${clock}`);
+  });
+
+  it('clamps a start time in the future to 00:00', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+
+    const row = runningRow(NOW_MS + 5_000);
+
+    expect(row).toContain(`${frameAt(NOW_MS)} running 00:00`);
+  });
+
+  it.each([
+    ['completed', 'completed'],
+    ['failed', 'failed'],
+    ['timed_out', 'timed out'],
+    ['killed', 'killed'],
+    ['lost', 'lost'],
+  ] as const)('leaves a %s row showing the plain status word', (status, label) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+
+    const row = rowFor(
+      {
+        tasks: [task({ taskId: 'bash-aaaaaaaa', status, endedAt: NOW_MS - 1_000 })],
+        selectedTaskId: 'bash-aaaaaaaa',
+      },
+      'bash-aaaaaaaa',
+    );
+
+    expect(row).toContain(label);
+    expect(row).not.toContain('⠋');
+    expect(row).not.toMatch(/\d{2}:\d{2}/);
   });
 });
 

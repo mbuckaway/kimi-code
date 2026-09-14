@@ -6594,7 +6594,15 @@ command = "vim"
       sendQueued,
     );
 
-    expect(stripSgr(renderTranscript(driver))).toContain('k2-cheap');
+    const entry = driver.state.transcriptEntries.find(
+      (candidate) => candidate.backgroundAgentStatus?.agentId === 'agent-1',
+    );
+    expect(entry?.backgroundAgentStatus?.detail).toContain('k2-cheap');
+    // The live line shows progress instead of the spawn detail; the model stays
+    // on the entry for the static and terminal fallbacks.
+    expect(stripSgr(renderTranscript(driver))).toContain(
+      'explore agent running in background (0s)',
+    );
   });
 
   it('does not let later transcript entries reduce the AgentSwarm grid height', async () => {
