@@ -141,6 +141,7 @@ import { createTUIState, type TUIState } from './tui-state';
 import {
   INITIAL_LIVE_PANE,
   type AppState,
+  type BackgroundAgentStatusData,
   type InlineSkillActivation,
   type KimiTUIOptions,
   type LivePaneState,
@@ -2926,14 +2927,14 @@ export class KimiTUI {
           return tc;
         }
         if (entry.backgroundAgentStatus !== undefined) {
-          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus);
+          return this.createBackgroundAgentStatusComponent(entry.backgroundAgentStatus);
         }
         return entry.renderMode === 'notice'
           ? new NoticeMessageComponent(entry.content, entry.detail)
           : new StatusMessageComponent(entry.content, entry.color);
       case 'status':
         if (entry.backgroundAgentStatus !== undefined) {
-          return new BackgroundAgentStatusComponent(entry.backgroundAgentStatus);
+          return this.createBackgroundAgentStatusComponent(entry.backgroundAgentStatus);
         }
         return entry.renderMode === 'notice'
           ? new NoticeMessageComponent(entry.content, entry.detail)
@@ -2943,6 +2944,21 @@ export class KimiTUI {
       default:
         return null;
     }
+  }
+
+  /** Wire the live activity store into a started background-agent line so the
+   *  component can show progress and transition in place. Replay entries have
+   *  no live record, so the component falls back to the static data. */
+  private createBackgroundAgentStatusComponent(
+    data: BackgroundAgentStatusData,
+  ): BackgroundAgentStatusComponent {
+    return new BackgroundAgentStatusComponent(
+      data,
+      this.sessionEventHandler.subAgentEventHandler.activityStore,
+      () => {
+        this.state.ui.requestRender();
+      },
+    );
   }
 
   appendTranscriptEntry(entry: TranscriptEntry): void {

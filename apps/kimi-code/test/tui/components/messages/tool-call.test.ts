@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToolCallComponent } from '#/tui/components/messages/tool-call';
+import { BRAILLE_SPINNER_FRAMES, BRAILLE_SPINNER_INTERVAL_MS } from '#/tui/constant/rendering';
 import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { darkColors } from '#/tui/theme/colors';
 
@@ -1105,89 +1106,122 @@ describe('ToolCallComponent', () => {
     component.dispose();
   });
 
-  it('summarizes subagent tools as a count plus the current tool', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const component = new ToolCallComponent(
-      {
-        id: 'call_agent_tools',
-        name: 'Agent',
-        args: { description: 'inspect tools' },
-      },
-      undefined,
-    );
-    component.onSubagentSpawned({
-      agentId: 'sub_tools',
-      agentName: 'explore',
-      runInBackground: false,
-    });
-
-    for (let i = 1; i <= 4; i++) {
-      const id = `sub_tools:read-${String(i)}`;
-      component.appendSubToolCall({ id, name: 'Read', args: { path: `file${String(i)}.ts` } });
-      component.finishSubToolCall({ tool_call_id: id, output: 'ok', is_error: false });
-    }
-    component.appendSubToolCall({
-      id: 'sub_tools:grep',
-      name: 'Grep',
-      args: { pattern: 'auth' },
-    });
-
-    const out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Running (inspect tools) · 5 tools · 0s');
-    // Only the current (most recent ongoing) tool appears in the summary line.
-    expect(out).toContain('Using Grep (auth)');
-    // No per-tool activity rows are rendered.
-    expect(out).not.toContain('file1.ts');
-    expect(out).not.toContain('file2.ts');
-    expect(out).not.toContain('file3.ts');
-    expect(out).not.toContain('file4.ts');
-    expect(out).not.toContain('Used Read');
-  });
-
-  it('keeps the subagent tool summary pinned to the most recent tool', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const component = new ToolCallComponent(
-      {
-        id: 'call_agent_stable_tools',
-        name: 'Agent',
-        args: { description: 'inspect tools' },
-      },
-      undefined,
-    );
-    component.onSubagentSpawned({
-      agentId: 'sub_tools',
-      agentName: 'explore',
-      runInBackground: false,
-    });
-
-    for (let i = 1; i <= 5; i++) {
-      component.appendSubToolCall({
-        id: `sub_tools:read-${String(i)}`,
-        name: 'Read',
-        args: { path: `file${String(i)}.ts` },
+  describe('single subagent tool list', () => {
+    function makeSingleSubagentComponent(id: string): ToolCallComponent {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const component = new ToolCallComponent(
+        { id, name: 'Agent', args: { description: 'inspect tools' } },
+        undefined,
+      );
+      component.onSubagentSpawned({
+        agentId: `${id}:sub`,
+        agentName: 'explore',
+        runInBackground: false,
       });
+      return component;
     }
-    component.appendSubToolCallDelta({
-      id: 'sub_tools:read-1',
-      name: 'Read',
-      argumentsPart: '{"path":"file1-updated.ts"}',
-    });
-    component.finishSubToolCall({
-      tool_call_id: 'sub_tools:read-1',
-      output: 'ok',
-      is_error: false,
+
+    it('lists one row per sub-tool with Used and Using markers in start order', () => {
+      const component = makeSingleSubagentComponent('call_agent_list');
+      component.appendSubToolCall({ id: 'list:read', name: 'Read', args: { path: 'src/a.ts' } });
+      component.finishSubToolCall({ tool_call_id: 'list:read', output: 'ok', is_error: false });
+      component.appendSubToolCall({ id: 'list:edit', name: 'Edit', args: { path: 'src/b.ts' } });
+      component.finishSubToolCall({ tool_call_id: 'list:edit', output: 'boom', is_error: true });
+      component.appendSubToolCall({ id: 'list:grep', name: 'Grep', args: { pattern: 'auth' } });
+
+      const out = strip(component.render(120).join('\n'));
+
+      expect(out).toContain('Explore Agent Running (inspect tools) · 3 tools · 0s');
+      expect(out).toContain('✓ Used Read (src/a.ts)');
+      expect(out).toContain('✗ Used Edit (src/b.ts)');
+      expect(out).toContain('… Using Grep (auth)');
+      expect(out.indexOf('Used Read')).toBeLessThan(out.indexOf('Used Edit'));
+      expect(out.indexOf('Used Edit')).toBeLessThan(out.indexOf('Using Grep'));
+      expect(out).not.toContain('more tool call');
+      component.dispose();
     });
 
-    const out = strip(component.render(120).join('\n'));
-    // The updated/finished older tool must not surface in the summary.
-    expect(out).not.toContain('file1-updated.ts');
-    expect(out).not.toContain('file2.ts');
-    expect(out).not.toContain('file3.ts');
-    expect(out).not.toContain('file4.ts');
-    // Only the most recent ongoing tool is shown.
-    expect(out).toContain('Using Read (file5.ts)');
+    it('caps the rows at four and reports the hidden tool calls', () => {
+      const component = makeSingleSubagentComponent('call_agent_cap');
+      for (let i = 1; i <= 6; i++) {
+        const id = `cap:read-${String(i)}`;
+        component.appendSubToolCall({ id, name: 'Read', args: { path: `file${String(i)}.ts` } });
+        component.finishSubToolCall({ tool_call_id: id, output: 'ok', is_error: false });
+      }
+
+      const out = strip(component.render(120).join('\n'));
+      const rows = out.split('\n').filter((line) => line.includes('Used Read'));
+
+      expect(out).toContain('2 more tool calls ...');
+      expect(out).toContain('✓ Used Read (file6.ts)');
+      expect(out).not.toContain('file1.ts');
+      expect(out).not.toContain('file2.ts');
+      expect(rows.length).toBe(4);
+      component.dispose();
+    });
+
+    it('shows every row without a hidden count at exactly the cap', () => {
+      const component = makeSingleSubagentComponent('call_agent_cap_exact');
+      for (let i = 1; i <= 4; i++) {
+        const id = `cap4:read-${String(i)}`;
+        component.appendSubToolCall({ id, name: 'Read', args: { path: `file${String(i)}.ts` } });
+        component.finishSubToolCall({ tool_call_id: id, output: 'ok', is_error: false });
+      }
+
+      const out = strip(component.render(120).join('\n'));
+      const rows = out.split('\n').filter((line) => line.includes('Used Read'));
+
+      expect(rows.length).toBe(4);
+      expect(out).toContain('✓ Used Read (file1.ts)');
+      expect(out).not.toContain('more tool call');
+      component.dispose();
+    });
+
+    it('uses the singular wording for a single hidden tool call', () => {
+      const component = makeSingleSubagentComponent('call_agent_cap_one');
+      for (let i = 1; i <= 5; i++) {
+        const id = `cap1:read-${String(i)}`;
+        component.appendSubToolCall({ id, name: 'Read', args: { path: `file${String(i)}.ts` } });
+        component.finishSubToolCall({ tool_call_id: id, output: 'ok', is_error: false });
+      }
+
+      const out = strip(component.render(120).join('\n'));
+
+      expect(out).toContain('1 more tool call ...');
+      expect(out).not.toContain('1 more tool calls ...');
+      component.dispose();
+    });
+
+    it('keeps the newest rows when an older sub-tool is updated and finished', () => {
+      const component = makeSingleSubagentComponent('call_agent_stable_tools');
+      for (let i = 1; i <= 5; i++) {
+        component.appendSubToolCall({
+          id: `stable:read-${String(i)}`,
+          name: 'Read',
+          args: { path: `file${String(i)}.ts` },
+        });
+      }
+      component.appendSubToolCallDelta({
+        id: 'stable:read-1',
+        name: 'Read',
+        argumentsPart: '{"path":"file1-updated.ts"}',
+      });
+      component.finishSubToolCall({
+        tool_call_id: 'stable:read-1',
+        output: 'ok',
+        is_error: false,
+      });
+
+      const out = strip(component.render(120).join('\n'));
+
+      // read-1 keeps its original order sequence, so updating and finishing it
+      // does not pull it back into the four-row window.
+      expect(out).not.toContain('file1-updated.ts');
+      expect(out).toContain('… Using Read (file5.ts)');
+      expect(out).toContain('1 more tool call ...');
+      component.dispose();
+    });
   });
 
   it('wraps the single subagent active window with a hanging gutter', () => {
@@ -1974,6 +2008,78 @@ describe('ToolCallComponent', () => {
       );
 
       expect(strip(component.render(100).join('\n'))).toContain('Waiting for any background task');
+
+      component.dispose();
+    });
+
+    it('spins the header marker while the wait is still running', () => {
+      vi.useFakeTimers();
+      const component = new ToolCallComponent(
+        {
+          id: 'call_wait_spin',
+          name: 'WaitFor',
+          args: { task_id: 'question-80w0h7nw', timeout: 300 },
+        },
+        undefined,
+        stubTui(30),
+      );
+
+      const first = strip(component.render(100).join('\n'));
+      vi.advanceTimersByTime(BRAILLE_SPINNER_INTERVAL_MS);
+      const next = strip(component.render(100).join('\n'));
+
+      expect(first).toContain(
+        `${BRAILLE_SPINNER_FRAMES[0] ?? ''} Waiting for background task (question-80w0h7nw)`,
+      );
+      expect(next).toContain(
+        `${BRAILLE_SPINNER_FRAMES[1] ?? ''} Waiting for background task (question-80w0h7nw)`,
+      );
+      expect(next).not.toContain(`${STATUS_BULLET}Waiting for background task`);
+
+      component.dispose();
+    });
+
+    it('drops the spinner for the finished marker once the wait returns', () => {
+      vi.useFakeTimers();
+      const requestRender = vi.fn();
+      const component = new ToolCallComponent(
+        {
+          id: 'call_wait_spin_done',
+          name: 'WaitFor',
+          args: { task_id: 'question-80w0h7nw', timeout: 300 },
+        },
+        undefined,
+        { terminal: { rows: 30 }, requestRender } as unknown as TUI,
+      );
+
+      vi.advanceTimersByTime(BRAILLE_SPINNER_INTERVAL_MS);
+      component.setResult({
+        tool_call_id: 'call_wait_spin_done',
+        output: waitForCompletedOutput,
+        is_error: false,
+      });
+      vi.advanceTimersByTime(BRAILLE_SPINNER_INTERVAL_MS * 3);
+
+      const out = strip(component.render(100).join('\n'));
+      expect(out).toContain(`${STATUS_BULLET}Waited for background task (question-80w0h7nw)`);
+      expect(BRAILLE_SPINNER_FRAMES.filter((frame) => out.includes(frame))).toEqual([]);
+      expect(requestRender).toHaveBeenCalledTimes(1);
+
+      component.dispose();
+    });
+
+    it('keeps the static marker for other running tools', () => {
+      vi.useFakeTimers();
+      const component = new ToolCallComponent(
+        { id: 'call_read_spin_guard', name: 'Read', args: { path: 'foo.ts' } },
+        undefined,
+        stubTui(30),
+      );
+
+      vi.advanceTimersByTime(BRAILLE_SPINNER_INTERVAL_MS * 3);
+
+      const out = strip(component.render(100).join('\n'));
+      expect(out).toContain(`${STATUS_BULLET}Using Read (foo.ts)`);
 
       component.dispose();
     });

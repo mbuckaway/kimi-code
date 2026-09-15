@@ -316,6 +316,9 @@ export class SubAgentEventHandler {
       }
       const extras =
         event.resultSummary === undefined ? undefined : { resultSummary: event.resultSummary };
+      // A live started entry renders this terminal state in place; only a
+      // resumed agent (no started entry in this process) needs a fresh entry.
+      if (this.hasLiveStartedEntry(event.subagentId)) return;
       this.appendBackgroundAgentEntry('completed', backgroundMeta, extras);
       return;
     }
@@ -355,6 +358,8 @@ export class SubAgentEventHandler {
       if (taskId !== undefined) {
         this.deps.backgroundTaskTranscriptedTerminal.add(taskId);
       }
+      // Same as the completed path: the live started entry transitions in place.
+      if (this.hasLiveStartedEntry(event.subagentId)) return;
       this.appendBackgroundAgentEntry('failed', backgroundMeta, { error: event.error });
       return;
     }
@@ -435,9 +440,22 @@ export class SubAgentEventHandler {
       renderMode: 'plain',
       content: status.headline,
       detail: status.detail,
-      backgroundAgentStatus: status,
+      backgroundAgentStatus:
+        phase === 'started'
+          ? { ...status, agentId: meta.agentId, startedAtMs: Date.now() }
+          : status,
     };
     this.host.appendTranscriptEntry(entry);
+  }
+
+  /** True when this process appended the live started entry for the agent, so
+   *  the transcript component can show the terminal state in place. */
+  private hasLiveStartedEntry(agentId: string): boolean {
+    return this.host.state.transcriptEntries.some(
+      (entry) =>
+        entry.backgroundAgentStatus?.phase === 'started' &&
+        entry.backgroundAgentStatus.agentId === agentId,
+    );
   }
 
   private rememberSubagent(

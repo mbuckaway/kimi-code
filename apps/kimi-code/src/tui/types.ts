@@ -166,6 +166,10 @@ export interface BackgroundAgentStatusData {
   readonly phase: BackgroundAgentStatusPhase;
   readonly headline: string;
   readonly detail?: string;
+  /** Set on the `started` entry so the component can follow the live record. */
+  readonly agentId?: string;
+  /** Spawn time of a live background agent, used for the elapsed label. */
+  readonly startedAtMs?: number;
 }
 
 export interface CompactionTranscriptData {
