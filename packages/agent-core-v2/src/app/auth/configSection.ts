@@ -42,10 +42,20 @@ export const MoonshotServiceConfigSchema = z.object({
 
 export type MoonshotServiceConfig = z.infer<typeof MoonshotServiceConfigSchema>;
 
+export const SearchServiceConfigSchema = z.object({
+  provider: z.enum(['kimi', 'zai', 'disabled']).optional(),
+  apiKey: z.string().optional(),
+});
+
+export type SearchServiceConfig = z.infer<typeof SearchServiceConfigSchema>;
+
+export type SearchProviderId = NonNullable<SearchServiceConfig['provider']>;
+
 export const ServicesConfigSchema = z
   .object({
     moonshotSearch: MoonshotServiceConfigSchema.optional(),
     moonshotFetch: MoonshotServiceConfigSchema.optional(),
+    search: SearchServiceConfigSchema.optional(),
   })
   .passthrough();
 
@@ -178,6 +188,7 @@ export const servicesToToml = (value: unknown, rawSnake: unknown): unknown => {
   const out = cloneRecord(rawSnake);
   writeService(out, 'moonshot_search', value['moonshotSearch']);
   writeService(out, 'moonshot_fetch', value['moonshotFetch']);
+  writeService(out, 'search', value['search']);
   return out;
 };
 

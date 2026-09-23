@@ -71,6 +71,9 @@ keep_alive_on_exit = false
 [language]
 reply_language = "en"
 
+[services.search]
+provider = "kimi"
+
 [services.moonshot_search]
 base_url = "https://api.kimi.com/coding/v1/search"
 api_key = ""
@@ -488,7 +491,7 @@ reply_language = "en"     # 可选 — 默认值为 "en"
 
 ## `services`
 
-`services` 配置网页搜索（`moonshot_search`）和网页抓取（`moonshot_fetch`）两项内置服务。只识别这两个固定 key，其他 key 会被忽略。两项字段相同：
+`services` 配置内置的网页服务：网页搜索（`moonshot_search`）、网页抓取（`moonshot_fetch`），以及网页搜索后端选择（`search`）。`moonshot_search` 和 `moonshot_fetch` 两项字段相同：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -506,6 +509,21 @@ api_key = "sk-xxx"
 
 [services.moonshot_fetch]
 base_url = "https://api.moonshot.cn/v1/fetch"
+api_key = "sk-xxx"
+```
+
+### `search`
+
+`search` 选择 `WebSearch` 工具使用的后端。不设置该项时，继续使用 `moonshot_search` 服务。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | `string` | 否 | 后端：`kimi`（`moonshot_search` 服务）、`zai`（z.ai 搜索 API）或 `disabled`（关闭网页搜索） |
+| `api_key` | `string` | 否 | z.ai API 密钥，`provider = "zai"` 时使用 |
+
+```toml
+[services.search]
+provider = "zai"
 api_key = "sk-xxx"
 ```
 

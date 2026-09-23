@@ -12,8 +12,13 @@ import { IConfigService } from '#/app/config/config';
 import { IProviderService, type ProviderConfig } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
 
-import { SERVICES_SECTION, type ServicesConfig } from '../configSection';
+import {
+  SERVICES_SECTION,
+  type SearchProviderId,
+  type ServicesConfig,
+} from '../configSection';
 import { MoonshotWebSearchProvider } from './providers/moonshot-web-search';
+import { ZaiWebSearchProvider } from './providers/zai-web-search';
 import type { WebSearchProvider } from '#/agent/tools/web-search/web-search';
 import { IWebSearchProviderService } from './webSearch';
 
@@ -29,11 +34,36 @@ export class WebSearchProviderService implements IWebSearchProviderService {
   ) {}
 
   getWebSearchProvider(): WebSearchProvider | undefined {
-    return this.fromServicesConfig() ?? this.fromManagedOAuth();
+    const search = this.config.get<ServicesConfig>(SERVICES_SECTION)?.search;
+    switch (searchSelectionOf(search?.provider)) {
+      case 'moonshot':
+        return this.moonshotProvider();
+      case 'disabled':
+        return undefined;
+      case 'zai':
+        return this.zaiProvider(search?.apiKey);
+    }
   }
 
   hasWebSearchProvider(): boolean {
-    return this.configuredSearch() !== undefined || this.managedTokenProvider() !== undefined;
+    const search = this.config.get<ServicesConfig>(SERVICES_SECTION)?.search;
+    switch (searchSelectionOf(search?.provider)) {
+      case 'moonshot':
+        return this.configuredSearch() !== undefined || this.managedTokenProvider() !== undefined;
+      case 'disabled':
+        return false;
+      case 'zai':
+        return this.zaiProvider(search?.apiKey) !== undefined;
+    }
+  }
+
+  private moonshotProvider(): WebSearchProvider | undefined {
+    return this.fromServicesConfig() ?? this.fromManagedOAuth();
+  }
+
+  private zaiProvider(apiKey: string | undefined): ZaiWebSearchProvider | undefined {
+    const key = nonEmptyString(apiKey);
+    return key === undefined ? undefined : new ZaiWebSearchProvider({ apiKey: key });
   }
 
   private configuredSearch(): (ServicesConfig['moonshotSearch'] & { baseUrl: string }) | undefined {
@@ -90,6 +120,18 @@ export class WebSearchProviderService implements IWebSearchProviderService {
 function nonEmptyString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+}
+
+type SearchSelection = 'moonshot' | 'disabled' | 'zai';
+
+const SEARCH_SELECTIONS: Record<SearchProviderId, SearchSelection> = {
+  kimi: 'moonshot',
+  disabled: 'disabled',
+  zai: 'zai',
+};
+
+function searchSelectionOf(provider: SearchProviderId | undefined): SearchSelection {
+  return provider === undefined ? 'moonshot' : SEARCH_SELECTIONS[provider];
 }
 
 registerScopedService(

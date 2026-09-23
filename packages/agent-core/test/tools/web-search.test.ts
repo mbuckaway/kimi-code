@@ -12,6 +12,7 @@ import {
   type WebSearchProvider,
 } from '../../src/tools/builtin/web/web-search';
 import { MoonshotWebSearchProvider } from '../../src/tools/providers/moonshot-web-search';
+import { ZaiWebSearchProvider } from '../../src/tools/providers/zai-web-search';
 import { toolContentString } from './fixtures/fake-kaos';
 import { executeTool } from './fixtures/execute-tool';
 
@@ -372,5 +373,177 @@ describe('MoonshotWebSearchProvider', () => {
     expect(fetchImpl.mock.calls[0]?.[1]?.headers).toMatchObject({
       Authorization: 'Bearer fresh-token',
     });
+  });
+});
+
+describe('ZaiWebSearchProvider', () => {
+  it('maps search_result entries to WebSearchResult fields', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          search_result: [
+            {
+              title: 'T',
+              content: 'S',
+              link: 'https://e.com',
+              media: 'E Co',
+              publish_date: '2026-01-01',
+              icon: 'https://e.com/favicon.ico',
+              refer: 'ref-1',
+            },
+            { title: 'T2', content: 'S2', link: 'https://e.com/2' },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const provider = new ZaiWebSearchProvider({ apiKey: 'k', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([
+      {
+        title: 'T',
+        url: 'https://e.com',
+        snippet: 'S',
+        date: '2026-01-01',
+        siteName: 'E Co',
+      },
+      { title: 'T2', url: 'https://e.com/2', snippet: 'S2' },
+    ]);
+  });
+
+  it('omits date and siteName when publish_date and media are empty', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          search_result: [
+            { title: 'T', content: 'S', link: 'https://e.com', media: '', publish_date: '' },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const provider = new ZaiWebSearchProvider({ apiKey: 'k', fetchImpl });
+
+    const [result] = await provider.search('q');
+
+    expect(result).toEqual({ title: 'T', url: 'https://e.com', snippet: 'S' });
+  });
+
+  it('omits date and siteName when publish_date and media are not strings', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          search_result: [{ title: 'T', content: 'S', link: 'https://e.com', media: 7, publish_date: null }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const provider = new ZaiWebSearchProvider({ apiKey: 'k', fetchImpl });
+
+    const [result] = await provider.search('q');
+
+    expect(result).toEqual({ title: 'T', url: 'https://e.com', snippet: 'S' });
+  });
+
+  it('falls back to empty strings for a result missing title, content and link', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ search_result: [{}] }), { status: 200 }),
+      );
+    const provider = new ZaiWebSearchProvider({ apiKey: 'k', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([{ title: '', url: '', snippet: '' }]);
+  });
+
+  it('returns an empty list when the response has no search_result', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    const provider = new ZaiWebSearchProvider({ apiKey: 'k', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([]);
+  });
+
+  it('posts the search-prime body and headers to the default z.ai endpoint', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ search_result: [] }), { status: 200 }),
+      );
+    const provider = new ZaiWebSearchProvider({ apiKey: 'zai-key', fetchImpl });
+
+    await provider.search('hello');
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith('https://api.z.ai/api/paas/v4/web_search', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer zai-key',
+        'Content-Type': 'application/json',
+        'Accept-Language': 'en-US,en',
+      },
+      body: JSON.stringify({
+        search_engine: 'search-prime',
+        search_query: 'hello',
+        count: 10,
+      }),
+    });
+  });
+
+  it('posts to the configured base URL override', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ search_result: [] }), { status: 200 }),
+      );
+    const provider = new ZaiWebSearchProvider({
+      apiKey: 'zai-key',
+      baseUrl: 'https://zai.example.test/v4/web_search',
+      fetchImpl,
+    });
+
+    await provider.search('hello');
+
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('https://zai.example.test/v4/web_search');
+  });
+
+  it('reports the response body detail on a 401 auth failure', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('invalid api key', { status: 401 }));
+    const provider = new ZaiWebSearchProvider({ apiKey: 'zai-key', fetchImpl });
+
+    await expect(provider.search('q')).rejects.toThrow(
+      /^Zai search request failed: HTTP 401 \(auth\/unauthorized\)\. invalid api key$/,
+    );
+  });
+
+  it('reports the status and body detail on a non-200 response', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('server exploded', { status: 500 }));
+    const provider = new ZaiWebSearchProvider({ apiKey: 'zai-key', fetchImpl });
+
+    await expect(provider.search('q')).rejects.toThrow(
+      /^Zai search request failed: HTTP 500\. server exploded$/,
+    );
+  });
+
+  it('reports only the status when the error body cannot be read', async () => {
+    const response = new Response(null, { status: 503 });
+    vi.spyOn(response, 'text').mockRejectedValue(new Error('body unavailable'));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const provider = new ZaiWebSearchProvider({ apiKey: 'zai-key', fetchImpl });
+
+    await expect(provider.search('q')).rejects.toThrow(
+      /^Zai search request failed: HTTP 503\.$/,
+    );
   });
 });

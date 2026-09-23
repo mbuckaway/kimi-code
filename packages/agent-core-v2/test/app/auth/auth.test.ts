@@ -23,12 +23,14 @@ import {
 } from '#/app/auth/configSection';
 import { IWebSearchProviderService } from '#/app/auth/webSearch/webSearch';
 import { WebSearchProviderService } from '#/app/auth/webSearch/webSearchService';
+import { ZaiWebSearchProvider } from '#/app/auth/webSearch/providers/zai-web-search';
 import { IAuthLegacyService } from '#/app/authLegacy/authLegacy';
 import { AuthLegacyService } from '#/app/authLegacy/authLegacyService';
 import { IConfigService } from '#/app/config/config';
 import { ConfigRegistry } from '#/app/config/configService';
 import { IEventService } from '#/app/event/event';
 import type { Event2 } from '#/app/event/event2';
+import { ErrorCodes } from '#/errors';
 import { IFlagService } from '#/app/flag/flag';
 import { ILogService } from '#/_base/log/log';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
@@ -1424,6 +1426,200 @@ describe('WebSearchProviderService', () => {
     expect(resolveTokenProvider).not.toHaveBeenCalled();
   });
 
+  it('builds a zai search provider from the services.search config', async () => {
+    servicesConfig = { search: { provider: 'zai', apiKey: 'zai-key' } };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({
+        search_result: [
+          {
+            title: 'Title',
+            content: 'Snippet',
+            link: 'https://example.com/a',
+            media: 'Example',
+            publish_date: '2026-01-02',
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).not.toBeUndefined();
+    const results = await provider!.search('hello');
+
+    expect(results).toEqual([
+      {
+        title: 'Title',
+        url: 'https://example.com/a',
+        snippet: 'Snippet',
+        date: '2026-01-02',
+        siteName: 'Example',
+      },
+    ]);
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.z.ai/api/paas/v4/web_search');
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({
+      Authorization: 'Bearer zai-key',
+      'Content-Type': 'application/json',
+      'Accept-Language': 'en-US,en',
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      search_engine: 'search-prime',
+      search_query: 'hello',
+      count: 10,
+    });
+  });
+
+  it('prefers the services.search zai provider over the managed oauth provider', async () => {
+    servicesConfig = { search: { provider: 'zai', apiKey: 'zai-key' } };
+    providers = {
+      [OAUTH_PROVIDER]: {
+        type: 'kimi',
+        baseUrl: 'https://api.example.com/v1',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+      },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ search_result: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).not.toBeUndefined();
+    await provider!.search('hello');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.z.ai/api/paas/v4/web_search');
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer zai-key');
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when services.search selects zai without an api key', () => {
+    servicesConfig = { search: { provider: 'zai' } };
+    expect(createService().getWebSearchProvider()).toBeUndefined();
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when services.search selects zai with a blank api key', () => {
+    servicesConfig = { search: { provider: 'zai', apiKey: '   ' } };
+    expect(createService().getWebSearchProvider()).toBeUndefined();
+  });
+
+  it('returns undefined when services.search disables search', () => {
+    servicesConfig = { search: { provider: 'disabled' } };
+    expect(createService().getWebSearchProvider()).toBeUndefined();
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('ignores the managed oauth provider when services.search disables search', () => {
+    servicesConfig = { search: { provider: 'disabled' } };
+    providers = {
+      [OAUTH_PROVIDER]: {
+        type: 'kimi',
+        baseUrl: 'https://api.example.com/v1',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+      },
+    };
+    expect(createService().getWebSearchProvider()).toBeUndefined();
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('uses the moonshot services config when services.search selects kimi', async () => {
+    servicesConfig = {
+      search: { provider: 'kimi' },
+      moonshotSearch: { baseUrl: 'https://search.example.com/search', apiKey: 'search-key' },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ search_results: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).not.toBeUndefined();
+    await provider!.search('hello');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://search.example.com/search');
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer search-key');
+    expect(JSON.parse(init.body as string)).toEqual({ text_query: 'hello' });
+  });
+
+  it('falls back to the managed oauth provider when services.search selects kimi without moonshot config', () => {
+    servicesConfig = { search: { provider: 'kimi' } };
+    providers = {
+      [OAUTH_PROVIDER]: {
+        type: 'kimi',
+        baseUrl: 'https://api.example.com/v1',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+      },
+    };
+    expect(createService().getWebSearchProvider()).not.toBeUndefined();
+    expect(resolveTokenProvider).toHaveBeenCalledWith(OAUTH_PROVIDER, {
+      storage: 'file',
+      key: 'oauth/kimi-code',
+    });
+  });
+
+  it('keeps the managed oauth fallback when services.search has no provider', () => {
+    servicesConfig = { search: {} };
+    providers = {
+      [OAUTH_PROVIDER]: {
+        type: 'kimi',
+        baseUrl: 'https://api.example.com/v1',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+      },
+    };
+    expect(createService().getWebSearchProvider()).not.toBeUndefined();
+    expect(resolveTokenProvider).toHaveBeenCalledWith(OAUTH_PROVIDER, {
+      storage: 'file',
+      key: 'oauth/kimi-code',
+    });
+  });
+
+  it('answers presence for services.search selections without touching a not-yet-frozen identity', () => {
+    const notFrozen: IAgentIdentity = {
+      _serviceBrand: undefined,
+      resolved: () => new Promise(() => undefined),
+      current: () => {
+        throw new Error('identity read before freeze');
+      },
+    };
+    const svc = new WebSearchProviderService(
+      { get: ((name: string) => providers[name]) as IProviderService['get'] } as IProviderService,
+      {
+        resolveTokenProvider:
+          resolveTokenProvider as unknown as IOAuthService['resolveTokenProvider'],
+      } as IOAuthService,
+      { args: { requestHeaders: {} } } as unknown as IBootstrapService,
+      {
+        get: ((domain: string) =>
+          domain === SERVICES_SECTION ? servicesConfig : undefined) as IConfigService['get'],
+      } as IConfigService,
+      notFrozen,
+    );
+
+    servicesConfig = { search: { provider: 'zai', apiKey: 'zai-key' } };
+    expect(svc.hasWebSearchProvider()).toBe(true);
+
+    servicesConfig = { search: { provider: 'zai' } };
+    expect(svc.hasWebSearchProvider()).toBe(false);
+
+    servicesConfig = { search: { provider: 'disabled' } };
+    expect(svc.hasWebSearchProvider()).toBe(false);
+
+    servicesConfig = {
+      search: { provider: 'kimi' },
+      moonshotSearch: { baseUrl: 'https://search.example.com/search', apiKey: 'k' },
+    };
+    expect(svc.hasWebSearchProvider()).toBe(true);
+  });
+
   it('answers presence without touching a not-yet-frozen identity', () => {
     const notFrozen: IAgentIdentity = {
       _serviceBrand: undefined,
@@ -1464,6 +1660,170 @@ describe('WebSearchProviderService', () => {
       },
     };
     expect(svc.hasWebSearchProvider()).toBe(true);
+  });
+});
+
+describe('ZaiWebSearchProvider', () => {
+  const API_KEY = 'YOUR_API_KEY';
+
+  function providerWith(fetchMock: Mock, baseUrl?: string): ZaiWebSearchProvider {
+    return new ZaiWebSearchProvider({
+      apiKey: API_KEY,
+      baseUrl,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+  }
+
+  function jsonResponse(status: number, payload: unknown) {
+    return { status, json: async () => payload, text: async () => '' };
+  }
+
+  it('posts the search-prime request with the bearer key and maps the result fields', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({
+        search_result: [
+          {
+            title: 'Title',
+            content: 'Snippet',
+            link: 'https://example.com/a',
+            media: 'Example',
+            publish_date: '2026-01-02',
+            icon: 'https://example.com/favicon.ico',
+            refer: 'ref-1',
+          },
+        ],
+      }),
+    });
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([
+      {
+        title: 'Title',
+        url: 'https://example.com/a',
+        snippet: 'Snippet',
+        date: '2026-01-02',
+        siteName: 'Example',
+      },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.z.ai/api/paas/v4/web_search');
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({
+      Authorization: `Bearer ${API_KEY}`,
+      'Content-Type': 'application/json',
+      'Accept-Language': 'en-US,en',
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      search_engine: 'search-prime',
+      search_query: 'hello',
+      count: 10,
+    });
+  });
+
+  it('omits date and siteName when publish_date and media are blank', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        search_result: [
+          {
+            title: 'Title',
+            content: 'Snippet',
+            link: 'https://example.com/a',
+            media: '',
+            publish_date: '',
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([
+      { title: 'Title', url: 'https://example.com/a', snippet: 'Snippet' },
+    ]);
+  });
+
+  it('defaults missing result fields to empty strings', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { search_result: [{}] }));
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([{ title: '', url: '', snippet: '' }]);
+  });
+
+  it('returns an empty list when search_result is missing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {}));
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('returns an empty list when search_result is not an array', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { search_result: 'nope' }));
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('posts to an overridden baseUrl and forwards the abort signal', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { search_result: [] }));
+    const controller = new AbortController();
+
+    await providerWith(fetchMock, 'https://search.example.test/v4/web_search').search('hello', {
+      signal: controller.signal,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://search.example.test/v4/web_search');
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it('throws web.fetch_failed on HTTP 401 with the response detail', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 401,
+      text: async () => 'Unauthorized',
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Zai search request failed: HTTP 401 (auth/unauthorized). Unauthorized',
+      details: { status: 401 },
+    });
+  });
+
+  it('throws web.fetch_failed on a non-200 response with the status detail', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 503,
+      text: async () => 'busy',
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Zai search request failed: HTTP 503. busy',
+      details: { status: 503 },
+    });
+  });
+
+  it('throws web.fetch_failed with an empty detail when the error body cannot be read', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 500,
+      text: async () => {
+        throw new Error('body stream failed');
+      },
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Zai search request failed: HTTP 500.',
+      details: { status: 500 },
+    });
   });
 });
 
@@ -1564,6 +1924,33 @@ describe('services config section', () => {
         retries: 3,
       },
     });
+  });
+
+  it('validates the search provider selection and rejects unknown providers', () => {
+    const registry = new ConfigRegistry();
+
+    expect(
+      registry.validate(SERVICES_SECTION, { search: { provider: 'zai', apiKey: 'zai-key' } }),
+    ).toEqual({ search: { provider: 'zai', apiKey: 'zai-key' } });
+    expect(registry.validate(SERVICES_SECTION, { search: { provider: 'disabled' } })).toEqual({
+      search: { provider: 'disabled' },
+    });
+    expect(() =>
+      registry.validate(SERVICES_SECTION, { search: { provider: 'google' } }),
+    ).toThrow();
+  });
+
+  it('maps the search service between TOML snake_case and camelCase', () => {
+    expect(servicesFromToml({ search: { provider: 'zai', api_key: 'zai-key' } })).toEqual({
+      search: { provider: 'zai', apiKey: 'zai-key' },
+    });
+    expect(
+      servicesToToml(
+        { search: { provider: 'zai', apiKey: 'zai-key' } },
+        { search: { provider: 'kimi' } },
+      ),
+    ).toEqual({ search: { provider: 'zai', api_key: 'zai-key' } });
+    expect(servicesToToml({ search: undefined }, { search: { provider: 'kimi' } })).toEqual({});
   });
 });
 
