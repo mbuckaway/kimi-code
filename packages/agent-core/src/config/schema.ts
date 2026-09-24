@@ -274,9 +274,21 @@ export const MoonshotServiceConfigSchema = z.object({
 
 export type MoonshotServiceConfig = z.infer<typeof MoonshotServiceConfigSchema>;
 
+export const SearchProviderSchema = z.enum(['kimi', 'zai', 'disabled']);
+
+export const SearchConfigSchema = z.object({
+  /** Which web search backend the runtime instantiates. Unset keeps the moonshot_search service. */
+  provider: SearchProviderSchema.optional(),
+  /** z.ai API key; required only while `provider` is "zai". */
+  apiKey: z.string().optional(),
+});
+
+export type SearchConfig = z.infer<typeof SearchConfigSchema>;
+
 export const ServicesConfigSchema = z.object({
   moonshotSearch: MoonshotServiceConfigSchema.optional(),
   moonshotFetch: MoonshotServiceConfigSchema.optional(),
+  search: SearchConfigSchema.optional(),
 });
 
 export type ServicesConfig = z.infer<typeof ServicesConfigSchema>;
@@ -401,6 +413,7 @@ const MoonshotServiceConfigPatchSchema = MoonshotServiceConfigSchema.partial();
 const ServicesConfigPatchSchema = z.object({
   moonshotSearch: MoonshotServiceConfigPatchSchema.optional(),
   moonshotFetch: MoonshotServiceConfigPatchSchema.optional(),
+  search: SearchConfigSchema.optional(),
 });
 
 export const KimiConfigPatchSchema = z

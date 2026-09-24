@@ -330,6 +330,68 @@ source = { kind = "apiJson", url = "https://registry.example/api.json", apiKey =
     });
   });
 
+  it('parses the [services.search] provider selection', () => {
+    const config = parseConfigString(
+      `[services.search]
+provider = "zai"
+api_key = "zai-key"
+`,
+      'config.toml',
+    );
+
+    expect(config.services?.search).toEqual({ provider: 'zai', apiKey: 'zai-key' });
+  });
+
+  it('parses a [services.search] section without an api key', () => {
+    const config = parseConfigString(
+      `[services.search]
+provider = "disabled"
+`,
+      'config.toml',
+    );
+
+    expect(config.services?.search).toEqual({ provider: 'disabled' });
+  });
+
+  it('leaves services.search undefined when the section is absent', () => {
+    const config = parseConfigString('default_model = "kimi-code/kimi-for-coding"', 'config.toml');
+
+    expect(config.services?.search).toBeUndefined();
+  });
+
+  it('rejects an unknown [services.search] provider', () => {
+    expectKimiErrorCode(
+      () =>
+        parseConfigString(
+          `[services.search]
+provider = "brave"
+`,
+          'config.toml',
+        ),
+      ErrorCodes.CONFIG_INVALID,
+    );
+  });
+
+  it('round-trips the [services.search] section', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'search-provider-round-trip.toml');
+    const toml = `
+[services.search]
+provider = "zai"
+api_key = "zai-key"
+`;
+    const config = parseConfigString(toml, configPath);
+    expect(config.services?.search).toEqual({ provider: 'zai', apiKey: 'zai-key' });
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('[services.search]');
+    expect(text).toContain('provider = "zai"');
+    expect(text).toContain('api_key = "zai-key"');
+    const roundTripped = parseConfigString(text, configPath);
+    expect(roundTripped.services?.search).toEqual({ provider: 'zai', apiKey: 'zai-key' });
+  });
+
   it('round-trips OAuth refs with scoped OAuth hosts', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'oauth-ref.toml');
@@ -607,6 +669,23 @@ describe('harness config schema and patch merge', () => {
         toolTimeoutMs: 2_147_483_648,
       }).success,
     ).toBe(false);
+  });
+
+  it('applies a services.search patch on top of an existing section', () => {
+    const base = parseConfigString(
+      `[services.search]
+provider = "kimi"
+api_key = "first-key"
+`,
+      'config.toml',
+    );
+    const merged = mergeConfigPatch(base, {
+      services: {
+        search: { provider: 'zai', apiKey: 'zai-key' },
+      },
+    });
+
+    expect(merged.services?.search).toEqual({ provider: 'zai', apiKey: 'zai-key' });
   });
 
   it('deep-merges validated patches while preserving existing typed and raw data', () => {

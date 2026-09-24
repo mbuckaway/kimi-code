@@ -7,6 +7,7 @@ import { PluginManager } from '#/plugin';
 import { LocalFetchURLProvider } from '#/tools/providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from '#/tools/providers/moonshot-fetch-url';
 import { MoonshotWebSearchProvider } from '#/tools/providers/moonshot-web-search';
+import { ZaiWebSearchProvider } from '#/tools/providers/zai-web-search';
 import { ImageLimits } from '#/tools/support/image-limits';
 import type { PromisableMethods } from '#/utils/types';
 import { getCoreVersion } from '#/version';
@@ -31,6 +32,7 @@ import {
   McpServerConfigSchema,
   type McpServerConfig,
   type MoonshotServiceConfig,
+  type SearchConfig,
 } from '../config';
 import {
   FLAG_DEFINITIONS,
@@ -176,6 +178,7 @@ import type { SDKRPC } from './sdk-api';
 import type { SessionWarning } from '@moonshot-ai/protocol';
 import { proxyWithExtraPayload } from './types';
 import { KaosShellNotFoundError, LocalKaos, type Kaos } from '@moonshot-ai/kaos';
+import type { WebSearchProvider } from '../tools/builtin';
 import type { ToolServices } from '../tools/support/services';
 
 const KIMI_CODE_PROVIDER_NAME = 'managed:kimi-code';
@@ -2245,15 +2248,39 @@ async function createRuntimeConfig(input: {
             defaultHeaders: input.kimiRequestHeaders,
             ...serviceCredentials(fetchService, input.resolveOAuthTokenProvider),
           }),
-    webSearcher:
-      searchService?.baseUrl === undefined
-        ? undefined
-        : new MoonshotWebSearchProvider({
-            baseUrl: searchService.baseUrl,
-            defaultHeaders: input.kimiRequestHeaders,
-            ...serviceCredentials(searchService, input.resolveOAuthTokenProvider),
-          }),
+    webSearcher: createWebSearcher({
+      search: input.config.services?.search,
+      searchService,
+      kimiRequestHeaders: input.kimiRequestHeaders,
+      resolveOAuthTokenProvider: input.resolveOAuthTokenProvider,
+    }),
   };
+}
+
+/**
+ * Pick the web search provider from `[services.search]`.
+ *
+ * `disabled` turns search off, `zai` calls the z.ai endpoint with its own API
+ * key, and `kimi` (or an unset provider) keeps the moonshot_search service —
+ * including the managed-OAuth credentials the login flow writes there.
+ */
+function createWebSearcher(input: {
+  readonly search: SearchConfig | undefined;
+  readonly searchService: MoonshotServiceConfig | undefined;
+  readonly kimiRequestHeaders?: Record<string, string> | undefined;
+  readonly resolveOAuthTokenProvider?: OAuthTokenProviderResolver | undefined;
+}): WebSearchProvider | undefined {
+  if (input.search?.provider === 'disabled') return undefined;
+  if (input.search?.provider === 'zai') {
+    const apiKey = nonEmptyString(input.search.apiKey);
+    return apiKey === undefined ? undefined : new ZaiWebSearchProvider({ apiKey });
+  }
+  if (input.searchService?.baseUrl === undefined) return undefined;
+  return new MoonshotWebSearchProvider({
+    baseUrl: input.searchService.baseUrl,
+    defaultHeaders: input.kimiRequestHeaders,
+    ...serviceCredentials(input.searchService, input.resolveOAuthTokenProvider),
+  });
 }
 
 /**

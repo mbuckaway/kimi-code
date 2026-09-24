@@ -71,6 +71,9 @@ keep_alive_on_exit = false
 [language]
 reply_language = "en"
 
+[services.search]
+provider = "kimi"
+
 [services.moonshot_search]
 base_url = "https://api.kimi.com/coding/v1/search"
 api_key = ""
@@ -489,7 +492,7 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 
 ## `services`
 
-`services` configures two built-in services: web search (`moonshot_search`) and web fetch (`moonshot_fetch`). Only these two fixed keys are recognized; other keys are ignored. Both entries share the same fields:
+`services` configures the built-in web services: web search (`moonshot_search`), web fetch (`moonshot_fetch`), and the web search backend selector (`search`). The `moonshot_search` and `moonshot_fetch` entries share the same fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -507,6 +510,21 @@ api_key = "sk-xxx"
 
 [services.moonshot_fetch]
 base_url = "https://api.moonshot.cn/v1/fetch"
+api_key = "sk-xxx"
+```
+
+### `search`
+
+`search` selects the backend the `WebSearch` tool uses. Leaving it unset keeps the `moonshot_search` service.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `provider` | `string` | No | Backend: `kimi` (the `moonshot_search` service), `zai` (the z.ai search API), or `disabled` (turn web search off) |
+| `api_key` | `string` | No | z.ai API key, used when `provider = "zai"` |
+
+```toml
+[services.search]
+provider = "zai"
 api_key = "sk-xxx"
 ```
 

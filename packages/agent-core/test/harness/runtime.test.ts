@@ -471,6 +471,250 @@ custom_headers = { "X-Config-Secret" = "secret-value" }
     expect(getAccessToken).not.toHaveBeenCalled();
   });
 
+  it('selects the z.ai web search provider from services.search', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.search]
+provider = "zai"
+api_key = "zai-key"
+`,
+    );
+
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({ search_result: [] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchImpl);
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_zai', workDir });
+    const webSearcher = core.sessions.get(created.id)?.options.toolServices?.webSearcher;
+
+    await webSearcher?.search('kimi');
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith('https://api.z.ai/api/paas/v4/web_search', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer zai-key',
+        'Content-Type': 'application/json',
+        'Accept-Language': 'en-US,en',
+      },
+      body: JSON.stringify({
+        search_engine: 'search-prime',
+        search_query: 'kimi',
+        count: 10,
+      }),
+    });
+  });
+
+  it('leaves web search unconfigured when z.ai is selected without an api key', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.search]
+provider = "zai"
+api_key = ""
+`,
+    );
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_zai_no_key', workDir });
+
+    expect(core.sessions.get(created.id)?.options.toolServices?.webSearcher).toBeUndefined();
+  });
+
+  it('disables web search when services.search selects the disabled provider', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.moonshot_search]
+base_url = "https://search.example.test/v1"
+api_key = "kimi-key"
+
+[services.search]
+provider = "disabled"
+`,
+    );
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_disabled', workDir });
+
+    expect(core.sessions.get(created.id)?.options.toolServices?.webSearcher).toBeUndefined();
+  });
+
+  it('prefers the z.ai provider over a configured Moonshot search service', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.moonshot_search]
+base_url = "https://search.example.test/v1"
+api_key = "kimi-key"
+
+[services.search]
+provider = "zai"
+api_key = "zai-key"
+`,
+    );
+
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({ search_result: [] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchImpl);
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_zai_precedence', workDir });
+    const webSearcher = core.sessions.get(created.id)?.options.toolServices?.webSearcher;
+
+    await webSearcher?.search('kimi');
+
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('https://api.z.ai/api/paas/v4/web_search');
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toMatchObject({
+      Authorization: 'Bearer zai-key',
+    });
+  });
+
+  it('keeps the Moonshot search service when services.search selects the kimi provider', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.moonshot_search]
+base_url = "https://search.example.test/v1"
+api_key = "kimi-key"
+custom_headers = { "X-Test" = "1" }
+
+[services.search]
+provider = "kimi"
+`,
+    );
+
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({ search_results: [] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchImpl);
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_kimi', workDir });
+    const webSearcher = core.sessions.get(created.id)?.options.toolServices?.webSearcher;
+
+    await webSearcher?.search('kimi');
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://search.example.test/v1');
+    expect(init.headers).toMatchObject({
+      Authorization: 'Bearer kimi-key',
+      'X-Test': '1',
+    });
+    expect(init.body).toBe(JSON.stringify({ text_query: 'kimi' }));
+  });
+
+  it('keeps the Moonshot search service when services.search omits the provider', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.moonshot_search]
+base_url = "https://search.example.test/v1"
+api_key = "kimi-key"
+
+[services.search]
+api_key = "unused-search-key"
+`,
+    );
+
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({ search_results: [] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchImpl);
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_no_provider', workDir });
+    const webSearcher = core.sessions.get(created.id)?.options.toolServices?.webSearcher;
+
+    await webSearcher?.search('kimi');
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://search.example.test/v1');
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer kimi-key' });
+  });
+
   it('falls back to defaultModel when createSession receives no model option', async () => {
     tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
     const homeDir = join(tmp, 'home');

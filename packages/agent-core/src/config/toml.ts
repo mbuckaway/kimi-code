@@ -22,6 +22,7 @@ import {
   type OAuthRef,
   type PermissionConfig,
   type ProviderConfig,
+  type SearchConfig,
   type SecondaryModelConfig,
   type ServicesConfig,
   type SubagentConfig,
@@ -657,6 +658,19 @@ function servicesToToml(services: ServicesConfig, rawServices: unknown): Record<
     out['moonshot_fetch'] = serviceToToml(services.moonshotFetch);
   } else {
     delete out['moonshot_fetch'];
+  }
+  if (services.search !== undefined) {
+    out['search'] = searchToToml(services.search);
+  } else {
+    delete out['search'];
+  }
+  return out;
+}
+
+function searchToToml(search: SearchConfig): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(search)) {
+    setDefined(out, camelToSnake(key), value);
   }
   return out;
 }

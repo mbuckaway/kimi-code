@@ -401,6 +401,10 @@ merge_all_available_skills = true
     # oauth_host: string
   # custom_headers: record<string, string>
 
+# [services.search]
+  # provider: "kimi" | "zai" | "disabled"
+  # api_key: string
+
 # ##########################################################################
 # subagent
 #   owner: src/session/subagent/configSection.ts
