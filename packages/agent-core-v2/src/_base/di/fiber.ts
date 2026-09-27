@@ -131,7 +131,7 @@ export function currentConstruction(): ConstructionFrame | undefined {
 
 export const SERVICE_MARK = Symbol('serviceUnit');
 
-export function isServiceRecipe(ctor: any): ctor is ServiceClassRecipe {
+export function isServiceRecipe(ctor: unknown): ctor is ServiceClassRecipe {
   return typeof ctor === 'function' && ctor.prototype?.[SERVICE_MARK] === true;
 }
 

@@ -121,8 +121,8 @@ export class DependencyGraph {
       push(ref);
     }
     const affected: ScopedToken[] = [];
-    while (queue.length > 0) {
-      const ref = queue.pop()!;
+    let ref: ScopedToken | undefined;
+    while ((ref = queue.pop()) !== undefined) {
       affected.push(ref);
       const inbound = this._in.get(ref.scope, ref.token);
       if (inbound === undefined) continue;

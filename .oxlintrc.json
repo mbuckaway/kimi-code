@@ -32,8 +32,12 @@
     "typescript/no-unsafe-return": "off",
 
     "eslint/no-console": "warn",
-    "typescript/no-explicit-any": "off",
-    "typescript/no-non-null-assertion": "off",
+    // Type-safety rules run as warnings, not errors: the pre-existing
+    // `any`/non-null surface (concentrated in the DI kernels) is large but
+    // deliberate, so these surface new drift without gating CI. Tighten to
+    // "error" as the surface shrinks.
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-non-null-assertion": "warn",
     "typescript/use-unknown-in-catch-callback-variable": "off",
     "typescript/consistent-type-imports": "off",
     "typescript/ban-types": "off",

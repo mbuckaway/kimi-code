@@ -721,7 +721,7 @@ export class InstantiationService implements IInstantiationService {
     }
 
     const firstServiceArgPos =
-      serviceDependencies.length > 0 ? serviceDependencies[0]!.index : args.length;
+      serviceDependencies[0]?.index ?? args.length;
 
     if (args.length !== firstServiceArgPos) {
       if (this._enableTracing) {
@@ -814,8 +814,8 @@ export class InstantiationService implements IInstantiationService {
     let cycleCount = 0;
     const stack: Triple[] = [{ id, desc, _trace }];
     const seen = new Set<string>();
-    while (stack.length > 0) {
-      const item = stack.pop()!;
+    let item: Triple | undefined;
+    while ((item = stack.pop()) !== undefined) {
 
       if (seen.has(String(item.id))) {
         continue;

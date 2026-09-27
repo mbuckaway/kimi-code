@@ -14,7 +14,7 @@ type AnyConstructor<T = unknown> = new (...args: any[]) => T;
 
 interface IServiceMock<T> {
   id: ServiceIdentifier<T>;
-  service?: any;
+  service?: unknown;
 }
 
 const isSinonSpyLike = (fn: Function): fn is sinon.SinonSpy =>
@@ -220,7 +220,7 @@ export class TestInstantiationService extends InstantiationService implements ID
     return service as T;
   }
 
-  private _createStub(arg: any): any {
+  private _createStub(arg: unknown): any {
     if (arg instanceof SyncDescriptor) {
       return sinon.createStubInstance(arg.ctor);
     }
@@ -244,7 +244,7 @@ export class TestInstantiationService extends InstantiationService implements ID
     return Boolean(service?.sinonOptions?.[key]);
   }
 
-  private _isServiceMock(arg: any): arg is IServiceMock<unknown> {
+  private _isServiceMock(arg: unknown): arg is IServiceMock<unknown> {
     return typeof arg === 'object' && arg !== null && 'id' in arg;
   }
 
