@@ -265,10 +265,12 @@ export class InstantiationService implements IInstantiationService {
       serviceDependencies.length > 0 ? serviceDependencies[0]!.index : args.length;
 
     if (args.length !== firstServiceArgPos) {
-      // eslint-disable-next-line no-console
-      globalThis.console.trace(
-        `[createInstance] First service dependency of ${(ctor as { name?: string }).name} at position ${firstServiceArgPos + 1} conflicts with ${args.length} static arguments`,
-      );
+      if (this._enableTracing) {
+        // eslint-disable-next-line no-console
+        globalThis.console.trace(
+          `[createInstance] First service dependency of ${(ctor as { name?: string }).name} at position ${firstServiceArgPos + 1} conflicts with ${args.length} static arguments`,
+        );
+      }
       const delta = firstServiceArgPos - args.length;
       if (delta > 0) {
         args = args.concat(Array.from({ length: delta }));

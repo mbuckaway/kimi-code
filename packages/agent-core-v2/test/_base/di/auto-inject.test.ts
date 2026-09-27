@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { CyclicDependencyError } from '#/_base/di/errors';
 import { IInstantiationService, createDecorator } from '#/_base/di/instantiation';
 import { InstantiationService } from '#/_base/di/instantiationService';
 import { ServiceCollection } from '#/_base/di/serviceCollection';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('@IFoo auto-injection', () => {
   it('pure-service ctor: both @IFoo params resolve from the container', () => {
@@ -161,5 +165,59 @@ describe('@IFoo auto-injection', () => {
     expect(() =>
       child.invokeFunction((a) => a.get(IA)),
     ).toThrowError(CyclicDependencyError);
+  });
+
+  it('stays silent on the createInstance arg-position conflict when tracing is disabled', () => {
+    const IBaz = createDecorator<{ tag: 'baz' }>('p1.1-IBaz-silent-conflict');
+    class Baz {
+      tag = 'baz' as const;
+    }
+    class Bar {
+      constructor(
+        public readonly name: string,
+        @IBaz public readonly baz: { tag: 'baz' },
+      ) {}
+    }
+    const trace = vi.spyOn(globalThis.console, 'trace').mockImplementation(() => {});
+    const ix = new InstantiationService(
+      new ServiceCollection([IBaz, new SyncDescriptor(Baz)]),
+      false,
+      undefined,
+      false,
+    );
+
+    const bar = ix.createInstance(Bar);
+
+    expect(bar.name).toBeUndefined();
+    expect(bar.baz).toBeInstanceOf(Baz);
+    expect(trace).not.toHaveBeenCalled();
+  });
+
+  it('reports the createInstance arg-position conflict when tracing is enabled', () => {
+    const IBaz = createDecorator<{ tag: 'baz' }>('p1.1-IBaz-loud-conflict');
+    class Baz {
+      tag = 'baz' as const;
+    }
+    class Bar {
+      constructor(
+        public readonly name: string,
+        @IBaz public readonly baz: { tag: 'baz' },
+      ) {}
+    }
+    const trace = vi.spyOn(globalThis.console, 'trace').mockImplementation(() => {});
+    const ix = new InstantiationService(
+      new ServiceCollection([IBaz, new SyncDescriptor(Baz)]),
+      false,
+      undefined,
+      true,
+    );
+
+    const bar = ix.createInstance(Bar);
+
+    expect(bar.baz).toBeInstanceOf(Baz);
+    expect(trace).toHaveBeenCalledTimes(1);
+    expect(trace).toHaveBeenCalledWith(
+      '[createInstance] First service dependency of Bar at position 2 conflicts with 0 static arguments',
+    );
   });
 });

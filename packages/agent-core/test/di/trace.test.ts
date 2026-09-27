@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { SyncDescriptor } from '#/di/descriptors';
+import { createDecorator } from '#/di/instantiation';
 import { InstantiationService, Trace } from '#/di/instantiationService';
 import { ServiceCollection } from '#/di/serviceCollection';
 
@@ -14,6 +16,46 @@ class ExposedInstantiationService extends InstantiationService {
     return this._enableTracing;
   }
 }
+
+interface IBar {
+  tag: 'bar';
+}
+
+const IBar = createDecorator<IBar>('p0.2-IBar-conflict');
+
+class Bar implements IBar {
+  tag = 'bar' as const;
+}
+
+class Gadget {
+  constructor(
+    public readonly name: string,
+    public readonly bar: IBar,
+  ) {}
+}
+
+// Vitest/rolldown does not parse TypeScript parameter decorators in test
+// files, so the dependency is applied manually at runtime — same pattern as
+// `auto-inject.test.ts`.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function param(dec: any, target: any, index: number): void {
+  (dec as (t: unknown, k: string, i: number) => void)(target, '', index);
+}
+
+param(IBar, Gadget, 1);
+
+function gadgetContainer(enableTracing: boolean): InstantiationService {
+  return new InstantiationService(
+    new ServiceCollection([IBar, new SyncDescriptor(Bar)]),
+    false,
+    undefined,
+    enableTracing,
+  );
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('InstantiationService Trace installation (P0.2)', () => {
   it('constructs with the 2-arg signature (backward compat)', () => {
@@ -49,5 +91,29 @@ describe('InstantiationService Trace installation (P0.2)', () => {
     expect(t).toBeInstanceOf(Trace);
     // stop() should not throw on a real Trace either.
     expect(() => t.stop()).not.toThrow();
+  });
+
+  it('stays silent on the createInstance arg-position conflict when tracing is disabled', () => {
+    const trace = vi.spyOn(globalThis.console, 'trace').mockImplementation(() => {});
+    const ix = gadgetContainer(false);
+
+    const gadget = ix.createInstance(Gadget);
+
+    expect(gadget.name).toBeUndefined();
+    expect(gadget.bar).toBeInstanceOf(Bar);
+    expect(trace).not.toHaveBeenCalled();
+  });
+
+  it('reports the createInstance arg-position conflict when tracing is enabled', () => {
+    const trace = vi.spyOn(globalThis.console, 'trace').mockImplementation(() => {});
+    const ix = gadgetContainer(true);
+
+    const gadget = ix.createInstance(Gadget);
+
+    expect(gadget.bar).toBeInstanceOf(Bar);
+    expect(trace).toHaveBeenCalledTimes(1);
+    expect(trace).toHaveBeenCalledWith(
+      '[createInstance] First service dependency of Gadget at position 2 conflicts with 0 static arguments',
+    );
   });
 });

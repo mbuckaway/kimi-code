@@ -8,11 +8,11 @@
 
 import type { z } from 'zod';
 
-export interface ProcedureContract {
+export interface ProcedureContract<TInput = unknown[], TOutput = unknown> {
   /** Tuple schema over the engine method's positional args. */
-  readonly input: z.ZodType;
+  readonly input: z.ZodType<TInput>;
   /** Schema of the method's resolved return value as it appears on the wire. */
-  readonly output: z.ZodType;
+  readonly output: z.ZodType<TOutput>;
 }
 
 /**
@@ -21,11 +21,11 @@ export interface ProcedureContract {
  * is a compile-time discriminator so callers can branch without runtime
  * checks.
  */
-export interface StreamingProcedureContract {
+export interface StreamingProcedureContract<TInput = unknown[], TChunk = unknown> {
   /** Tuple schema over the engine method's positional args. */
-  readonly input: z.ZodType;
+  readonly input: z.ZodType<TInput>;
   /** Schema applied to every yielded chunk. */
-  readonly chunk: z.ZodType;
+  readonly chunk: z.ZodType<TChunk>;
   /** Discriminator — always `true`. */
   readonly streaming: true;
 }

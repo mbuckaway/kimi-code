@@ -14,7 +14,11 @@ import { lookup } from 'node:dns/promises';
 import { Agent } from 'undici';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
-import { LocalFetchURLProvider } from '../../../src/tools/providers/local-fetch-url';
+import {
+  FetchTimeoutError,
+  LocalFetchURLProvider,
+  ResponseTooLargeError,
+} from '../../../src/tools/providers/local-fetch-url';
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }));
 
@@ -48,6 +52,51 @@ function htmlResponse(body: string, contentType: string): Response {
     status: 200,
     headers: { 'content-type': contentType },
   });
+}
+
+/** A fetch stub that never settles on its own — it rejects only when aborted. */
+function hangingFetch(): Mock<typeof fetch> {
+  return vi.fn<typeof fetch>(
+    (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal === undefined || signal === null) {
+          reject(new Error('fetchImpl was called without an AbortSignal'));
+          return;
+        }
+        if (signal.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal.addEventListener(
+          'abort',
+          () => {
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      }),
+  );
+}
+
+/** Resolve with the rejection reason instead of throwing, so a test can inspect it. */
+async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
+  return promise.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+}
+
+/** A response whose body is a stream, so no Content-Length header is set. */
+function streamedResponse(chunks: string[]): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { 'content-type': 'text/plain' } });
 }
 
 describe('LocalFetchURLProvider content kind', () => {
@@ -391,5 +440,149 @@ describe('LocalFetchURLProvider connection pinning', () => {
 
     const dispatcher = (fetchImpl.mock.calls[0]![1] as RequestInit).dispatcher;
     expect(asUndiciAgent(dispatcher).closed).toBe(true);
+  });
+});
+
+describe('LocalFetchURLProvider request timeout', () => {
+  it('aborts a request that outlives timeoutMs and rejects with FetchTimeoutError', async () => {
+    const fetchImpl = hangingFetch();
+    const provider = new LocalFetchURLProvider({ fetchImpl, timeoutMs: 25 });
+
+    const error = await captureRejection(provider.fetch('https://example.com/slow'));
+
+    expect(error).toBeInstanceOf(FetchTimeoutError);
+    expect((error as Error).message).toMatch(/timed out after 25ms/);
+
+    const init = fetchImpl.mock.calls[0]![1] as RequestInit;
+    expect(init.signal?.aborted).toBe(true);
+  });
+
+  it('falls back to AbortController + setTimeout when AbortSignal.timeout is unavailable', async () => {
+    const nativeTimeout = AbortSignal.timeout;
+    Object.defineProperty(AbortSignal, 'timeout', {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = hangingFetch();
+      const provider = new LocalFetchURLProvider({ fetchImpl, timeoutMs: 1_000 });
+
+      const pending = captureRejection(provider.fetch('https://example.com/slow'));
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await pending;
+
+      expect(error).toBeInstanceOf(FetchTimeoutError);
+      expect((error as Error).message).toMatch(/timed out after 1000ms/);
+
+      const init = fetchImpl.mock.calls[0]![1] as RequestInit;
+      expect(init.signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      Object.defineProperty(AbortSignal, 'timeout', {
+        configurable: true,
+        value: nativeTimeout,
+        writable: true,
+      });
+    }
+  });
+
+  it('clears the fallback timer once a fast response has been consumed', async () => {
+    const nativeTimeout = AbortSignal.timeout;
+    Object.defineProperty(AbortSignal, 'timeout', {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(htmlResponse('ok', 'text/plain'));
+      const provider = new LocalFetchURLProvider({ fetchImpl, timeoutMs: 1_000 });
+
+      const result = await provider.fetch('https://example.com/fast');
+
+      expect(result.content).toBe('ok');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      Object.defineProperty(AbortSignal, 'timeout', {
+        configurable: true,
+        value: nativeTimeout,
+        writable: true,
+      });
+    }
+  });
+});
+
+describe('LocalFetchURLProvider streaming size cap', () => {
+  it('aborts the body stream once the running total exceeds maxBytes', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(streamedResponse(['x'.repeat(64), 'y'.repeat(64)]));
+    const provider = new LocalFetchURLProvider({ fetchImpl, maxBytes: 16 });
+
+    const error = await captureRejection(provider.fetch('https://example.com/big'));
+
+    expect(error).toBeInstanceOf(ResponseTooLargeError);
+    expect((error as Error).message).toMatch(/received more than maxBytes \(16\) while streaming/);
+
+    const init = fetchImpl.mock.calls[0]![1] as RequestInit;
+    expect(init.signal?.aborted).toBe(true);
+  });
+
+  it('accepts a body that is exactly maxBytes', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(htmlResponse('abcd', 'text/plain'));
+    const provider = new LocalFetchURLProvider({ fetchImpl, maxBytes: 4 });
+
+    const result = await provider.fetch('https://example.com/exact');
+
+    expect(result).toEqual({ content: 'abcd', kind: 'passthrough' });
+  });
+
+  it('falls back to the stream cap when content-length is not a number', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('x'.repeat(32), {
+        status: 200,
+        headers: { 'content-type': 'text/plain', 'content-length': 'not-a-number' },
+      }),
+    );
+    const provider = new LocalFetchURLProvider({ fetchImpl, maxBytes: 8 });
+
+    const error = await captureRejection(provider.fetch('https://example.com/odd'));
+
+    expect(error).toBeInstanceOf(ResponseTooLargeError);
+    expect((error as Error).message).toMatch(/while streaming/);
+  });
+
+  it('concatenates a multi-chunk body that stays under the cap', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(streamedResponse(['hello ', 'world']));
+    const provider = new LocalFetchURLProvider({ fetchImpl, maxBytes: 1_024 });
+
+    const result = await provider.fetch('https://example.com/stream');
+
+    expect(result).toEqual({ content: 'hello world', kind: 'passthrough' });
+  });
+
+  it('reports an empty passthrough when the response has no body stream', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(null, { status: 200, headers: { 'content-type': 'text/plain' } }),
+    );
+    const provider = new LocalFetchURLProvider({ fetchImpl });
+
+    const result = await provider.fetch('https://example.com/empty');
+
+    expect(result).toEqual({ content: '', kind: 'passthrough' });
+  });
+
+  it('reports an empty passthrough when the body stream yields no chunks', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(streamedResponse([]));
+    const provider = new LocalFetchURLProvider({ fetchImpl });
+
+    const result = await provider.fetch('https://example.com/no-chunks');
+
+    expect(result).toEqual({ content: '', kind: 'passthrough' });
   });
 });
