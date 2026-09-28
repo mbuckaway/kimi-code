@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { envelopeSchema, errEnvelope, okEnvelope, type Envelope } from '../envelope';
+import { envelopeSchema, errEnvelope, okEnvelope, summarizeStack, type Envelope } from '../envelope';
 import { ErrorCode, ErrorCodeReason } from '../error-codes';
 
 describe('envelope', () => {
@@ -64,18 +64,109 @@ describe('envelope', () => {
     );
   });
 
-  it('errEnvelope surfaces stack when provided and omits it when absent', () => {
+  it('errEnvelope surfaces a summarized stack when provided and omits it when absent', () => {
     const err = new Error('boom');
     const withStack = errEnvelope(ErrorCode.INTERNAL_ERROR, 'boom', 'req_s', err.stack);
-    expect(withStack.stack).toBe(err.stack);
+    expect(withStack.stack).toContain('Error: boom');
     expect(JSON.stringify(withStack)).toContain('"stack":');
-    expect(envelopeSchema(z.any()).parse(withStack).stack).toBe(err.stack);
+    expect(envelopeSchema(z.any()).parse(withStack).stack).toBe(withStack.stack);
 
     // No stack → field is absent and the wire shape is byte-identical to before.
     const without = errEnvelope(ErrorCode.INTERNAL_ERROR, 'boom', 'req_s');
     expect(JSON.stringify(without)).toBe(
       '{"code":50001,"msg":"boom","data":null,"request_id":"req_s"}',
     );
+  });
+
+  it('errEnvelope omits stack when the caller passes an empty or whitespace-only stack', () => {
+    expect(errEnvelope(ErrorCode.INTERNAL_ERROR, 'boom', 'req_s', '').stack).toBeUndefined();
+    expect(errEnvelope(ErrorCode.INTERNAL_ERROR, 'boom', 'req_s', '   \n  ').stack).toBeUndefined();
+    expect(JSON.stringify(errEnvelope(ErrorCode.INTERNAL_ERROR, 'boom', 'req_s', ''))).toBe(
+      '{"code":50001,"msg":"boom","data":null,"request_id":"req_s"}',
+    );
+  });
+
+  it('errEnvelope strips directory components from stack frame paths', () => {
+    const stack = [
+      'Error: boom',
+      '    at handler (/Users/alice/work/kimi-code/packages/protocol/src/handler.ts:12:5)',
+      '    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)',
+    ].join('\n');
+
+    const env = errEnvelope(ErrorCode.INTERNAL_ERROR, 'boom', 'req_s', stack);
+
+    expect(env.stack).toBe(
+      [
+        'Error: boom',
+        '    at handler (handler.ts:12:5)',
+        '    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)',
+      ].join('\n'),
+    );
+    expect(env.stack).not.toContain('/Users/alice');
+  });
+
+  it('errEnvelope redacts absolute paths that leak through the message line', () => {
+    const stack =
+      "Error: ENOENT: no such file or directory, open '/home/alice/private/secret.txt'";
+
+    const env = errEnvelope(ErrorCode.INTERNAL_ERROR, 'boom', 'req_s', stack);
+
+    expect(env.stack).toBe("Error: ENOENT: no such file or directory, open 'secret.txt'");
+    expect(env.stack).not.toContain('/home/alice');
+  });
+});
+
+describe('summarizeStack', () => {
+  it('caps the frame list and records how many frames were dropped', () => {
+    const stack = [
+      'Error: boom',
+      ...Array.from(
+        { length: 6 },
+        (_value, index) => `    at fn${String(index)} (/home/ci/build/file${String(index)}.ts:${String(index)}:1)`,
+      ),
+    ].join('\n');
+
+    const summary = summarizeStack(stack);
+
+    expect(summary.split('\n')).toEqual([
+      'Error: boom',
+      '    at fn0 (file0.ts:0:1)',
+      '    at fn1 (file1.ts:1:1)',
+      '    at fn2 (file2.ts:2:1)',
+      '    ... 3 more frame(s) omitted',
+    ]);
+  });
+
+  it('honors a custom frame limit', () => {
+    const stack = [
+      'Error: boom',
+      '    at first (/abs/first.ts:1:1)',
+      '    at second (/abs/second.ts:2:2)',
+    ].join('\n');
+
+    expect(summarizeStack(stack, 1).split('\n')).toEqual([
+      'Error: boom',
+      '    at first (first.ts:1:1)',
+      '    ... 1 more frame(s) omitted',
+    ]);
+  });
+
+  it('leaves already-relative frames untouched', () => {
+    const stack = ['Error: boom', '    at handler (handler.ts:12:5)'].join('\n');
+
+    expect(summarizeStack(stack)).toBe(stack);
+  });
+
+  it('keeps frames that carry no file location', () => {
+    const stack = ['Error: boom', '    at async Promise.all (index 0)'].join('\n');
+
+    expect(summarizeStack(stack)).toBe(stack);
+  });
+
+  it('handles a frame-only stack with no message line', () => {
+    const stack = '    at handler (/abs/deep/path/handler.ts:9:3)';
+
+    expect(summarizeStack(stack)).toBe('    at handler (handler.ts:9:3)');
   });
 });
 

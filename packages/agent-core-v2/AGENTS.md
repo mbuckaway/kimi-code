@@ -1,6 +1,8 @@
 # agent-core-v2 Agent Guide
 
 > New agent engine built on the DI Scope architecture — work-in-progress port of `packages/agent-core`. Design: `plan/PLAN.md`. Porting status: `GAP_ANALYSIS.md`.
+>
+> The DI kernel (`src/_base/di/`) is the scoped successor to v1's flat container (`packages/agent-core/src/di/`). The two deliberately coexist during the v1 → v2 migration (`docs/architecture.md` §5) — do not unify them outside that migration.
 
 ## Scopes
 

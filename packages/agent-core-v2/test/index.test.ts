@@ -6,7 +6,6 @@ import {
   EVENT2_REGISTRY,
   IAgentContextMemoryService,
   AgentGoal,
-  type ContextMessage,
   type WireRecord,
 } from '#/index';
 import {
@@ -519,9 +518,6 @@ describe('AgentRecords persistence metadata', () => {
   });
 });
 
-describe.skip('agent replay range build', () => {
-});
-
 class RecordingInMemoryWireRecordPersistence extends InMemoryWireRecordPersistence {
   readonly rewrites: WireRecord[][] = [];
 
@@ -529,22 +525,4 @@ class RecordingInMemoryWireRecordPersistence extends InMemoryWireRecordPersisten
     this.rewrites.push([...records]);
     super.rewrite(records);
   }
-}
-
-
-function userMessage(text: string): ContextMessage {
-  return {
-    role: 'user',
-    content: [{ type: 'text', text }],
-    toolCalls: [],
-  };
-}
-
-function compactionSummaryMessage(text: string): ContextMessage {
-  return {
-    role: 'assistant',
-    content: [{ type: 'text', text }],
-    toolCalls: [],
-    origin: { kind: 'compaction_summary' },
-  };
 }

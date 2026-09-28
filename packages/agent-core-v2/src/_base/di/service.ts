@@ -42,7 +42,7 @@ export abstract class Service extends Disposable implements Fiber, UnitInternals
       this.__unitBuffer = null;
       this.config = undefined;
     }
-    this.name = (this.constructor as any).name || 'anonymous';
+    this.name = this.constructor.name || 'anonymous';
   }
 
   provide<T>(
@@ -127,7 +127,7 @@ export abstract class Service extends Disposable implements Fiber, UnitInternals
     return this.__unitRuntime;
   }
 
-  private _pendingName(first: any): string {
+  private _pendingName(first: unknown): string {
     if (typeof first === 'function') {
       return (first as RecipeStatics).name ?? String(first);
     }

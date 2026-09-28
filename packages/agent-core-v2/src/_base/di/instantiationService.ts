@@ -721,12 +721,14 @@ export class InstantiationService implements IInstantiationService {
     }
 
     const firstServiceArgPos =
-      serviceDependencies.length > 0 ? serviceDependencies[0]!.index : args.length;
+      serviceDependencies[0]?.index ?? args.length;
 
     if (args.length !== firstServiceArgPos) {
-      globalThis.console.trace(
-        `[createInstance] First service dependency of ${(ctor as { name?: string }).name} at position ${firstServiceArgPos + 1} conflicts with ${args.length} static arguments`,
-      );
+      if (this._enableTracing) {
+        globalThis.console.trace(
+          `[createInstance] First service dependency of ${(ctor as { name?: string }).name} at position ${firstServiceArgPos + 1} conflicts with ${args.length} static arguments`,
+        );
+      }
       const delta = firstServiceArgPos - args.length;
       if (delta > 0) {
         args = args.concat(Array.from({ length: delta }));
@@ -812,8 +814,8 @@ export class InstantiationService implements IInstantiationService {
     let cycleCount = 0;
     const stack: Triple[] = [{ id, desc, _trace }];
     const seen = new Set<string>();
-    while (stack.length > 0) {
-      const item = stack.pop()!;
+    let item: Triple | undefined;
+    while ((item = stack.pop()) !== undefined) {
 
       if (seen.has(String(item.id))) {
         continue;

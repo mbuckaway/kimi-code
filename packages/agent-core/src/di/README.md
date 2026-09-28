@@ -19,6 +19,16 @@ A VSCode-style DI container for the agent-core / server stack. Provides:
 The design intentionally mirrors VSCode's `vs/platform/instantiation` API so
 the conceptual model carries over.
 
+## Relationship to `agent-core-v2`
+
+This is the **v1** container. The v2 engine ships its own scoped successor at
+`packages/agent-core-v2/src/_base/di/` — the same identifier / descriptor /
+service-collection core plus `Fiber`, the cascade engine, the dependency graph,
+and the `LifecycleScope` tiers ("DI × Scope"). The two coexist on purpose while
+the CLI migrates v1 → v2 (`docs/architecture.md` §5; v2 is the default engine).
+They are successive generations, not duplicates — do not port features between
+them or try to unify them outside that migration.
+
 ## Why this and not a DI library?
 
 Two reasons:

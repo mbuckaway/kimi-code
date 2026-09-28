@@ -7,8 +7,9 @@
  *      manually with every hop re-validated and pinned to the validated
  *      addresses.
  *   2. Reject HTTP >= 400 with the status code in the message.
- *   3. Reject responses larger than `maxBytes` (content-length first,
- *      then measured body length as a defensive second check).
+ *   3. Reject responses larger than `maxBytes` — content-length first,
+ *      then abort the body stream as soon as the running byte total
+ *      exceeds the cap. Every request is bounded by `timeoutMs`.
  *   4. `text/plain` / `text/markdown` → passthrough verbatim.
  *   5. Otherwise (assumed HTML) → run Readability over a linkedom
  *      document. Return `# ${title}\n\n${text}` (title omitted when
@@ -52,14 +53,49 @@ const DEFAULT_USER_AGENT =
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 
+const DEFAULT_TIMEOUT_MS = 30_000;
+
 const MAX_REDIRECT_HOPS = 10;
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Thrown when a fetch (including every redirect hop and the body read) does
+ * not finish within `timeoutMs`. A bounded lifetime stops a hostile or hung
+ * origin from pinning a request — and its socket — forever.
+ */
+export class FetchTimeoutError extends Error {
+  override readonly name = 'FetchTimeoutError';
+  constructor(timeoutMs: number) {
+    super(`Fetch timed out after ${String(timeoutMs)}ms.`);
+  }
+}
+
+/**
+ * Thrown when a response body exceeds `maxBytes`. Detected from the
+ * content-length header when present, otherwise by aborting the body
+ * stream once the running byte total crosses the cap — so an origin that
+ * omits or understates content-length cannot make us buffer unbounded data.
+ */
+export class ResponseTooLargeError extends Error {
+  override readonly name = 'ResponseTooLargeError';
+  readonly maxBytes: number;
+  constructor(message: string, maxBytes: number) {
+    super(message);
+    this.maxBytes = maxBytes;
+  }
+}
 
 export interface LocalFetchURLProviderOptions {
   userAgent?: string;
   fetchImpl?: typeof fetch;
   maxBytes?: number;
+  /**
+   * Wall-clock budget for the whole fetch — connect, every redirect hop,
+   * and the body read. Defaults to 30s. The timer is cleared once the
+   * response has been consumed.
+   */
+  timeoutMs?: number;
   /**
    * Allow fetching loopback / RFC 1918 / link-local / ULA addresses.
    * Defaults to `false` — enabled only for tests and (future) explicit
@@ -193,16 +229,77 @@ type PinnedLookupCallback = (
   family?: number,
 ) => void;
 
+/**
+ * Owns the AbortSignal for one fetch. The timeout is the native
+ * `AbortSignal.timeout` when available and an `AbortController` +
+ * `setTimeout` otherwise; either way the abort funnels through the single
+ * controller so the body-size cap can abort mid-stream too. `dispose`
+ * releases whichever timer the environment used.
+ */
+interface FetchGuard {
+  readonly signal: AbortSignal;
+  abort(reason: Error): void;
+  dispose(): void;
+}
+
+function createFetchGuard(timeoutMs: number): FetchGuard {
+  const controller = new AbortController();
+  if (typeof AbortSignal.timeout !== 'function') {
+    const timer = setTimeout(() => {
+      controller.abort(new FetchTimeoutError(timeoutMs));
+    }, timeoutMs);
+    return {
+      signal: controller.signal,
+      abort: (reason) => {
+        controller.abort(reason);
+      },
+      dispose: () => {
+        clearTimeout(timer);
+      },
+    };
+  }
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const forward = () => {
+    controller.abort(new FetchTimeoutError(timeoutMs));
+  };
+  timeoutSignal.addEventListener('abort', forward, { once: true });
+  return {
+    signal: controller.signal,
+    abort: (reason) => {
+      controller.abort(reason);
+    },
+    dispose: () => {
+      timeoutSignal.removeEventListener('abort', forward);
+    },
+  };
+}
+
+/** UTF-8 decode a sequence of body chunks without an intermediate copy when there is only one. */
+function decodeUtf8(chunks: Uint8Array[], totalBytes: number): string {
+  const [first] = chunks;
+  if (first === undefined) return '';
+  if (chunks.length === 1) return new TextDecoder().decode(first);
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
 export class LocalFetchURLProvider implements UrlFetcher {
   private readonly userAgent: string;
   private readonly fetchImpl: typeof fetch;
   private readonly maxBytes: number;
+  private readonly timeoutMs: number;
   private readonly allowPrivateAddresses: boolean;
 
   constructor(options: LocalFetchURLProviderOptions = {}) {
     this.userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.allowPrivateAddresses = options.allowPrivateAddresses ?? false;
   }
 
@@ -210,10 +307,12 @@ export class LocalFetchURLProvider implements UrlFetcher {
     // Pinned Agents are created per redirect hop and closed once the final
     // body is consumed, so keep-alive sockets never linger.
     const dispatchers: Dispatcher[] = [];
+    const guard = createFetchGuard(this.timeoutMs);
     try {
-      const response = await this.requestWithValidatedRedirects(url, dispatchers);
-      return await this.readResponse(response);
+      const response = await this.requestWithValidatedRedirects(url, dispatchers, guard.signal);
+      return await this.readResponse(response, guard);
     } finally {
+      guard.dispose();
       await Promise.all(
         dispatchers.map((dispatcher) =>
           dispatcher.close().catch(() => {
@@ -224,7 +323,7 @@ export class LocalFetchURLProvider implements UrlFetcher {
     }
   }
 
-  private async readResponse(response: Response): Promise<UrlFetchResult> {
+  private async readResponse(response: Response, guard: FetchGuard): Promise<UrlFetchResult> {
     if (response.status >= 400) {
       // Drain the unused body so undici can release the socket back to
       // the keep-alive pool instead of leaking it on error paths.
@@ -247,21 +346,16 @@ export class LocalFetchURLProvider implements UrlFetcher {
         await response.body?.cancel().catch(() => {
           /* already closed */
         });
-        throw new Error(
+        throw new ResponseTooLargeError(
           `Response body too large: ${String(cl)} bytes exceeds maxBytes (${String(this.maxBytes)}).`,
+          this.maxBytes,
         );
       }
     }
 
-    const body = await response.text();
-
-    // Servers may omit content-length — measure again defensively.
-    const actualBytes = Buffer.byteLength(body, 'utf8');
-    if (actualBytes > this.maxBytes) {
-      throw new Error(
-        `Response body too large: ${String(actualBytes)} bytes exceeds maxBytes (${String(this.maxBytes)}).`,
-      );
-    }
+    // Servers may omit or understate content-length, so enforce the cap on
+    // the streamed bytes too and abort as soon as the running total crosses it.
+    const body = await this.readBodyCapped(response, guard);
 
     const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
     if (contentType.startsWith('text/plain') || contentType.startsWith('text/markdown')) {
@@ -269,6 +363,42 @@ export class LocalFetchURLProvider implements UrlFetcher {
     }
 
     return { content: this.extractMainContent(body), kind: 'extracted' };
+  }
+
+  /**
+   * Read the body stream, counting raw bytes, and abort both the stream and
+   * the in-flight request the moment the total exceeds `maxBytes`. Without
+   * this an origin that omits (or lies about) content-length could make the
+   * tool buffer an unbounded response.
+   */
+  private async readBodyCapped(response: Response, guard: FetchGuard): Promise<string> {
+    const stream = response.body;
+    if (stream === null) return '';
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > this.maxBytes) {
+          const error = new ResponseTooLargeError(
+            `Response body too large: received more than maxBytes (${String(this.maxBytes)}) while streaming.`,
+            this.maxBytes,
+          );
+          guard.abort(error);
+          await reader.cancel(error).catch(() => {
+            /* already closed */
+          });
+          throw error;
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return decodeUtf8(chunks, totalBytes);
   }
 
   /**
@@ -280,6 +410,7 @@ export class LocalFetchURLProvider implements UrlFetcher {
   private async requestWithValidatedRedirects(
     url: string,
     dispatchers: Dispatcher[],
+    signal: AbortSignal,
   ): Promise<Response> {
     let currentUrl = url;
     let redirects = 0;
@@ -289,6 +420,9 @@ export class LocalFetchURLProvider implements UrlFetcher {
         method: 'GET',
         headers: { 'User-Agent': this.userAgent },
         redirect: 'manual',
+        // The same signal covers every hop, so one wall-clock budget spans
+        // the whole redirect chain rather than restarting per hop.
+        signal,
         // `dispatcher` is honored by undici at runtime but absent from
         // DOM's RequestInit type (DOM-lib consumers typecheck this source)
         // — hide it behind `unknown` to stay lib-agnostic.

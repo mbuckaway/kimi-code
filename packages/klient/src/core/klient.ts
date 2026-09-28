@@ -10,7 +10,7 @@ import { globalContract, isStreamingContract } from '#/contract/index';
 import { globalEvents, type KlientEventPayloads } from '#/contract/global/events';
 import { sessionEvents, type SessionEventPayloads } from '#/contract/session/events';
 import { agentEvents, type AgentEventPayloads } from '#/contract/agent/events';
-import type { EventRegistration, StreamingProcedureContract } from '#/contract/types';
+import type { EventRegistration } from '#/contract/types';
 import { EventHub, type KlientEvents } from './events/hub.js';
 import { createGlobalFacade, type GlobalFacade, type ScopedCaller, type ScopedStreamCaller } from './facade/global.js';
 import { createSessionFacade, type SessionFacade } from './facade/session.js';
@@ -77,7 +77,6 @@ export function createKlientFromChannel(
     if (!validate) return source;
 
     // Wrap the iterable to validate each chunk.
-    const contract = procedure as StreamingProcedureContract;
     return {
       [Symbol.asyncIterator]() {
         const iter = source[Symbol.asyncIterator]();
@@ -85,7 +84,7 @@ export function createKlientFromChannel(
           async next() {
             const result = await iter.next();
             if (result.done) return { done: true as const, value: undefined };
-            return { done: false, value: parseChunk(name, contract, result.value) };
+            return { done: false, value: parseChunk(name, procedure, result.value) };
           },
           async return(value?: unknown) {
             await iter.return?.(value);

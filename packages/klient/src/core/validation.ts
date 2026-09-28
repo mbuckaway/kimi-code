@@ -31,24 +31,24 @@ export class KlientValidationError extends Error {
 }
 
 /** Parse the positional-args tuple; returns the normalized args to send. */
-export function parseInput(
+export function parseInput<TInput, TOutput>(
   procedure: string,
-  contract: ProcedureContract | StreamingProcedureContract,
+  contract: ProcedureContract<TInput, TOutput> | StreamingProcedureContract<TInput>,
   args: unknown[],
-): unknown[] {
+): TInput {
   const result = contract.input.safeParse(args);
   if (!result.success) {
     throw new KlientValidationError('input', procedure, result.error.issues, args);
   }
-  return result.data as unknown[];
+  return result.data;
 }
 
 /** Parse a wire result; returns the normalized data to hand to the caller. */
-export function parseOutput(
+export function parseOutput<TInput, TOutput>(
   procedure: string,
-  contract: ProcedureContract,
+  contract: ProcedureContract<TInput, TOutput>,
   data: unknown,
-): unknown {
+): TOutput {
   const result = contract.output.safeParse(data);
   if (!result.success) {
     throw new KlientValidationError('output', procedure, result.error.issues, data);
@@ -57,11 +57,11 @@ export function parseOutput(
 }
 
 /** Validate one streamed chunk; throws on mismatch. */
-export function parseChunk(
+export function parseChunk<TInput, TChunk>(
   procedure: string,
-  contract: StreamingProcedureContract,
+  contract: StreamingProcedureContract<TInput, TChunk>,
   data: unknown,
-): unknown {
+): TChunk {
   const result = contract.chunk.safeParse(data);
   if (!result.success) {
     throw new KlientValidationError('chunk', procedure, result.error.issues, data);
@@ -69,12 +69,12 @@ export function parseChunk(
   return result.data;
 }
 
-/** Parse an event payload without throwing; `undefined` on failure. */
-export function parseEvent(
+/** Parse an event payload without throwing; an `ok: false` result on failure. */
+export function parseEvent<TPayload>(
   event: string,
-  schema: z.ZodType,
+  schema: z.ZodType<TPayload>,
   data: unknown,
-): { ok: true; data: unknown } | { ok: false; error: KlientValidationError } {
+): { ok: true; data: TPayload } | { ok: false; error: KlientValidationError } {
   const result = schema.safeParse(data);
   if (!result.success) {
     return { ok: false, error: new KlientValidationError('event', event, result.error.issues, data) };
