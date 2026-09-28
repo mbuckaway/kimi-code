@@ -65,6 +65,12 @@ const ModelAliasBaseSchema = z.object({
   // turning thinking off sends this value instead of omitting the effort
   // field — required by models whose default is to reason.
   offEffort: z.string().optional(),
+  // OpenAI Responses `reasoning` object controls, threaded to the adapter.
+  // `summary` defaults to 'auto' when unset; `mode` and `context` reach the
+  // wire only when explicitly configured.
+  reasoningSummary: z.enum(['auto', 'concise', 'detailed']).optional(),
+  reasoningMode: z.enum(['standard', 'pro']).optional(),
+  reasoningContext: z.enum(['auto', 'current_turn', 'all_turns']).optional(),
   // Route the Anthropic transport through the beta Messages API
   // (`POST /v1/messages?beta=true`) instead of the standard endpoint. Used by
   // managed Kimi Code models that declare `protocol: 'anthropic'`.
@@ -274,13 +280,17 @@ export const MoonshotServiceConfigSchema = z.object({
 
 export type MoonshotServiceConfig = z.infer<typeof MoonshotServiceConfigSchema>;
 
-export const SearchProviderSchema = z.enum(['kimi', 'zai', 'disabled']);
+export const SearchProviderSchema = z.enum(['kimi', 'zai', 'qwen', 'disabled']);
 
 export const SearchConfigSchema = z.object({
   /** Which web search backend the runtime instantiates. Unset keeps the moonshot_search service. */
   provider: SearchProviderSchema.optional(),
-  /** z.ai API key; required only while `provider` is "zai". */
+  /** z.ai or DashScope API key. Required only while `provider` is "zai" or "qwen". */
   apiKey: z.string().optional(),
+  /** DashScope generation endpoint. Only `provider` "qwen" reads it; unset keeps the default. */
+  baseUrl: z.string().optional(),
+  /** Qwen model that runs the search. Only `provider` "qwen" reads it; unset keeps `qwen-plus`. */
+  model: z.string().optional(),
 });
 
 export type SearchConfig = z.infer<typeof SearchConfigSchema>;

@@ -285,6 +285,9 @@ merge_all_available_skills = true
   # support_efforts: string[]
   # default_effort: string
   # off_effort: string
+  # reasoning_summary: "auto" | "concise" | "detailed"
+  # reasoning_mode: "standard" | "pro"
+  # reasoning_context: "auto" | "current_turn" | "all_turns"
   # overrides: object
     # max_context_size: integer
     # max_input_size: integer
@@ -296,6 +299,9 @@ merge_all_available_skills = true
     # support_efforts: string[]
     # default_effort: string
     # off_effort: string
+    # reasoning_summary: "auto" | "concise" | "detailed"
+    # reasoning_mode: "standard" | "pro"
+    # reasoning_context: "auto" | "current_turn" | "all_turns"
 
 # ##########################################################################
 # permission
@@ -402,8 +408,10 @@ merge_all_available_skills = true
   # custom_headers: record<string, string>
 
 # [services.search]
-  # provider: "kimi" | "zai" | "disabled"
+  # provider: "kimi" | "zai" | "qwen" | "disabled"
   # api_key: string
+  # base_url: string
+  # model: string
 
 # ##########################################################################
 # subagent

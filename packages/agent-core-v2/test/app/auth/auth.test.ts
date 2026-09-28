@@ -23,6 +23,7 @@ import {
 } from '#/app/auth/configSection';
 import { IWebSearchProviderService } from '#/app/auth/webSearch/webSearch';
 import { WebSearchProviderService } from '#/app/auth/webSearch/webSearchService';
+import { QwenWebSearchProvider } from '#/app/auth/webSearch/providers/qwen-web-search';
 import { ZaiWebSearchProvider } from '#/app/auth/webSearch/providers/zai-web-search';
 import { IAuthLegacyService } from '#/app/authLegacy/authLegacy';
 import { AuthLegacyService } from '#/app/authLegacy/authLegacyService';
@@ -1510,6 +1511,138 @@ describe('WebSearchProviderService', () => {
     expect(createService().getWebSearchProvider()).toBeUndefined();
   });
 
+  it('builds a qwen search provider from the services.search config', async () => {
+    servicesConfig = { search: { provider: 'qwen', apiKey: 'qwen-key' } };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'answer',
+                annotations: [
+                  { type: 'url_citation', title: 'Title', url: 'https://example.com/a' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).toBeInstanceOf(QwenWebSearchProvider);
+    const results = await provider!.search('hello');
+
+    expect(results).toEqual([{ title: 'Title', url: 'https://example.com/a', snippet: '' }]);
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://maas.qwencloudapi.com/compatible-mode/v1/responses');
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({
+      Authorization: 'Bearer qwen-key',
+      'Content-Type': 'application/json',
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: 'qwen3.8-max',
+      input: 'hello',
+      tools: [{ type: 'web_search' }],
+      stream: false,
+    });
+  });
+
+  it('uses the qwen baseUrl and model from the services.search config', async () => {
+    servicesConfig = {
+      search: {
+        provider: 'qwen',
+        apiKey: 'qwen-key',
+        baseUrl: 'https://maas.example.test/compatible-mode/v1/',
+        model: 'qwen3.8-plus',
+      },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ output: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    await provider!.search('hello');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://maas.example.test/compatible-mode/v1/responses');
+    expect(JSON.parse(init.body as string)).toMatchObject({ model: 'qwen3.8-plus' });
+  });
+
+  it('falls back to the qwen defaults when the services.search baseUrl and model are blank', async () => {
+    servicesConfig = {
+      search: { provider: 'qwen', apiKey: 'qwen-key', baseUrl: '   ', model: '' },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ output: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    await provider!.search('hello');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://maas.qwencloudapi.com/compatible-mode/v1/responses');
+    expect(JSON.parse(init.body as string)).toMatchObject({ model: 'qwen3.8-max' });
+  });
+
+  it('prefers the services.search qwen provider over the managed oauth provider', async () => {
+    servicesConfig = { search: { provider: 'qwen', apiKey: 'qwen-key' } };
+    providers = {
+      [OAUTH_PROVIDER]: {
+        type: 'kimi',
+        baseUrl: 'https://api.example.com/v1',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+      },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ output: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).toBeInstanceOf(QwenWebSearchProvider);
+    await provider!.search('hello');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://maas.qwencloudapi.com/compatible-mode/v1/responses');
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer qwen-key');
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when services.search selects qwen without an api key', () => {
+    servicesConfig = { search: { provider: 'qwen' } };
+    expect(createService().getWebSearchProvider()).toBeUndefined();
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when services.search selects qwen with a blank api key', () => {
+    servicesConfig = { search: { provider: 'qwen', apiKey: '   ' } };
+    expect(createService().getWebSearchProvider()).toBeUndefined();
+  });
+
+  it('returns true when services.search selects qwen with an api key', () => {
+    servicesConfig = { search: { provider: 'qwen', apiKey: 'qwen-key' } };
+    expect(createService().hasWebSearchProvider()).toBe(true);
+  });
+
+  it('returns false when services.search selects qwen without an api key', () => {
+    servicesConfig = { search: { provider: 'qwen' } };
+    expect(createService().hasWebSearchProvider()).toBe(false);
+  });
+
   it('returns undefined when services.search disables search', () => {
     servicesConfig = { search: { provider: 'disabled' } };
     expect(createService().getWebSearchProvider()).toBeUndefined();
@@ -1827,6 +1960,391 @@ describe('ZaiWebSearchProvider', () => {
   });
 });
 
+describe('QwenWebSearchProvider', () => {
+  const API_KEY = 'YOUR_API_KEY';
+  const DEFAULT_URL = 'https://maas.qwencloudapi.com/compatible-mode/v1/responses';
+
+  function providerWith(fetchMock: Mock, baseUrl?: string, model?: string): QwenWebSearchProvider {
+    return new QwenWebSearchProvider({
+      apiKey: API_KEY,
+      baseUrl,
+      model,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+  }
+
+  function jsonResponse(status: number, payload: unknown) {
+    return { status, json: async () => payload, text: async () => '' };
+  }
+
+  it('posts the responses request with the bearer key and maps url citations', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'answer',
+                annotations: [
+                  { type: 'url_citation', title: 'Title', url: 'https://example.com/a' },
+                ],
+              },
+            ],
+          },
+        ],
+        usage: { total_tokens: 42 },
+      }),
+    });
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([{ title: 'Title', url: 'https://example.com/a', snippet: '' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(DEFAULT_URL);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({
+      Authorization: `Bearer ${API_KEY}`,
+      'Content-Type': 'application/json',
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: 'qwen3.8-max',
+      input: 'hello',
+      tools: [{ type: 'web_search' }],
+      stream: false,
+    });
+  });
+
+  it('maps every citation in content-part order', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'first',
+                annotations: [
+                  { type: 'url_citation', title: 'First', url: 'https://example.com/1' },
+                ],
+              },
+              {
+                type: 'output_text',
+                text: 'second',
+                annotations: [
+                  { type: 'url_citation', title: 'Second', url: 'https://example.com/2' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([
+      { title: 'First', url: 'https://example.com/1', snippet: '' },
+      { title: 'Second', url: 'https://example.com/2', snippet: '' },
+    ]);
+  });
+
+  it('maps web_search_call sources and defaults a missing title to an empty string', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          {
+            type: 'web_search_call',
+            action: { query: 'hello', sources: [{ url: 'https://example.com/a' }] },
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([{ title: '', url: 'https://example.com/a', snippet: '' }]);
+  });
+
+  it('merges citations and sources, deduping by url and keeping the titled entry', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          {
+            type: 'web_search_call',
+            action: {
+              query: 'hello',
+              sources: [
+                { url: 'https://example.com/a' },
+                { url: 'https://example.com/b', title: 'B from source' },
+              ],
+            },
+          },
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'answer',
+                annotations: [
+                  { type: 'url_citation', title: 'A cited', url: 'https://example.com/a' },
+                  { type: 'url_citation', title: 'B cited', url: 'https://example.com/b' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([
+      { title: 'A cited', url: 'https://example.com/a', snippet: '' },
+      { title: 'B from source', url: 'https://example.com/b', snippet: '' },
+    ]);
+  });
+
+  it('keeps a single entry when the same url repeats without a title', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          {
+            type: 'web_search_call',
+            action: {
+              query: 'hello',
+              sources: [{ url: 'https://example.com/a' }, { url: 'https://example.com/a' }],
+            },
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([{ title: '', url: 'https://example.com/a', snippet: '' }]);
+  });
+
+  it('returns an empty list when output is missing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {}));
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('returns an empty list when output is not an array', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { output: 'nope' }));
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('returns an empty list when a message has no content', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { output: [{ type: 'message' }] }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('returns an empty list when message content is not an array', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { output: [{ type: 'message', content: 'nope' }] }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('ignores message content parts that are not output_text', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'refusal',
+                text: 'no',
+                annotations: [
+                  { type: 'url_citation', title: 'Title', url: 'https://example.com/a' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('ignores annotations that are not url_citation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'answer',
+                annotations: [
+                  { type: 'file_citation', title: 'Title', url: 'https://example.com/a' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('returns an empty list when a message part has no annotations', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'answer' }] }],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('returns an empty list when a web_search_call has no usable sources', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          { type: 'web_search_call' },
+          { type: 'web_search_call', action: { query: 'hello' } },
+          { type: 'web_search_call', action: { query: 'hello', sources: 'nope' } },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('ignores output items of other types', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          {
+            type: 'reasoning',
+            content: [{ type: 'output_text', annotations: [{ url: 'https://example.com/a' }] }],
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('ignores citations and sources without a url', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        output: [
+          { type: 'web_search_call', action: { query: 'hello', sources: [{ url: '' }] } },
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'answer',
+                annotations: [
+                  { type: 'url_citation', title: 'Title', url: '' },
+                  { type: 'url_citation', title: 'No url' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([]);
+  });
+
+  it('posts to an overridden baseUrl and model and forwards the abort signal', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {}));
+    const controller = new AbortController();
+
+    await providerWith(fetchMock, 'https://maas.example.test/compatible-mode/v1', 'qwen3.8-plus')
+      .search('hello', { signal: controller.signal });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://maas.example.test/compatible-mode/v1/responses');
+    expect(init.signal).toBe(controller.signal);
+    expect(JSON.parse(init.body as string)).toMatchObject({ model: 'qwen3.8-plus' });
+  });
+
+  it('throws web.fetch_failed on HTTP 401 with the response detail', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 401,
+      text: async () => 'Unauthorized',
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Qwen search request failed: HTTP 401 (auth/unauthorized). Unauthorized',
+      details: { status: 401 },
+    });
+  });
+
+  it('throws web.fetch_failed on a non-200 response with the status detail', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 503,
+      text: async () => 'busy',
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Qwen search request failed: HTTP 503. busy',
+      details: { status: 503 },
+    });
+  });
+
+  it('throws web.fetch_failed with an empty detail when the error body cannot be read', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 500,
+      text: async () => {
+        throw new Error('body stream failed');
+      },
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Qwen search request failed: HTTP 500.',
+      details: { status: 500 },
+    });
+  });
+});
+
 describe('services config section', () => {
   it('registers the services section and validates its schema', () => {
     const registry = new ConfigRegistry();
@@ -1938,6 +2456,48 @@ describe('services config section', () => {
     expect(() =>
       registry.validate(SERVICES_SECTION, { search: { provider: 'google' } }),
     ).toThrow();
+  });
+
+  it('validates the qwen search provider selection with baseUrl and model', () => {
+    const registry = new ConfigRegistry();
+
+    expect(
+      registry.validate(SERVICES_SECTION, {
+        search: {
+          provider: 'qwen',
+          apiKey: 'qwen-key',
+          baseUrl: 'https://maas.example.test/compatible-mode/v1',
+          model: 'qwen3.8-max',
+        },
+      }),
+    ).toEqual({
+      search: {
+        provider: 'qwen',
+        apiKey: 'qwen-key',
+        baseUrl: 'https://maas.example.test/compatible-mode/v1',
+        model: 'qwen3.8-max',
+      },
+    });
+    expect(
+      servicesToToml(
+        {
+          search: {
+            provider: 'qwen',
+            apiKey: 'qwen-key',
+            baseUrl: 'https://maas.example.test/compatible-mode/v1',
+            model: 'qwen3.8-max',
+          },
+        },
+        {},
+      ),
+    ).toEqual({
+      search: {
+        provider: 'qwen',
+        api_key: 'qwen-key',
+        base_url: 'https://maas.example.test/compatible-mode/v1',
+        model: 'qwen3.8-max',
+      },
+    });
   });
 
   it('maps the search service between TOML snake_case and camelCase', () => {

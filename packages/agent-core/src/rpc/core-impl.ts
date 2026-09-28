@@ -7,6 +7,7 @@ import { PluginManager } from '#/plugin';
 import { LocalFetchURLProvider } from '#/tools/providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from '#/tools/providers/moonshot-fetch-url';
 import { MoonshotWebSearchProvider } from '#/tools/providers/moonshot-web-search';
+import { QwenWebSearchProvider } from '#/tools/providers/qwen-web-search';
 import { ZaiWebSearchProvider } from '#/tools/providers/zai-web-search';
 import { ImageLimits } from '#/tools/support/image-limits';
 import type { PromisableMethods } from '#/utils/types';
@@ -2261,6 +2262,7 @@ async function createRuntimeConfig(input: {
  * Pick the web search provider from `[services.search]`.
  *
  * `disabled` turns search off, `zai` calls the z.ai endpoint with its own API
+ * key, `qwen` calls the DashScope text-generation endpoint with its own API
  * key, and `kimi` (or an unset provider) keeps the moonshot_search service —
  * including the managed-OAuth credentials the login flow writes there.
  */
@@ -2274,6 +2276,15 @@ function createWebSearcher(input: {
   if (input.search?.provider === 'zai') {
     const apiKey = nonEmptyString(input.search.apiKey);
     return apiKey === undefined ? undefined : new ZaiWebSearchProvider({ apiKey });
+  }
+  if (input.search?.provider === 'qwen') {
+    const apiKey = nonEmptyString(input.search.apiKey);
+    if (apiKey === undefined) return undefined;
+    return new QwenWebSearchProvider({
+      apiKey,
+      baseUrl: nonEmptyString(input.search.baseUrl),
+      model: nonEmptyString(input.search.model),
+    });
   }
   if (input.searchService?.baseUrl === undefined) return undefined;
   return new MoonshotWebSearchProvider({

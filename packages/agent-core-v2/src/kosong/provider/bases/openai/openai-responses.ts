@@ -33,6 +33,11 @@ import type {
 import type { Tool } from '#/kosong/contract/tool';
 import type { TokenUsage } from '#/kosong/contract/usage';
 import { ProtocolErrors } from '#/kosong/protocol/errors';
+import type {
+  ReasoningContext,
+  ReasoningMode,
+  ReasoningSummary,
+} from '#/kosong/protocol/protocol';
 
 import {
   convertOpenAIError,
@@ -365,6 +370,9 @@ export interface OpenAIResponsesOptions {
   model: string;
   maxOutputTokens?: number | undefined;
   offEffort?: string | undefined;
+  reasoningSummary?: ReasoningSummary | undefined;
+  reasoningMode?: ReasoningMode | undefined;
+  reasoningContext?: ReasoningContext | undefined;
   thinkingEffort?: ThinkingEffort | undefined;
   httpClient?: unknown;
   defaultHeaders?: Record<string, string>;
@@ -1031,6 +1039,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   private readonly _defaultHeaders: Record<string, string> | undefined;
   private readonly _thinkingEffort: ThinkingEffort | undefined;
   private readonly _offEffort: string | undefined;
+  private readonly _reasoningSummary: ReasoningSummary | undefined;
+  private readonly _reasoningMode: ReasoningMode | undefined;
+  private readonly _reasoningContext: ReasoningContext | undefined;
   private readonly _generationKwargs: OpenAIResponsesGenerationKwargs;
   private readonly _toolMessageConversion: ToolMessageConversion;
   private readonly _client: OpenAI | undefined;
@@ -1047,6 +1058,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     this._stream = true;
     this._thinkingEffort = options.thinkingEffort;
     this._offEffort = options.offEffort;
+    this._reasoningSummary = options.reasoningSummary;
+    this._reasoningMode = options.reasoningMode;
+    this._reasoningContext = options.reasoningContext;
     this._generationKwargs = {};
     this._toolMessageConversion = options.toolMessageConversion ?? null;
     this._httpClient = options.httpClient;
@@ -1128,11 +1142,25 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     const reasoningEffort = kwargs['reasoning_effort'] as string | undefined;
     delete kwargs['reasoning_effort'];
 
-    if (reasoningEffort !== undefined) {
-      kwargs['reasoning'] = {
-        effort: reasoningEffort,
-        summary: 'auto',
+    const reasoningConfigured =
+      this._reasoningSummary !== undefined ||
+      this._reasoningMode !== undefined ||
+      this._reasoningContext !== undefined;
+
+    if (reasoningEffort !== undefined || reasoningConfigured) {
+      const reasoning: Record<string, unknown> = {
+        summary: this._reasoningSummary ?? 'auto',
       };
+      if (reasoningEffort !== undefined) {
+        reasoning['effort'] = reasoningEffort;
+      }
+      if (this._reasoningMode !== undefined) {
+        reasoning['mode'] = this._reasoningMode;
+      }
+      if (this._reasoningContext !== undefined) {
+        reasoning['context'] = this._reasoningContext;
+      }
+      kwargs['reasoning'] = reasoning;
       kwargs['include'] = ['reasoning.encrypted_content'];
     }
 

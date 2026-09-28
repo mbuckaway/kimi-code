@@ -16,11 +16,20 @@ export const ProtocolSchema = z.enum([
 
 export type Protocol = z.infer<typeof ProtocolSchema>;
 
+export type ReasoningSummary = 'auto' | 'concise' | 'detailed';
+
+export type ReasoningMode = 'standard' | 'pro';
+
+export type ReasoningContext = 'auto' | 'current_turn' | 'all_turns';
+
 export interface ProtocolProviderOptions {
   readonly reasoningKey?: string;
   readonly defaultMaxTokens?: number;
   readonly supportEfforts?: readonly string[];
   readonly offEffort?: string;
+  readonly reasoningSummary?: ReasoningSummary;
+  readonly reasoningMode?: ReasoningMode;
+  readonly reasoningContext?: ReasoningContext;
   readonly adaptiveThinking?: boolean;
   readonly betaApi?: boolean;
   readonly metadata?: Readonly<Record<string, string>>;

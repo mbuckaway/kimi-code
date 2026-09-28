@@ -625,6 +625,172 @@ api_key = "zai-key"
     });
   });
 
+  it('selects the Qwen web search provider from services.search', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.search]
+provider = "qwen"
+api_key = "qwen-key"
+base_url = "https://qwen.example.test/compatible-mode/v1"
+model = "qwen-max"
+`,
+    );
+
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: 'web_search_call',
+              action: { query: 'kimi', sources: [{ url: 'https://example.test/1' }] },
+            },
+            {
+              type: 'message',
+              content: [
+                {
+                  type: 'output_text',
+                  text: 'answer',
+                  annotations: [
+                    {
+                      type: 'url_citation',
+                      title: 'Example Site',
+                      url: 'https://example.test/1',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          usage: { total_tokens: 42 },
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_qwen', workDir });
+    const webSearcher = core.sessions.get(created.id)?.options.toolServices?.webSearcher;
+
+    const results = await webSearcher?.search('kimi');
+
+    expect(results).toEqual([
+      { title: 'Example Site', url: 'https://example.test/1', snippet: '' },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://qwen.example.test/compatible-mode/v1/responses',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer qwen-key',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'qwen-max',
+          input: 'kimi',
+          tools: [{ type: 'web_search' }],
+          stream: false,
+        }),
+      },
+    );
+  });
+
+  it('uses the QwenCloud defaults when the Qwen provider sets no base URL or model', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.search]
+provider = "qwen"
+api_key = "qwen-key"
+`,
+    );
+
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ output: [], usage: { total_tokens: 3 } }), { status: 200 }),
+      );
+    vi.stubGlobal('fetch', fetchImpl);
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_qwen_defaults', workDir });
+    const webSearcher = core.sessions.get(created.id)?.options.toolServices?.webSearcher;
+
+    await webSearcher?.search('kimi');
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://maas.qwencloudapi.com/compatible-mode/v1/responses');
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer qwen-key' });
+    expect(init.body).toBe(
+      JSON.stringify({
+        model: 'qwen3.8-max',
+        input: 'kimi',
+        tools: [{ type: 'web_search' }],
+        stream: false,
+      }),
+    );
+  });
+
+  it('leaves web search unconfigured when Qwen is selected without an api key', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
+    const homeDir = join(tmp, 'home');
+    const workDir = join(tmp, 'work');
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `${baseModelConfig()}
+[services.search]
+provider = "qwen"
+api_key = ""
+`,
+    );
+
+    const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
+    const core = new KimiCore(coreRpc, { homeDir });
+    const rpc = await sdkRpc({
+      emitEvent: vi.fn(),
+      requestApproval: vi.fn(async (): Promise<ApprovalResponse> => ({ decision: 'rejected' })),
+      requestQuestion: vi.fn(async () => null),
+      toolCall: vi.fn(async () => ({ output: '' })),
+    });
+
+    const created = await rpc.createSession({ id: 'ses_runtime_search_qwen_no_key', workDir });
+
+    expect(core.sessions.get(created.id)?.options.toolServices?.webSearcher).toBeUndefined();
+    // The selection reaches the session, so the missing key turns search off.
+    const main = core.sessions.get(created.id)?.getReadyAgent('main');
+    expect(main?.kimiConfig?.services?.search).toEqual({ provider: 'qwen', apiKey: '' });
+  });
+
   it('keeps the Moonshot search service when services.search selects the kimi provider', async () => {
     tmp = await mkdtemp(join(tmpdir(), 'kimi-core-runtime-'));
     const homeDir = join(tmp, 'home');

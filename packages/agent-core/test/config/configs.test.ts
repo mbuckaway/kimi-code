@@ -392,6 +392,53 @@ api_key = "zai-key"
     expect(roundTripped.services?.search).toEqual({ provider: 'zai', apiKey: 'zai-key' });
   });
 
+  it('parses the [services.search] qwen provider with its base URL and model', () => {
+    const config = parseConfigString(
+      `[services.search]
+provider = "qwen"
+api_key = "qwen-key"
+base_url = "https://dashscope.example.test/api/v1/generation"
+model = "qwen-max"
+`,
+      'config.toml',
+    );
+
+    expect(config.services?.search).toEqual({
+      provider: 'qwen',
+      apiKey: 'qwen-key',
+      baseUrl: 'https://dashscope.example.test/api/v1/generation',
+      model: 'qwen-max',
+    });
+  });
+
+  it('round-trips the qwen [services.search] base URL and model', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'search-qwen-round-trip.toml');
+    const toml = `
+[services.search]
+provider = "qwen"
+api_key = "qwen-key"
+base_url = "https://dashscope.example.test/api/v1/generation"
+model = "qwen-max"
+`;
+    const expected = {
+      provider: 'qwen',
+      apiKey: 'qwen-key',
+      baseUrl: 'https://dashscope.example.test/api/v1/generation',
+      model: 'qwen-max',
+    };
+    const config = parseConfigString(toml, configPath);
+    expect(config.services?.search).toEqual(expected);
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('provider = "qwen"');
+    expect(text).toContain('base_url = "https://dashscope.example.test/api/v1/generation"');
+    expect(text).toContain('model = "qwen-max"');
+    const roundTripped = parseConfigString(text, configPath);
+    expect(roundTripped.services?.search).toEqual(expected);
+  });
+
   it('round-trips OAuth refs with scoped OAuth hosts', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'oauth-ref.toml');
@@ -1135,6 +1182,83 @@ support_efforts = ["low", "high"]
     const overrides = models['kimi-code/kimi-k2']?.['overrides'] as Record<string, unknown>;
 
     expect(overrides['support_efforts']).toEqual(['low', 'high']);
+  });
+});
+
+describe('OpenAI Responses reasoning wire configuration', () => {
+  it('parses reasoning_summary/mode/context into camelCase at the model and override level', () => {
+    const config = parseConfigString(`
+[models."gpt-5"]
+provider = "openai"
+model = "gpt-5"
+max_context_size = 400000
+reasoning_summary = "concise"
+reasoning_mode = "pro"
+reasoning_context = "all_turns"
+
+[models."gpt-5".overrides]
+reasoning_summary = "detailed"
+reasoning_context = "current_turn"
+`);
+
+    expect(config.models?.['gpt-5']).toMatchObject({
+      reasoningSummary: 'concise',
+      reasoningMode: 'pro',
+      reasoningContext: 'all_turns',
+      overrides: { reasoningSummary: 'detailed', reasoningContext: 'current_turn' },
+    });
+  });
+
+  it('writes reasoning fields back as snake_case TOML data', () => {
+    const config = parseConfigString(`
+[models."gpt-5"]
+provider = "openai"
+model = "gpt-5"
+max_context_size = 400000
+reasoning_summary = "concise"
+reasoning_mode = "standard"
+reasoning_context = "auto"
+`);
+
+    const data = configToTomlData(config);
+    const models = data['models'] as Record<string, Record<string, unknown>>;
+
+    expect(models['gpt-5']).toMatchObject({
+      reasoning_summary: 'concise',
+      reasoning_mode: 'standard',
+      reasoning_context: 'auto',
+    });
+  });
+
+  it('leaves all three fields undefined when the config omits them', () => {
+    const config = parseConfigString(`
+[models."gpt-5"]
+provider = "openai"
+model = "gpt-5"
+max_context_size = 400000
+`);
+
+    expect(config.models?.['gpt-5']?.reasoningSummary).toBeUndefined();
+    expect(config.models?.['gpt-5']?.reasoningMode).toBeUndefined();
+    expect(config.models?.['gpt-5']?.reasoningContext).toBeUndefined();
+  });
+
+  it.each([
+    ['reasoning_summary', '"verbose"'],
+    ['reasoning_mode', '"fast"'],
+    ['reasoning_context', '"session"'],
+  ])('rejects an out-of-enum %s value', (field, value) => {
+    expectKimiErrorCode(
+      () =>
+        parseConfigString(`
+[models."gpt-5"]
+provider = "openai"
+model = "gpt-5"
+max_context_size = 400000
+${field} = ${value}
+`),
+      ErrorCodes.CONFIG_INVALID,
+    );
   });
 });
 

@@ -347,6 +347,78 @@ describe('Model assembly (pure data)', () => {
     }
   });
 
+  it('passes the Responses reasoning dials through providerOptions', () => {
+    const { host, catalog } = createHost({
+      providers: { responses: { type: 'openai_responses', apiKey: 'sk-r' } },
+      models: {
+        tuned: {
+          provider: 'responses',
+          model: 'gpt-5',
+          maxContextSize: 400000,
+          reasoningSummary: 'concise',
+          reasoningMode: 'pro',
+          reasoningContext: 'all_turns',
+        },
+        overridden: {
+          provider: 'responses',
+          model: 'gpt-5',
+          maxContextSize: 400000,
+          reasoningSummary: 'auto',
+          overrides: { reasoningSummary: 'detailed', reasoningContext: 'current_turn' },
+        },
+        defaulted: { provider: 'responses', model: 'gpt-5', maxContextSize: 400000 },
+      },
+    });
+    try {
+      expect(catalog.get('tuned').providerOptions).toEqual({
+        reasoningSummary: 'concise',
+        reasoningMode: 'pro',
+        reasoningContext: 'all_turns',
+      });
+      expect(catalog.get('overridden').providerOptions).toEqual({
+        reasoningSummary: 'detailed',
+        reasoningContext: 'current_turn',
+      });
+      expect(catalog.get('defaulted').providerOptions).toBeUndefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('keeps the Responses reasoning dials off the OpenAI chat and Anthropic wires', () => {
+    const { host, catalog } = createHost({
+      providers: {
+        gateway: { type: 'openai', apiKey: 'sk-gw', baseUrl: 'https://gateway.example.test/v1' },
+        claude: { type: 'anthropic', apiKey: 'sk-c' },
+      },
+      models: {
+        chat: {
+          provider: 'gateway',
+          model: 'gpt-5',
+          maxContextSize: 400000,
+          reasoningSummary: 'concise',
+          reasoningMode: 'pro',
+          reasoningContext: 'all_turns',
+        },
+        anthropic: {
+          provider: 'claude',
+          model: 'custom-anthropic-model',
+          maxContextSize: 200000,
+          protocol: 'anthropic',
+          reasoningSummary: 'concise',
+          reasoningMode: 'pro',
+          reasoningContext: 'all_turns',
+        },
+      },
+    });
+    try {
+      expect(catalog.get('chat').providerOptions).toBeUndefined();
+      expect(catalog.get('anthropic').providerOptions).toBeUndefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
   it('enables google-genai vertex mode through providerOptions when project and location resolve', () => {
     const { host, catalog } = createHost({
       providers: {

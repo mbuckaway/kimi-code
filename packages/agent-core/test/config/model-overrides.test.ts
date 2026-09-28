@@ -220,4 +220,38 @@ describe('effectiveModelAlias', () => {
       defaultEffort: 'max',
     });
   });
+
+  it('carries base reasoning fields into the effective alias', () => {
+    const model: ModelAlias = {
+      provider: 'openai',
+      model: 'gpt-5',
+      maxContextSize: 400000,
+      reasoningSummary: 'auto',
+      reasoningMode: 'standard',
+      reasoningContext: 'all_turns',
+    };
+
+    expect(effectiveModelAlias(model)).toMatchObject({
+      reasoningSummary: 'auto',
+      reasoningMode: 'standard',
+      reasoningContext: 'all_turns',
+    });
+  });
+
+  it('lets reasoning overrides win over the base fields', () => {
+    const model: ModelAlias = {
+      provider: 'openai',
+      model: 'gpt-5',
+      maxContextSize: 400000,
+      reasoningSummary: 'auto',
+      reasoningMode: 'standard',
+      overrides: { reasoningSummary: 'detailed', reasoningContext: 'current_turn' },
+    };
+
+    expect(effectiveModelAlias(model)).toMatchObject({
+      reasoningSummary: 'detailed',
+      reasoningMode: 'standard',
+      reasoningContext: 'current_turn',
+    });
+  });
 });
