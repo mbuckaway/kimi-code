@@ -538,6 +538,13 @@ function buildProtocolProviderOptions(
     }
     case 'openai_responses':
       if (model.offEffort !== undefined) options.offEffort = model.offEffort;
+      if (model.reasoningSummary !== undefined) {
+        options.reasoningSummary = model.reasoningSummary;
+      }
+      if (model.reasoningMode !== undefined) options.reasoningMode = model.reasoningMode;
+      if (model.reasoningContext !== undefined) {
+        options.reasoningContext = model.reasoningContext;
+      }
       break;
     default: {
       const exhaustive: never = protocol;

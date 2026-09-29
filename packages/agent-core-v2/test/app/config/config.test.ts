@@ -2764,6 +2764,78 @@ describe('ConfigService replaceSections', () => {
 
     disposables.dispose();
   });
+
+  it('round-trips the OpenAI Responses reasoning dials on a model record', async () => {
+    const seed = [
+      '[models."acme/m2"]',
+      'provider = "acme"',
+      'model = "m2"',
+      'max_context_size = 2000',
+      'reasoning_summary = "concise"',
+      'reasoning_mode = "pro"',
+      'reasoning_context = "all_turns"',
+      '',
+    ].join('\n');
+    const { config, disposables, storage } = await createSectionsConfig(seed);
+
+    expect(config.get<Record<string, unknown>>(MODELS_SECTION)).toEqual({
+      'acme/m2': {
+        provider: 'acme',
+        model: 'm2',
+        maxContextSize: 2000,
+        reasoningSummary: 'concise',
+        reasoningMode: 'pro',
+        reasoningContext: 'all_turns',
+      },
+    });
+
+    await config.set(MODELS_SECTION, {
+      'acme/m2': {
+        provider: 'acme',
+        model: 'm2',
+        maxContextSize: 2000,
+        reasoningSummary: 'detailed',
+        reasoningMode: 'standard',
+        reasoningContext: 'current_turn',
+      },
+    });
+
+    const doc = new TextDecoder().decode(await storage.read('', 'config.toml'));
+    expect(doc).toContain('reasoning_summary = "detailed"');
+    expect(doc).toContain('reasoning_mode = "standard"');
+    expect(doc).toContain('reasoning_context = "current_turn"');
+    expect(config.get<Record<string, unknown>>(MODELS_SECTION)).toEqual({
+      'acme/m2': {
+        provider: 'acme',
+        model: 'm2',
+        maxContextSize: 2000,
+        reasoningSummary: 'detailed',
+        reasoningMode: 'standard',
+        reasoningContext: 'current_turn',
+      },
+    });
+
+    disposables.dispose();
+  });
+
+  it.each([
+    ['reasoningSummary', 'verbose'],
+    ['reasoningMode', 'turbo'],
+    ['reasoningContext', 'some_turns'],
+  ])('rejects an unknown %s value on a model record', async (field, value) => {
+    const { config, disposables, store } = await createSectionsConfig();
+    const setSpy = vi.spyOn(store, 'set');
+
+    await expect(
+      config.set(MODELS_SECTION, {
+        'acme/m2': { provider: 'acme', model: 'm2', maxContextSize: 2000, [field]: value },
+      }),
+    ).rejects.toThrow(new RegExp(`"path": \\[\\s*"acme/m2",\\s*"${field}"`));
+
+    expect(setSpy).not.toHaveBeenCalled();
+
+    disposables.dispose();
+  });
 });
 
 describe('ConfigService persistence guards', () => {

@@ -1645,6 +1645,159 @@ describe('OpenAI reasoning_effort path (issue #1616)', () => {
   });
 });
 
+describe('OpenAI Responses reasoning object (behavior probes)', () => {
+  it('emits no reasoning object and no include when nothing is configured', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+    });
+
+    const body = await captureResponsesBody(provider, undefined);
+
+    expect(body).not.toHaveProperty('reasoning');
+    expect(body).not.toHaveProperty('include');
+  });
+
+  it('defaults the summary to auto when only an effort is set', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+    });
+
+    const body = await captureResponsesBody(provider, { thinking: { effort: 'high' } });
+
+    expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
+    expect(body['include']).toEqual(['reasoning.encrypted_content']);
+  });
+
+  it('emits the reasoning object for a configured summary with no effort', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+      reasoningSummary: 'concise',
+    });
+
+    const body = await captureResponsesBody(provider, undefined);
+
+    expect(body['reasoning']).toEqual({ summary: 'concise' });
+    expect(body['include']).toEqual(['reasoning.encrypted_content']);
+  });
+
+  it('emits mode and context only when configured', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+      reasoningMode: 'pro',
+      reasoningContext: 'all_turns',
+    });
+
+    const body = await captureResponsesBody(provider, { thinking: { effort: 'medium' } });
+
+    expect(body['reasoning']).toEqual({
+      effort: 'medium',
+      summary: 'auto',
+      mode: 'pro',
+      context: 'all_turns',
+    });
+    expect(body['include']).toEqual(['reasoning.encrypted_content']);
+  });
+
+  it('emits the context dial alone without mode', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+      reasoningContext: 'current_turn',
+    });
+
+    const body = await captureResponsesBody(provider, undefined);
+
+    expect(body['reasoning']).toEqual({ summary: 'auto', context: 'current_turn' });
+    expect(body['include']).toEqual(['reasoning.encrypted_content']);
+  });
+
+  it('keeps a configured summary when an effort is also present', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+      reasoningSummary: 'detailed',
+    });
+
+    const body = await captureResponsesBody(provider, { thinking: { effort: 'low' } });
+
+    expect(body['reasoning']).toEqual({ effort: 'low', summary: 'detailed' });
+  });
+
+  it('still suppresses the reasoning object on an explicit off with no dials configured', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+    });
+
+    const body = await captureResponsesBody(provider, { thinking: { effort: 'off' } });
+
+    expect(body).not.toHaveProperty('reasoning');
+    expect(body).not.toHaveProperty('include');
+  });
+
+  it('emits the reasoning object on an explicit off when a dial is configured', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5',
+      apiKey: 'sk-probe',
+      reasoningSummary: 'concise',
+    });
+
+    const body = await captureResponsesBody(provider, { thinking: { effort: 'off' } });
+
+    expect(body['reasoning']).toEqual({ summary: 'concise' });
+    expect(body['include']).toEqual(['reasoning.encrypted_content']);
+  });
+});
+
+describe('OpenAI Responses reasoning dials via providerOptions', () => {
+  it('forwards the dials from providerOptions to the base', () => {
+    const provider = registry.createChatProvider({
+      protocol: 'openai_responses',
+      modelName: 'gpt-5',
+      apiKey: 'sk-probe',
+      providerOptions: {
+        reasoningSummary: 'concise',
+        reasoningMode: 'pro',
+        reasoningContext: 'all_turns',
+      },
+    });
+
+    expect(Reflect.get(provider, '_reasoningSummary')).toBe('concise');
+    expect(Reflect.get(provider, '_reasoningMode')).toBe('pro');
+    expect(Reflect.get(provider, '_reasoningContext')).toBe('all_turns');
+  });
+
+  it('leaves the dials unset without providerOptions', () => {
+    const provider = registry.createChatProvider({
+      protocol: 'openai_responses',
+      modelName: 'gpt-5',
+      apiKey: 'sk-probe',
+    });
+
+    expect(Reflect.get(provider, '_reasoningSummary')).toBeUndefined();
+    expect(Reflect.get(provider, '_reasoningMode')).toBeUndefined();
+    expect(Reflect.get(provider, '_reasoningContext')).toBeUndefined();
+  });
+
+  it('emits the forwarded dials on the wire', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'openai_responses',
+      modelName: 'gpt-5',
+      apiKey: 'sk-probe',
+      providerOptions: { reasoningSummary: 'detailed', reasoningMode: 'pro' },
+    });
+
+    const body = await captureResponsesBody(provider, { thinking: { effort: 'high' } });
+
+    expect(body['reasoning']).toEqual({ effort: 'high', summary: 'detailed', mode: 'pro' });
+    expect(body['include']).toEqual(['reasoning.encrypted_content']);
+  });
+});
+
 describe('429 wire behavior over real HTTP (no hidden SDK retry)', () => {
   async function with429Server(
     body: Record<string, unknown>,

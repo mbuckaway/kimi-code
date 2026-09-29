@@ -1414,6 +1414,166 @@ describe('OpenAIResponsesChatProvider', () => {
       expect((maxBody['reasoning'] as Record<string, unknown>)['effort']).toBe('max');
       expect((xhighBody['reasoning'] as Record<string, unknown>)['effort']).toBe('xhigh');
     });
+
+    it('reasoning_summary "concise" overrides the default summary alongside the effort', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningSummary: 'concise',
+      }).withThinking('high');
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({ effort: 'high', summary: 'concise' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('reasoning_summary alone emits the reasoning object without an effort key', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningSummary: 'detailed',
+      });
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({ summary: 'detailed' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('reasoning_summary "auto" set explicitly still emits the reasoning object', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningSummary: 'auto',
+      });
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({ summary: 'auto' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('reasoning_mode is included only when configured', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningMode: 'pro',
+      }).withThinking('high');
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto', mode: 'pro' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('reasoning_mode alone emits the reasoning object with the default summary', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningMode: 'standard',
+      });
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({ summary: 'auto', mode: 'standard' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('reasoning_context is included only when configured', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningContext: 'current_turn',
+      }).withThinking('high');
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({
+        effort: 'high',
+        summary: 'auto',
+        context: 'current_turn',
+      });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('reasoning_context alone emits the reasoning object with the default summary', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningContext: 'all_turns',
+      });
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({ summary: 'auto', context: 'all_turns' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('emits effort, summary, mode, and context together when all are configured', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningSummary: 'detailed',
+        reasoningMode: 'pro',
+        reasoningContext: 'all_turns',
+      }).withThinking('high');
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({
+        effort: 'high',
+        summary: 'detailed',
+        mode: 'pro',
+        context: 'all_turns',
+      });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('keeps configured reasoning options across a withThinking clone', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        reasoningSummary: 'concise',
+        reasoningContext: 'current_turn',
+      });
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider.withThinking('low'), '', [], history);
+
+      expect(body['reasoning']).toEqual({
+        effort: 'low',
+        summary: 'concise',
+        context: 'current_turn',
+      });
+    });
+
+    it('omits mode and context when only the effort is configured', async () => {
+      const provider = createProvider().withThinking('high');
+      const history: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'Think' }], toolCalls: [] },
+      ];
+      const body = await captureRequestBody(provider, '', [], history);
+
+      expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
+    });
   });
 
   describe('provider properties', () => {

@@ -4,7 +4,7 @@
  * Uses a fake WebSearchProvider to test tool behaviour in isolation.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   WebSearchInputSchema,
@@ -12,6 +12,7 @@ import {
   type WebSearchProvider,
 } from '../../src/tools/builtin/web/web-search';
 import { MoonshotWebSearchProvider } from '../../src/tools/providers/moonshot-web-search';
+import { QwenWebSearchProvider } from '../../src/tools/providers/qwen-web-search';
 import { ZaiWebSearchProvider } from '../../src/tools/providers/zai-web-search';
 import { toolContentString } from './fixtures/fake-kaos';
 import { executeTool } from './fixtures/execute-tool';
@@ -544,6 +545,301 @@ describe('ZaiWebSearchProvider', () => {
 
     await expect(provider.search('q')).rejects.toThrow(
       /^Zai search request failed: HTTP 503\.$/,
+    );
+  });
+});
+
+describe('QwenWebSearchProvider', () => {
+  const RESPONSES_URL = 'https://maas.qwencloudapi.com/compatible-mode/v1/responses';
+
+  function okResponse(output: unknown[]): Response {
+    return new Response(JSON.stringify({ output, usage: { total_tokens: 12 } }), { status: 200 });
+  }
+
+  function messageWithCitations(
+    annotations: readonly Record<string, unknown>[],
+    partType = 'output_text',
+  ): Record<string, unknown> {
+    return { type: 'message', content: [{ type: partType, text: 'answer', annotations }] };
+  }
+
+  function webSearchCall(sources: readonly Record<string, unknown>[]): Record<string, unknown> {
+    return { type: 'web_search_call', action: { query: 'q', sources } };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('posts the Responses web_search request to the default QwenCloud endpoint', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(okResponse([]));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    await provider.search('hello');
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(RESPONSES_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer qwen-key',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'qwen3.8-max',
+        input: 'hello',
+        tools: [{ type: 'web_search' }],
+        stream: false,
+      }),
+    });
+  });
+
+  it('uses the injected global fetch when no fetchImpl is given', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(okResponse([]));
+    vi.stubGlobal('fetch', fetchImpl);
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key' });
+
+    await provider.search('hello');
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(RESPONSES_URL);
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer qwen-key' });
+  });
+
+  it.each([
+    'https://qwen.example.test/v1',
+    'https://qwen.example.test/v1/',
+    'https://qwen.example.test/v1///',
+  ])('appends /responses to the configured base URL %s', async (baseUrl) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(okResponse([]));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', baseUrl, fetchImpl });
+
+    await provider.search('hello');
+
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('https://qwen.example.test/v1/responses');
+  });
+
+  it('applies the configured model override', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(okResponse([]));
+    const provider = new QwenWebSearchProvider({
+      apiKey: 'qwen-key',
+      model: 'qwen-max',
+      fetchImpl,
+    });
+
+    await provider.search('hello');
+
+    expect(fetchImpl.mock.calls[0]?.[1]?.body).toBe(
+      JSON.stringify({
+        model: 'qwen-max',
+        input: 'hello',
+        tools: [{ type: 'web_search' }],
+        stream: false,
+      }),
+    );
+  });
+
+  it('maps url_citation annotations to titled results', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      okResponse([
+        messageWithCitations([
+          { type: 'url_citation', title: 'First', url: 'https://example.test/1' },
+          { type: 'url_citation', title: 'Second', url: 'https://example.test/2' },
+        ]),
+      ]),
+    );
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([
+      { title: 'First', url: 'https://example.test/1', snippet: '' },
+      { title: 'Second', url: 'https://example.test/2', snippet: '' },
+    ]);
+  });
+
+  it('maps web_search_call sources to untitled results', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(okResponse([webSearchCall([{ url: 'https://example.test/1' }])]));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([{ title: '', url: 'https://example.test/1', snippet: '' }]);
+  });
+
+  it('merges citations and sources, deduping by url and keeping the title', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      okResponse([
+        webSearchCall([
+          { url: 'https://example.test/1' },
+          { url: 'https://example.test/2', title: 'Source two' },
+        ]),
+        messageWithCitations([
+          { type: 'url_citation', title: 'Citation one', url: 'https://example.test/1' },
+          { type: 'url_citation', title: 'Citation three', url: 'https://example.test/3' },
+        ]),
+      ]),
+    );
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([
+      { title: 'Citation one', url: 'https://example.test/1', snippet: '' },
+      { title: 'Source two', url: 'https://example.test/2', snippet: '' },
+      { title: 'Citation three', url: 'https://example.test/3', snippet: '' },
+    ]);
+  });
+
+  it('keeps the first title when citations repeat a url', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      okResponse([
+        messageWithCitations([
+          { type: 'url_citation', title: 'First', url: 'https://example.test/1' },
+          { type: 'url_citation', title: 'Second', url: 'https://example.test/1' },
+        ]),
+      ]),
+    );
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([{ title: 'First', url: 'https://example.test/1', snippet: '' }]);
+  });
+
+  it('collects citations from every message in the output', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      okResponse([
+        messageWithCitations([
+          { type: 'url_citation', title: 'A', url: 'https://example.test/a' },
+        ]),
+        messageWithCitations([
+          { type: 'url_citation', title: 'B', url: 'https://example.test/b' },
+        ]),
+      ]),
+    );
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([
+      { title: 'A', url: 'https://example.test/a', snippet: '' },
+      { title: 'B', url: 'https://example.test/b', snippet: '' },
+    ]);
+  });
+
+  it('ignores non-citation annotations and non-text content parts', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      okResponse([
+        messageWithCitations(
+          [{ type: 'url_citation', title: 'Skipped', url: 'https://example.test/skip' }],
+          'refusal',
+        ),
+        messageWithCitations([{ type: 'file_citation' }]),
+        { type: 'reasoning' },
+      ]),
+    );
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([]);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['it has no url', { type: 'url_citation', title: 'T' }],
+    ['its url is empty', { type: 'url_citation', title: 'T', url: '' }],
+    ['its url is not a string', { type: 'url_citation', title: 'T', url: 7 }],
+  ])('drops a citation when %s', async (_label, annotation) => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(okResponse([messageWithCitations([annotation])]));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([]);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['it has no url', { title: 'T' }],
+    ['its url is empty', { title: 'T', url: '' }],
+    ['its url is not a string', { title: 'T', url: ['https://example.test/1'] }],
+  ])('drops a web_search_call source when %s', async (_label, source) => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(okResponse([webSearchCall([source])]));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([]);
+  });
+
+  it.each<[string, unknown]>([
+    ['output is missing', {}],
+    ['output is null', { output: null }],
+    ['output is not an array', { output: {} }],
+    ['the message has no content', { output: [{ type: 'message' }] }],
+    ['message content is not an array', { output: [{ type: 'message', content: {} }] }],
+    [
+      'the text part has no annotations',
+      { output: [{ type: 'message', content: [{ type: 'output_text' }] }] },
+    ],
+    [
+      'annotations are not an array',
+      { output: [{ type: 'message', content: [{ type: 'output_text', annotations: null }] }] },
+    ],
+    ['the web_search_call has no action', { output: [{ type: 'web_search_call' }] }],
+    ['the action has no sources', { output: [{ type: 'web_search_call', action: {} }] }],
+    [
+      'action sources are not an array',
+      { output: [{ type: 'web_search_call', action: { sources: {} } }] },
+    ],
+    ['the output item type is unknown', { output: [{ type: 'reasoning' }] }],
+  ])('returns an empty list when %s', async (_label, body) => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    const results = await provider.search('q');
+
+    expect(results).toEqual([]);
+  });
+
+  it('reports the response body detail on a 401 auth failure', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('invalid api key', { status: 401 }));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    await expect(provider.search('q')).rejects.toThrow(
+      /^Qwen search request failed: HTTP 401 \(auth\/unauthorized\)\. invalid api key$/,
+    );
+  });
+
+  it('reports the status and body detail on a non-200 response', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('rate limit exceeded', { status: 429 }));
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    await expect(provider.search('q')).rejects.toThrow(
+      /^Qwen search request failed: HTTP 429\. rate limit exceeded$/,
+    );
+  });
+
+  it('reports only the status when the error body cannot be read', async () => {
+    const response = new Response(null, { status: 503 });
+    vi.spyOn(response, 'text').mockRejectedValue(new Error('body unavailable'));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const provider = new QwenWebSearchProvider({ apiKey: 'qwen-key', fetchImpl });
+
+    await expect(provider.search('q')).rejects.toThrow(
+      /^Qwen search request failed: HTTP 503\.$/,
     );
   });
 });

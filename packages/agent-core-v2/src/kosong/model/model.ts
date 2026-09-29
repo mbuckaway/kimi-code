@@ -1,6 +1,11 @@
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 import type { Event, IWaitUntil } from '#/_base/event';
-import type { Protocol } from '#/kosong/protocol/protocol';
+import type {
+  Protocol,
+  ReasoningContext,
+  ReasoningMode,
+  ReasoningSummary,
+} from '#/kosong/protocol/protocol';
 
 import type { OAuthRef } from '../provider/provider';
 
@@ -15,6 +20,9 @@ export interface ModelOverride {
   supportEfforts?: string[];
   defaultEffort?: string;
   offEffort?: string;
+  reasoningSummary?: ReasoningSummary;
+  reasoningMode?: ReasoningMode;
+  reasoningContext?: ReasoningContext;
 }
 
 export interface ModelRecord {
@@ -42,6 +50,9 @@ export interface ModelRecord {
   supportEfforts?: string[];
   defaultEffort?: string;
   offEffort?: string;
+  reasoningSummary?: ReasoningSummary;
+  reasoningMode?: ReasoningMode;
+  reasoningContext?: ReasoningContext;
 
   overrides?: ModelOverride;
 

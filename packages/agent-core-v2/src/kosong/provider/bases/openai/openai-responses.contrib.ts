@@ -24,6 +24,9 @@ registerProtocolBase({
         defaultHeaders: traitDefaultHeaders(traits),
         maxOutputTokens: config.providerOptions?.defaultMaxTokens,
         offEffort: config.providerOptions?.offEffort,
+        reasoningSummary: config.providerOptions?.reasoningSummary,
+        reasoningMode: config.providerOptions?.reasoningMode,
+        reasoningContext: config.providerOptions?.reasoningContext,
         convertError: traitConvertError(traits),
       }),
     });

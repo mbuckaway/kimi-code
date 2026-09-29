@@ -15,9 +15,11 @@ import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
 import {
   SERVICES_SECTION,
   type SearchProviderId,
+  type SearchServiceConfig,
   type ServicesConfig,
 } from '../configSection';
 import { MoonshotWebSearchProvider } from './providers/moonshot-web-search';
+import { QwenWebSearchProvider } from './providers/qwen-web-search';
 import { ZaiWebSearchProvider } from './providers/zai-web-search';
 import type { WebSearchProvider } from '#/agent/tools/web-search/web-search';
 import { IWebSearchProviderService } from './webSearch';
@@ -42,6 +44,8 @@ export class WebSearchProviderService implements IWebSearchProviderService {
         return undefined;
       case 'zai':
         return this.zaiProvider(search?.apiKey);
+      case 'qwen':
+        return this.qwenProvider(search);
     }
   }
 
@@ -54,6 +58,8 @@ export class WebSearchProviderService implements IWebSearchProviderService {
         return false;
       case 'zai':
         return this.zaiProvider(search?.apiKey) !== undefined;
+      case 'qwen':
+        return this.qwenProvider(search) !== undefined;
     }
   }
 
@@ -64,6 +70,18 @@ export class WebSearchProviderService implements IWebSearchProviderService {
   private zaiProvider(apiKey: string | undefined): ZaiWebSearchProvider | undefined {
     const key = nonEmptyString(apiKey);
     return key === undefined ? undefined : new ZaiWebSearchProvider({ apiKey: key });
+  }
+
+  private qwenProvider(
+    search: SearchServiceConfig | undefined,
+  ): QwenWebSearchProvider | undefined {
+    const apiKey = nonEmptyString(search?.apiKey);
+    if (apiKey === undefined) return undefined;
+    return new QwenWebSearchProvider({
+      apiKey,
+      baseUrl: nonEmptyString(search?.baseUrl),
+      model: nonEmptyString(search?.model),
+    });
   }
 
   private configuredSearch(): (ServicesConfig['moonshotSearch'] & { baseUrl: string }) | undefined {
@@ -122,12 +140,13 @@ function nonEmptyString(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
-type SearchSelection = 'moonshot' | 'disabled' | 'zai';
+type SearchSelection = 'moonshot' | 'disabled' | 'zai' | 'qwen';
 
 const SEARCH_SELECTIONS: Record<SearchProviderId, SearchSelection> = {
   kimi: 'moonshot',
   disabled: 'disabled',
   zai: 'zai',
+  qwen: 'qwen',
 };
 
 function searchSelectionOf(provider: SearchProviderId | undefined): SearchSelection {

@@ -140,6 +140,9 @@ export class ProviderManager implements ModelProvider {
       this.options.promptCacheKey,
       effectiveAlias.supportEfforts,
       effectiveAlias.offEffort,
+      effectiveAlias.reasoningSummary,
+      effectiveAlias.reasoningMode,
+      effectiveAlias.reasoningContext,
       effectiveAlias.adaptiveThinking,
       alias.betaApi,
     );
@@ -274,6 +277,9 @@ function toKosongProviderConfig(
   promptCacheKey: string | undefined,
   supportEfforts: readonly string[] | undefined,
   offEffort: string | undefined,
+  reasoningSummary: ModelAlias['reasoningSummary'],
+  reasoningMode: ModelAlias['reasoningMode'],
+  reasoningContext: ModelAlias['reasoningContext'],
   adaptiveThinking: boolean | undefined,
   betaApi: boolean | undefined,
 ): KosongProviderConfig {
@@ -376,6 +382,9 @@ function toKosongProviderConfig(
           modelBaseUrl ?? providerValue(provider.baseUrl, provider.env, 'OPENAI_BASE_URL'),
         apiKey: providerApiKey(provider),
         offEffort,
+        reasoningSummary,
+        reasoningMode,
+        reasoningContext,
         // Session affinity: same `prompt_cache_key` intent as the `openai`
         // branch; the Responses API accepts it as a top-level request field.
         generationKwargs: { prompt_cache_key: promptCacheKey },

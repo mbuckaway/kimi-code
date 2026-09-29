@@ -61,6 +61,88 @@ describe('ProviderManager.resolveProviderConfig — image_file_api capability', 
   });
 });
 
+describe('ProviderManager.resolveProviderConfig — openai_responses reasoning options', () => {
+  it('threads model-level reasoning summary/mode/context into the kosong provider config', () => {
+    const manager = new ProviderManager({
+      config: {
+        providers: {
+          openai: { type: 'openai_responses', apiKey: 'sk-test' },
+        },
+        models: {
+          'gpt-5': {
+            provider: 'openai',
+            model: 'gpt-5',
+            maxContextSize: 400000,
+            reasoningSummary: 'concise',
+            reasoningMode: 'pro',
+            reasoningContext: 'all_turns',
+          },
+        },
+      } as KimiConfig,
+    });
+
+    const resolved = manager.resolveProviderConfig('gpt-5');
+
+    expect(resolved.provider).toMatchObject({
+      type: 'openai_responses',
+      reasoningSummary: 'concise',
+      reasoningMode: 'pro',
+      reasoningContext: 'all_turns',
+    });
+  });
+
+  it('carries an override-sourced reasoning field into the kosong provider config', () => {
+    const manager = new ProviderManager({
+      config: {
+        providers: {
+          openai: { type: 'openai_responses', apiKey: 'sk-test' },
+        },
+        models: {
+          'gpt-5': {
+            provider: 'openai',
+            model: 'gpt-5',
+            maxContextSize: 400000,
+            reasoningSummary: 'auto',
+            overrides: { reasoningSummary: 'detailed', reasoningMode: 'standard' },
+          },
+        },
+      } as KimiConfig,
+    });
+
+    const resolved = manager.resolveProviderConfig('gpt-5');
+
+    expect(resolved.provider).toMatchObject({
+      reasoningSummary: 'detailed',
+      reasoningMode: 'standard',
+    });
+  });
+
+  it('leaves the reasoning options undefined when the alias configures none', () => {
+    const manager = new ProviderManager({
+      config: {
+        providers: {
+          openai: { type: 'openai_responses', apiKey: 'sk-test' },
+        },
+        models: {
+          'gpt-5': {
+            provider: 'openai',
+            model: 'gpt-5',
+            maxContextSize: 400000,
+          },
+        },
+      } as KimiConfig,
+    });
+
+    const resolved = manager.resolveProviderConfig('gpt-5');
+
+    expect(resolved.provider).toMatchObject({
+      reasoningSummary: undefined,
+      reasoningMode: undefined,
+      reasoningContext: undefined,
+    });
+  });
+});
+
 describe('ProviderManager.resolveAuth — 401 refresh gate', () => {
   it('does not force a token refresh for a context-limit 401', async () => {
     const manager = makeOAuthProviderManager();

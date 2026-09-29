@@ -172,6 +172,9 @@ const ModelBaseSchema = z.object({
   supportEfforts: z.array(z.string()).optional(),
   defaultEffort: z.string().optional(),
   offEffort: z.string().optional(),
+  reasoningSummary: z.enum(['auto', 'concise', 'detailed']).optional(),
+  reasoningMode: z.enum(['standard', 'pro']).optional(),
+  reasoningContext: z.enum(['auto', 'current_turn', 'all_turns']).optional(),
 });
 
 export const ModelOverrideSchema = ModelBaseSchema.omit({

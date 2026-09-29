@@ -361,6 +361,15 @@ export interface OpenAIResponsesOptions {
    * whose default is to reason.
    */
   offEffort?: string | undefined;
+  /**
+   * `reasoning.summary` level. Defaults to `'auto'` when the reasoning object
+   * is emitted without an explicit value.
+   */
+  reasoningSummary?: 'auto' | 'concise' | 'detailed' | undefined;
+  /** `reasoning.mode`; included on the wire only when set. */
+  reasoningMode?: 'standard' | 'pro' | undefined;
+  /** `reasoning.context`; included on the wire only when set. */
+  reasoningContext?: 'auto' | 'current_turn' | 'all_turns' | undefined;
   httpClient?: unknown;
   defaultHeaders?: Record<string, string>;
   toolMessageConversion?: ToolMessageConversion | undefined;
@@ -1063,6 +1072,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   private _defaultHeaders: Record<string, string> | undefined;
   private _generationKwargs: OpenAIResponsesGenerationKwargs;
   private _offEffort: string | undefined;
+  private readonly _reasoningSummary: 'auto' | 'concise' | 'detailed' | undefined;
+  private readonly _reasoningMode: 'standard' | 'pro' | undefined;
+  private readonly _reasoningContext: 'auto' | 'current_turn' | 'all_turns' | undefined;
   private _toolMessageConversion: ToolMessageConversion;
   private _client: OpenAI | undefined;
   private _httpClient: unknown;
@@ -1077,6 +1089,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     this._stream = true; // Responses API always supports streaming
     this._generationKwargs = { ...options.generationKwargs };
     this._offEffort = options.offEffort;
+    this._reasoningSummary = options.reasoningSummary;
+    this._reasoningMode = options.reasoningMode;
+    this._reasoningContext = options.reasoningContext;
     this._toolMessageConversion = options.toolMessageConversion ?? null;
     this._httpClient = options.httpClient;
     this._clientFactory = options.clientFactory;
@@ -1126,11 +1141,30 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     const reasoningEffort = kwargs['reasoning_effort'] as string | undefined;
     delete kwargs['reasoning_effort'];
 
-    if (reasoningEffort !== undefined) {
-      kwargs['reasoning'] = {
-        effort: reasoningEffort,
-        summary: 'auto',
+    // Emit the top-level `reasoning` object when the effort is set or any
+    // summary/mode/context option is explicitly configured. `summary` always
+    // carries a value (default 'auto'); mode and context reach the wire only
+    // when configured.
+    const hasReasoningConfig =
+      reasoningEffort !== undefined ||
+      this._reasoningSummary !== undefined ||
+      this._reasoningMode !== undefined ||
+      this._reasoningContext !== undefined;
+
+    if (hasReasoningConfig) {
+      const reasoning: Record<string, unknown> = {
+        summary: this._reasoningSummary ?? 'auto',
       };
+      if (reasoningEffort !== undefined) {
+        reasoning['effort'] = reasoningEffort;
+      }
+      if (this._reasoningMode !== undefined) {
+        reasoning['mode'] = this._reasoningMode;
+      }
+      if (this._reasoningContext !== undefined) {
+        reasoning['context'] = this._reasoningContext;
+      }
+      kwargs['reasoning'] = reasoning;
       kwargs['include'] = ['reasoning.encrypted_content'];
     }
 
