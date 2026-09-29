@@ -171,6 +171,9 @@ Each entry in the `models` table defines a model alias (the name used in `defaul
 | `base_url` | `string` | No | Per-model endpoint override (written by catalog imports for gateway models served away from the provider default). Resolution prefers it over the provider's `base_url`; only takes effect together with `protocol` |
 | `display_name` | `string` | No | Name shown in the UI; falls back to `model` when unset |
 | `reasoning_key` | `string` | No | `openai` provider only. Override the field name used for reasoning content when the gateway returns it under a non-standard name; by default `reasoning_content`, `reasoning_details`, and `reasoning` are auto-detected |
+| `reasoning_summary` | `string` | No | `openai_responses` models only. `reasoning.summary` detail: `auto` (default), `concise`, or `detailed` |
+| `reasoning_mode` | `string` | No | `openai_responses` models only. Sent as `reasoning.mode` when set: `standard` or `pro` |
+| `reasoning_context` | `string` | No | `openai_responses` models only. Sent as `reasoning.context` when set: `auto`, `current_turn`, or `all_turns` |
 | `adaptive_thinking` | `boolean` | No | `anthropic` provider only. Force adaptive thinking on or off, overriding the version inference based on the model name. Omit to infer automatically (Claude ≥ 4.6 uses adaptive) |
 
 When an alias contains `.`, use a quoted key:
@@ -197,7 +200,7 @@ max_context_size = 131072
 display_name = "Kimi for Coding (custom)"
 ```
 
-`[models."<alias>".overrides]` accepts ordinary model fields such as `max_context_size`, `max_input_size`, `max_output_size`, `capabilities`, `display_name`, `reasoning_key`, `adaptive_thinking`, `support_efforts`, `default_effort`, and `off_effort`. It does not accept identity / routing fields: `provider`, `model`, `protocol`, `beta_api`, and `base_url`.
+`[models."<alias>".overrides]` accepts ordinary model fields such as `max_context_size`, `max_input_size`, `max_output_size`, `capabilities`, `display_name`, `reasoning_key`, `reasoning_summary`, `reasoning_mode`, `reasoning_context`, `adaptive_thinking`, `support_efforts`, `default_effort`, and `off_effort`. It does not accept identity / routing fields: `provider`, `model`, `protocol`, `beta_api`, and `base_url`.
 
 You can also switch models temporarily without touching the config file — by setting `KIMI_MODEL_*` environment variables, the CLI synthesizes a temporary provider in memory that does not persist after restart. See [Define a model from environment variables](./env-vars.md#define-a-model-from-environment-variables-kimi-model).
 
@@ -519,13 +522,25 @@ api_key = "sk-xxx"
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `provider` | `string` | No | Backend: `kimi` (the `moonshot_search` service), `zai` (the z.ai search API), or `disabled` (turn web search off) |
-| `api_key` | `string` | No | z.ai API key, used when `provider = "zai"` |
+| `provider` | `string` | No | Backend: `kimi` (the `moonshot_search` service), `zai` (the z.ai search API), `qwen` (QwenCloud web search), or `disabled` (turn web search off) |
+| `api_key` | `string` | No | API key for the selected backend: the z.ai key when `provider = "zai"`, the QwenCloud key when `provider = "qwen"` |
+| `base_url` | `string` | No | QwenCloud base URL, used when `provider = "qwen"`; defaults to `https://maas.qwencloudapi.com/compatible-mode/v1` |
+| `model` | `string` | No | QwenCloud model that runs the search, used when `provider = "qwen"`; defaults to `qwen3.8-max` |
 
 ```toml
 [services.search]
 provider = "zai"
 api_key = "sk-xxx"
+```
+
+With `provider = "qwen"`, the `WebSearch` tool sends the query to QwenCloud's Responses API `web_search` and returns the source links it finds. Set `api_key` to your QwenCloud API key; `base_url` and `model` are optional:
+
+```toml
+[services.search]
+provider = "qwen"
+api_key = "sk-xxx"
+base_url = "https://maas.qwencloudapi.com/compatible-mode/v1"
+model = "qwen3.8-max"
 ```
 
 ## `permission`

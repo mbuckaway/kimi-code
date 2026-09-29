@@ -171,6 +171,9 @@ KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 | `base_url` | `string` | 否 | 模型级端点覆盖（catalog 导入网关模型时写入，这些模型与供应商默认端点不同）。解析时优先于供应商的 `base_url`；仅在与 `protocol` 配合时生效 |
 | `display_name` | `string` | 否 | UI 中显示的名称，未设时回退到 `model` |
 | `reasoning_key` | `string` | 否 | 仅 `openai` 供应商。当网关用非标准字段名返回推理内容时才需要设置；默认自动识别 `reasoning_content` / `reasoning_details` / `reasoning` |
+| `reasoning_summary` | `string` | 否 | 仅 `openai_responses` 模型。`reasoning.summary` 的详细程度：`auto`（默认）、`concise` 或 `detailed` |
+| `reasoning_mode` | `string` | 否 | 仅 `openai_responses` 模型。设置后作为 `reasoning.mode` 发送：`standard` 或 `pro` |
+| `reasoning_context` | `string` | 否 | 仅 `openai_responses` 模型。设置后作为 `reasoning.context` 发送：`auto`、`current_turn` 或 `all_turns` |
 | `adaptive_thinking` | `boolean` | 否 | 仅 `anthropic` 供应商。强制开启或关闭 adaptive thinking，覆盖按模型名推断的逻辑。省略时自动推断（Claude ≥ 4.6 使用 adaptive） |
 
 别名中含 `.` 时需要加引号：
@@ -197,7 +200,7 @@ max_context_size = 131072
 display_name = "Kimi for Coding (custom)"
 ```
 
-`[models."<alias>".overrides]` 接受普通模型字段，例如 `max_context_size`、`max_input_size`、`max_output_size`、`capabilities`、`display_name`、`reasoning_key`、`adaptive_thinking`、`support_efforts`、`default_effort` 和 `off_effort`。不接受身份 / 路由字段：`provider`、`model`、`protocol`、`beta_api` 和 `base_url`。
+`[models."<alias>".overrides]` 接受普通模型字段，例如 `max_context_size`、`max_input_size`、`max_output_size`、`capabilities`、`display_name`、`reasoning_key`、`reasoning_summary`、`reasoning_mode`、`reasoning_context`、`adaptive_thinking`、`support_efforts`、`default_effort` 和 `off_effort`。不接受身份 / 路由字段：`provider`、`model`、`protocol`、`beta_api` 和 `base_url`。
 
 无需修改配置文件也可以临时切换模型——通过 `KIMI_MODEL_*` 环境变量在内存里合成一个临时供应商，详见[用环境变量定义模型](./env-vars.md#用环境变量定义模型-kimi-model)。
 
@@ -518,13 +521,25 @@ api_key = "sk-xxx"
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `provider` | `string` | 否 | 后端：`kimi`（`moonshot_search` 服务）、`zai`（z.ai 搜索 API）或 `disabled`（关闭网页搜索） |
-| `api_key` | `string` | 否 | z.ai API 密钥，`provider = "zai"` 时使用 |
+| `provider` | `string` | 否 | 后端：`kimi`（`moonshot_search` 服务）、`zai`（z.ai 搜索 API）、`qwen`（QwenCloud 网页搜索）或 `disabled`（关闭网页搜索） |
+| `api_key` | `string` | 否 | 所选后端的 API 密钥：`provider = "zai"` 时为 z.ai 密钥，`provider = "qwen"` 时为 QwenCloud 密钥 |
+| `base_url` | `string` | 否 | QwenCloud 基础 URL，`provider = "qwen"` 时使用；默认 `https://maas.qwencloudapi.com/compatible-mode/v1` |
+| `model` | `string` | 否 | 执行搜索的 QwenCloud 模型，`provider = "qwen"` 时使用；默认 `qwen3.8-max` |
 
 ```toml
 [services.search]
 provider = "zai"
 api_key = "sk-xxx"
+```
+
+使用 `provider = "qwen"` 时，`WebSearch` 工具会把查询发送到 QwenCloud 的 Responses API `web_search`，并返回找到的来源链接。将 `api_key` 设为你的 QwenCloud API 密钥；`base_url` 和 `model` 可选：
+
+```toml
+[services.search]
+provider = "qwen"
+api_key = "sk-xxx"
+base_url = "https://maas.qwencloudapi.com/compatible-mode/v1"
+model = "qwen3.8-max"
 ```
 
 ## `permission`
