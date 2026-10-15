@@ -139,6 +139,8 @@ export interface RunningServer {
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 58627;
 
+export const CLOSE_DRAIN_TIMEOUT_MS = 3_000;
+
 export async function startServer(opts: ServerStartOptions): Promise<RunningServer> {
   const host = opts.host ?? DEFAULT_HOST;
   const port = opts.port ?? DEFAULT_PORT;
@@ -267,6 +269,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     loggerInstance: logger,
     disableRequestLogging: true,
     genReqId: (req) => resolveRequestId(req.headers),
+    forceCloseConnections: true,
   }) as unknown as FastifyInstance;
   app.server.requestTimeout = 0;
   registerRequestLogging(app);
@@ -296,7 +299,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     app.addHook('onSend', createSecurityHeadersHook({ tls: false }));
   }
 
-  const close = async (): Promise<void> => {
+  const disposeServer = async (): Promise<void> => {
     configChangedPublisher.close();
     await app.close();
     configWarningSubscription.dispose();
@@ -312,27 +315,83 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
         'telemetry shutdown failed; continuing server cleanup',
       );
     }
+    let closeDrainBudgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const closeDrainBudget = new Promise<'spent'>((resolve) => {
+      closeDrainBudgetTimer = setTimeout(() => resolve('spent'), CLOSE_DRAIN_TIMEOUT_MS);
+    });
+    const abandonedDrainNames: string[] = [];
+    const settlingAbandonedDrains: Promise<void>[] = [];
+    const abandonDrain = (name: string, pending: Promise<unknown>): void => {
+      abandonedDrainNames.push(name);
+      settlingAbandonedDrains.push(
+        pending.then(
+          () => undefined,
+          (error: unknown) => {
+            logger.warn(
+              { err: error instanceof Error ? error.message : String(error), drain: name },
+              'abandoned server close drain failed after the close drain budget',
+            );
+          },
+        ),
+      );
+    };
+    const drainWithinCloseBudget = async (
+      name: string,
+      drain: () => Promise<unknown>,
+    ): Promise<void> => {
+      const pending = drain();
+      const outcome = await Promise.race([
+        pending.then(() => 'drained' as const),
+        closeDrainBudget,
+      ]);
+      if (outcome === 'spent') abandonDrain(name, pending);
+    };
+    const removeProcessErrorHandlers = (): void => {
+      process.off('unhandledRejection', onUnhandledRejection);
+      process.off('uncaughtException', onUncaughtException);
+    };
     try {
-      await drainSessionMetadataWrites();
-      await core.accessor.get(ISessionIndexMirror).drain();
-      await core.accessor.get(IMcpOAuthService).shutdown();
+      await drainWithinCloseBudget('drainSessionMetadataWrites', drainSessionMetadataWrites);
+      await drainWithinCloseBudget('ISessionIndexMirror.drain', () =>
+        core.accessor.get(ISessionIndexMirror).drain(),
+      );
+      await drainWithinCloseBudget('IMcpOAuthService.shutdown', () =>
+        core.accessor.get(IMcpOAuthService).shutdown(),
+      );
       fsWatchBridge.dispose();
       const appendLogStore = core.accessor.get(IAppendLogStore);
       core.dispose();
       await appendLogStore.drainRetirements();
-      await drainSessionIndexMirror();
-      await drainGlobalSearchDisposals();
-      await drainQueryStoreDisposals();
-      await drainSessionMetadataWrites();
-      await drainLogCloses();
+      await drainWithinCloseBudget('drainSessionIndexMirror', drainSessionIndexMirror);
+      await drainWithinCloseBudget('drainGlobalSearchDisposals', drainGlobalSearchDisposals);
+      await drainWithinCloseBudget('drainQueryStoreDisposals', drainQueryStoreDisposals);
+      await drainWithinCloseBudget('drainSessionMetadataWrites', drainSessionMetadataWrites);
+      await drainWithinCloseBudget('drainLogCloses', drainLogCloses);
+      await appendLogStore.drainRetirements();
+      if (abandonedDrainNames.length > 0) {
+        logger.warn(
+          { drains: abandonedDrainNames, budgetMs: CLOSE_DRAIN_TIMEOUT_MS },
+          'server close drain deadline reached; abandoning still-pending drains',
+        );
+      }
     } finally {
+      if (closeDrainBudgetTimer !== undefined) clearTimeout(closeDrainBudgetTimer);
       try {
         await registration.release();
       } finally {
-        process.off('unhandledRejection', onUnhandledRejection);
-        process.off('uncaughtException', onUncaughtException);
+        if (settlingAbandonedDrains.length === 0) {
+          removeProcessErrorHandlers();
+        } else {
+          void Promise.allSettled(settlingAbandonedDrains).then(removeProcessErrorHandlers);
+        }
       }
     }
+  };
+
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    closing ??= disposeServer();
+    return closing;
   };
 
   const connectionRegistry = new ConnectionRegistry();
@@ -537,9 +596,13 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     );
   });
 
-  app.addHook('onClose', async () => {
+  function releaseUpgradedSocketsBeforeServerClose(): void {
     connectionRegistry.closeAll('server shutting down');
     wssV1.close();
+  }
+  app.addHook('preClose', releaseUpgradedSocketsBeforeServerClose);
+
+  app.addHook('onClose', async () => {
     await broadcaster.close();
   });
 

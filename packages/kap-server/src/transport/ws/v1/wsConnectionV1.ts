@@ -38,6 +38,8 @@ const DEFAULT_MAX_BUFFER_SIZE = 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const HEARTBEAT_MISS_LIMIT = 2;
 
+const SOCKET_TERMINATE_GRACE_MS = 500;
+
 type SessionSubscription = TargetSubscription;
 
 const DEFAULT_FLUSH_INTERVAL_MS = 16;
@@ -96,6 +98,7 @@ export class WsConnectionV1 implements BroadcastTarget {
   private backpressureSince?: number;
 
   private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private terminateTimer?: ReturnType<typeof setTimeout>;
   private lastInboundAt = Date.now();
 
   constructor(opts: WsConnectionV1Options) {
@@ -521,10 +524,20 @@ export class WsConnectionV1 implements BroadcastTarget {
   close(code = 1000, reason?: string): void {
     if (this.closed) return;
     this.flush(true);
+    this.scheduleTerminateIfUnanswered();
     try {
       this.socket.close(code, reason);
     } catch {
     }
+  }
+
+  private scheduleTerminateIfUnanswered(): void {
+    if (this.terminateTimer !== undefined) return;
+    this.terminateTimer = setTimeout(() => {
+      this.terminateTimer = undefined;
+      this.socket.terminate();
+    }, SOCKET_TERMINATE_GRACE_MS);
+    this.terminateTimer.unref?.();
   }
 
   private onClose(): void {
@@ -533,6 +546,8 @@ export class WsConnectionV1 implements BroadcastTarget {
     if (this.flushTimer !== undefined) clearTimeout(this.flushTimer);
     if (this.backpressureRetryTimer !== undefined) clearTimeout(this.backpressureRetryTimer);
     if (this.heartbeatTimer !== undefined) clearInterval(this.heartbeatTimer);
+    if (this.terminateTimer !== undefined) clearTimeout(this.terminateTimer);
+    this.terminateTimer = undefined;
     this.outbound = [];
     this.broadcaster.removeGlobalTarget(this);
     for (const sid of this.subscriptions.keys()) this.broadcaster.unsubscribe(sid, this);
