@@ -1542,3 +1542,286 @@ describe('`kimi web` foreground shutdown', () => {
     void run;
   });
 });
+
+/** Runs `act` and returns the message of the error it threw (empty if none). */
+function errorMessageOf(act: () => unknown): string {
+  try {
+    act();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return '';
+}
+
+describe('readServerConfig', () => {
+  let dir: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'kimi-server-config-'));
+    prevHome = process.env['KIMI_CODE_HOME'];
+    process.env['KIMI_CODE_HOME'] = dir;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) {
+      delete process.env['KIMI_CODE_HOME'];
+    } else {
+      process.env['KIMI_CODE_HOME'] = prevHome;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeConfig(text: string): void {
+    writeFileSync(join(dir, 'config.toml'), text, 'utf-8');
+  }
+
+  it('reads every [server] key as a camelCase default', async () => {
+    writeConfig(`
+[server]
+host = "192.0.2.7"
+port = 8080
+log_level = "info"
+allowed_host = ["tr.example.com", "www.example.com"]
+web_title = "My Dev Box"
+open = false
+ipv6 = true
+insecure_no_tls = true
+allow_remote_shutdown = true
+dangerous_bypass_auth = false
+enable_kimi_oauth = true
+debug_endpoints = false
+remote_control = true
+`);
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    expect(readServerConfig()).toEqual({
+      defaults: {
+        host: '192.0.2.7',
+        port: 8080,
+        logLevel: 'info',
+        allowedHost: ['tr.example.com', 'www.example.com'],
+        webTitle: 'My Dev Box',
+        open: false,
+        ipv6: true,
+        insecureNoTls: true,
+        allowRemoteShutdown: true,
+        dangerousBypassAuth: false,
+        enableKimiOauth: true,
+        debugEndpoints: false,
+        remoteControl: true,
+      },
+      warnings: [],
+    });
+  });
+
+  it('leaves [server] keys the file does not set out of the defaults', async () => {
+    // The reader must not invent values: `open: false` has to stay distinguishable
+    // from "not configured", or `[server] open = false` could never be overridden.
+    writeConfig('[server]\nport = 8080\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    expect(readServerConfig().defaults).toEqual({ port: 8080 });
+  });
+
+  it('returns built-in defaults when config.toml does not exist', async () => {
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    expect(readServerConfig()).toEqual({ defaults: {}, warnings: [] });
+  });
+
+  it('returns built-in defaults when config.toml is only whitespace', async () => {
+    writeConfig('   \n\t\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    expect(readServerConfig()).toEqual({ defaults: {}, warnings: [] });
+  });
+
+  it('returns built-in defaults and a warning when config.toml is not valid TOML', async () => {
+    // No `[server]` to read must never crash an unrelated operation: `raw` is
+    // unset here, so the unknown-key comparison must not touch it.
+    writeConfig('[server\nport = 1\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    const result = readServerConfig();
+    expect(result.defaults).toEqual({});
+    expect(result.warnings.join(' ')).toContain('Invalid TOML in');
+  });
+
+  it('returns built-in defaults when the section belongs to another domain', async () => {
+    writeConfig('[acp]\nsocket = "/tmp/kimi-acp.sock"\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    expect(readServerConfig()).toEqual({ defaults: {}, warnings: [] });
+  });
+
+  it('rejects an unknown [server] key, naming it and pointing at the docs', async () => {
+    writeConfig('[server]\nport = 8080\nbost = "127.0.0.1"\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    const message = errorMessageOf(readServerConfig);
+
+    expect(message).toContain("unknown key 'bost' in [server] of");
+    expect(message).toContain(join(dir, 'config.toml'));
+    expect(message).toContain('config-files.html#server');
+  });
+
+  it('lists every unknown [server] key in one rejection', async () => {
+    writeConfig('[server]\nbost = "127.0.0.1"\nportt = 1\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    const message = errorMessageOf(readServerConfig);
+
+    expect(message).toContain("'bost'");
+    expect(message).toContain("'portt'");
+  });
+
+  it('camelizes with the loader rule: log_level is known, port_2 is not', async () => {
+    // Pins the local camelizer against `toml.ts`'s `/_([a-z])/g`. A lodash-style
+    // `camelCase` would report the typo as `port2` and send the user hunting for
+    // a line that is not in their file.
+    writeConfig('[server]\nlog_level = "info"\nport_2 = 1\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    const message = errorMessageOf(readServerConfig);
+
+    expect(message).toContain("unknown key 'port_2'");
+    expect(message).not.toContain('port2');
+    expect(message).not.toContain('log_level');
+    expect(message).not.toContain('logLevel');
+  });
+
+  it('rejects a [server] section the loader discarded, quoting its warning', async () => {
+    // The whole section failed validation, so EVERY key looks missing: the
+    // rejection must quote the loader instead of calling valid keys unknown.
+    writeConfig('[server]\nport = "http"\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    const message = errorMessageOf(readServerConfig);
+
+    expect(message).toContain('Ignored invalid config in');
+    expect(message).toContain('config-files.html#server');
+    expect(message).not.toContain('dangerous_bypass_auth');
+    expect(message).not.toContain('unknown key');
+  });
+
+  it('rejects a top-level server key that is not a table', async () => {
+    // `server = 5` reaches the raw document as a number: it must not be read as
+    // "no section" (silent no-op) nor camelized through `Object.keys`.
+    writeConfig('server = 5\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    const message = errorMessageOf(readServerConfig);
+
+    expect(message).toContain('[server]');
+    expect(message).toContain(join(dir, 'config.toml'));
+  });
+
+  it('rejects an array-of-tables server section', async () => {
+    writeConfig('[[server]]\nport = 1\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    expect(errorMessageOf(readServerConfig)).toContain('[server]');
+  });
+
+  it.each([
+    ['"all"', '0.0.0.0'],
+    ['"ALL"', '0.0.0.0'],
+    ['"All"', '0.0.0.0'],
+    ['"*"', '0.0.0.0'],
+    ['""', '0.0.0.0'],
+    ['"192.0.2.7"', '192.0.2.7'],
+    ['"localhost"', 'localhost'],
+  ])('resolves the configured host %s to the bind address %s', async (written, expected) => {
+    // `parseHost` has no sentinel branch: an unresolved `all` would bind a
+    // hostname called "all" instead of every interface.
+    writeConfig(`[server]\nhost = ${written}\n`);
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    expect(readServerConfig().defaults).toEqual({ host: expected });
+  });
+
+  it('surfaces loader warnings while keeping a valid [server] section', async () => {
+    writeConfig('[acp]\nsocket = 5\n[server]\nport = 8080\n');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+
+    const result = readServerConfig();
+
+    expect(result.defaults).toEqual({ port: 8080 });
+    expect(result.warnings.join(' ')).toContain('acp');
+  });
+});
+
+describe('tryReadServerConfig', () => {
+  let dir: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'kimi-server-config-soft-'));
+    prevHome = process.env['KIMI_CODE_HOME'];
+    process.env['KIMI_CODE_HOME'] = dir;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) {
+      delete process.env['KIMI_CODE_HOME'];
+    } else {
+      process.env['KIMI_CODE_HOME'] = prevHome;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeConfig(text: string): void {
+    writeFileSync(join(dir, 'config.toml'), text, 'utf-8');
+  }
+
+  it('warns on stderr instead of throwing when a [server] key is unknown', async () => {
+    // A `[server]` typo must not block an unrelated operation
+    // (`rotate-token`, the TUI `/web`, the SIGHUP re-read) — but under
+    // no-silent-failure the warning has to actually be written.
+    writeConfig('[server]\nbost = "127.0.0.1"\n');
+    let stderr = '';
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderr += String(chunk);
+      return true;
+    });
+
+    const { tryReadServerConfig } = await import('#/cli/sub/web/server-config');
+    const result = tryReadServerConfig();
+    errSpy.mockRestore();
+
+    expect(result.defaults).toEqual({});
+    expect(stderr).toContain("unknown key 'bost' in [server] of");
+  });
+
+  it('warns on stderr instead of throwing when the [server] section is invalid', async () => {
+    writeConfig('[server]\nport = "http"\n');
+    let stderr = '';
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderr += String(chunk);
+      return true;
+    });
+
+    const { tryReadServerConfig } = await import('#/cli/sub/web/server-config');
+    const result = tryReadServerConfig();
+    errSpy.mockRestore();
+
+    expect(result.defaults).toEqual({});
+    expect(stderr).toContain('Ignored invalid config in');
+  });
+
+  it('returns the parsed defaults and stays silent for a valid section', async () => {
+    writeConfig('[server]\nport = 8080\nopen = false\n');
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const { tryReadServerConfig } = await import('#/cli/sub/web/server-config');
+    const result = tryReadServerConfig();
+    errSpy.mockRestore();
+
+    expect(result.defaults).toEqual({ port: 8080, open: false });
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+});
+

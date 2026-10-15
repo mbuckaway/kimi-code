@@ -24,6 +24,7 @@ import {
   type ProviderConfig,
   type SearchConfig,
   type SecondaryModelConfig,
+  type ServerConfig,
   type ServicesConfig,
   type SubagentConfig,
   type ThinkingConfig,
@@ -333,6 +334,8 @@ export function transformTomlData(data: Record<string, unknown>): Record<string,
       result[targetKey] = transformPlainObject(value);
     } else if (targetKey === 'acp' && isPlainObject(value)) {
       result[targetKey] = transformPlainObject(value);
+    } else if (targetKey === 'server' && isPlainObject(value)) {
+      result[targetKey] = transformPlainObject(value);
     } else if (!isPlainObject(value)) {
       result[targetKey] = value;
     }
@@ -517,6 +520,7 @@ export function configToTomlData(config: KimiConfig): Record<string, unknown> {
   setSection(out, 'mcp', config.mcp, mcpToToml);
   setSection(out, 'image', config.image, imageToToml);
   setSection(out, 'acp', config.acp, acpToToml);
+  setSection(out, 'server', config.server, serverToToml);
   setSection(out, 'experimental', config.experimental, experimentalToToml);
   setSection(out, 'permission', config.permission, permissionToToml);
   setHooks(out, config.hooks);
@@ -753,6 +757,14 @@ function imageToToml(image: ImageConfig, rawImage: unknown): Record<string, unkn
 function acpToToml(acp: AcpConfig, rawAcp: unknown): Record<string, unknown> {
   const out = cloneRecord(rawAcp);
   for (const [key, value] of Object.entries(acp)) {
+    setDefined(out, camelToSnake(key), value);
+  }
+  return out;
+}
+
+function serverToToml(server: ServerConfig, rawServer: unknown): Record<string, unknown> {
+  const out = cloneRecord(rawServer);
+  for (const [key, value] of Object.entries(server)) {
     setDefined(out, camelToSnake(key), value);
   }
   return out;
