@@ -4,7 +4,9 @@
  * These tests don't actually start the server — the foreground runner is
  * injected, so they verify option parsing, the ready banner / one-line ready
  * output, browser opening, and the rotate-token / deprecated `kimi server kill`
- * subcommands against fake deps.
+ * subcommands against fake deps. The termination tests drive the signal
+ * controller with a fake process and the foreground runner with a stubbed
+ * `startServer`, so no port is bound and no signal reaches the test worker.
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,16 +19,45 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetCapabilitiesCache, setCapabilities } from '@moonshot-ai/pi-tui';
 
+import { CLI_SHUTDOWN_TIMEOUT_MS, WEB_SHUTDOWN_FORCE_EXIT_MS } from '#/constant/app';
 import { registerWebCommand } from '#/cli/sub/web';
 import type { LegacyKillDeps } from '#/cli/sub/web/legacy-kill';
 import type { WebCommandDeps } from '#/cli/sub/web/run';
-import type { ParsedServerOptions } from '#/cli/sub/web/shared';
+import { parseServerOptions, type ParsedServerOptions } from '#/cli/sub/web/shared';
 import { darkColors } from '#/tui/theme/colors';
+
+// Boundary stubs for the termination tests: `startServer` binds a real port and
+// the telemetry client opens a network sink. Both are installed with `doMock`
+// inside the suites that need them, never file-wide — kap-server resolves its
+// instance-registry directory from `KIMI_CODE_HOME` at import time, so a
+// file-level mock would leak past the `resetModules` isolation that the
+// rotate-token tests depend on. Every factory spreads the original module so
+// the rest of each surface stays real.
+const webRunMocks = vi.hoisted(() => ({
+  flushTelemetrySync: vi.fn(),
+  initializeTelemetry: vi.fn(),
+  shutdownTelemetry: vi.fn(async () => {}),
+  startServer: vi.fn(),
+  track: vi.fn(),
+}));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return { ...actual, spawn: vi.fn() };
 });
+
+async function mockTelemetryBoundary() {
+  vi.doMock('@moonshot-ai/kimi-telemetry', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@moonshot-ai/kimi-telemetry')>();
+    return {
+      ...actual,
+      flushTelemetrySync: webRunMocks.flushTelemetrySync,
+      initializeTelemetry: webRunMocks.initializeTelemetry,
+      shutdownTelemetry: webRunMocks.shutdownTelemetry,
+      track: webRunMocks.track,
+    };
+  });
+}
 
 function stripAnsi(text: string): string {
   return text.replaceAll(/\[[0-9;]*m/g, '');
@@ -63,8 +94,10 @@ function makeIo(): {
   stdout: Pick<NodeJS.WriteStream, 'write'>;
   stderr: Pick<NodeJS.WriteStream, 'write'>;
   readStdout(): string;
+  readStderr(): string;
 } {
   let out = '';
+  let err = '';
   return {
     stdout: {
       write(chunk: string | Uint8Array) {
@@ -73,12 +106,66 @@ function makeIo(): {
       },
     },
     stderr: {
-      write() {
+      write(chunk: string | Uint8Array) {
+        err += String(chunk);
         return true;
       },
     },
     readStdout: () => out,
+    readStderr: () => err,
   };
+}
+
+/**
+ * Fake process for the termination seam: records `once` listeners by signal so
+ * a test can fire one and await the shutdown it started, and honours `off`.
+ */
+function fakeProcess() {
+  const listeners = new Map<NodeJS.Signals, () => Promise<void> | void>();
+  return {
+    once: vi.fn((signal: NodeJS.Signals, listener: () => Promise<void> | void) => {
+      listeners.set(signal, listener);
+    }),
+    off: vi.fn((signal: NodeJS.Signals, listener: () => Promise<void> | void) => {
+      if (listeners.get(signal) === listener) {
+        listeners.delete(signal);
+      }
+    }),
+    exit: vi.fn(),
+    listener: (signal: NodeJS.Signals) => listeners.get(signal),
+    listenerCount: () => listeners.size,
+  };
+}
+
+/** A fake process plus the captured stdio pair the termination seam expects. */
+function makeTermination() {
+  const proc = fakeProcess();
+  const io = makeIo();
+  return { proc, io, targets: { proc, stdout: io.stdout, stderr: io.stderr } };
+}
+
+/** A `RunningServer` surface with only what `runServerInProcess` consumes. */
+function startedServer(close?: () => Promise<unknown>) {
+  return { host: '127.0.0.1', port: 58627, close: vi.fn(close ?? (async () => {})) };
+}
+
+/** A promise plus its resolver, so a test can hold `startServer` in flight. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolved) => {
+    resolve = resolved;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * Runs the pending promise chains to completion. The foreground runner never
+ * resolves, so a test cannot await it; this awaits the work a signal started.
+ */
+async function flushMicrotasks(rounds = 20): Promise<void> {
+  for (let round = 0; round < rounds; round += 1) {
+    await Promise.resolve();
+  }
 }
 
 describe('kimi web', () => {
@@ -1138,5 +1225,320 @@ describe('filterDisplayAddresses', () => {
       { address: '10.0.0.1', family: 'IPv4' },
       { address: '2001:db8::1', family: 'IPv6' },
     ]);
+  });
+});
+
+describe('`kimi web` termination controller', () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    await mockTelemetryBoundary();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    vi.doUnmock('@moonshot-ai/kimi-telemetry');
+  });
+
+  /** Wire the controller against a fake process and a captured stdio pair. */
+  async function installController(shutdown: (reason: string) => Promise<void>) {
+    const { installServerTerminationHandlers } = await import('#/cli/sub/web/lifecycle');
+    const { proc, io, targets } = makeTermination();
+    const uninstall = installServerTerminationHandlers({ shutdown, ...targets });
+    return { proc, io, uninstall };
+  }
+
+  it('arms SIGINT and SIGTERM once each', async () => {
+    expect.assertions(3);
+    const { proc } = await installController(vi.fn(async () => {}));
+
+    expect(proc.once).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+    expect(proc.once).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+    expect(proc.listenerCount()).toBe(2);
+  });
+
+  it('reports SIGTERM on stderr and exits 143, never 0', async () => {
+    expect.assertions(5);
+    const shutdown = vi.fn(async () => {});
+    const { proc, io } = await installController(shutdown);
+
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    expect(io.readStderr()).toContain('Shutting down (SIGTERM)…');
+    expect(io.readStdout()).toBe('');
+    expect(shutdown).toHaveBeenCalledWith('SIGTERM');
+    expect(proc.exit).toHaveBeenCalledWith(143);
+    expect(proc.exit).not.toHaveBeenCalledWith(0);
+  });
+
+  it('reports SIGINT on stderr and exits 130, never 0', async () => {
+    expect.assertions(4);
+    const shutdown = vi.fn(async () => {});
+    const { proc, io } = await installController(shutdown);
+
+    void proc.listener('SIGINT')?.();
+    await flushMicrotasks();
+
+    expect(io.readStderr()).toContain('Shutting down (SIGINT)…');
+    expect(shutdown).toHaveBeenCalledWith('SIGINT');
+    expect(proc.exit).toHaveBeenCalledWith(130);
+    expect(proc.exit).not.toHaveBeenCalledWith(0);
+  });
+
+  it('uninstalls both handlers on the first signal', async () => {
+    expect.assertions(4);
+    // A shutdown that never settles models the wedged close this deadline is for.
+    const shutdown = vi.fn(() => new Promise<void>(() => {}));
+    const { proc } = await installController(shutdown);
+    const sigint = proc.listener('SIGINT');
+    const sigterm = proc.listener('SIGTERM');
+    expect(sigint).toBeDefined();
+    expect(sigterm).toBeDefined();
+
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    expect(proc.off).toHaveBeenCalledWith('SIGINT', sigint);
+    expect(proc.off).toHaveBeenCalledWith('SIGTERM', sigterm);
+  });
+
+  it('leaves a repeat signal of the other kind to the default disposition', async () => {
+    expect.assertions(3);
+    const shutdown = vi.fn(() => new Promise<void>(() => {}));
+    const { proc } = await installController(shutdown);
+
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    // Nothing intercepts a second Ctrl+C any more, and the wedged first
+    // shutdown is not re-entered or exited a second time.
+    expect(proc.listener('SIGINT')).toBeUndefined();
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(proc.exit).not.toHaveBeenCalled();
+  });
+
+  it('restores the listener baseline when uninstalled before any signal', async () => {
+    expect.assertions(4);
+    const shutdown = vi.fn(async () => {});
+    const { proc, io, uninstall } = await installController(shutdown);
+
+    uninstall();
+
+    expect(proc.listenerCount()).toBe(0);
+    expect(io.readStderr()).toBe('');
+    expect(shutdown).not.toHaveBeenCalled();
+    expect(proc.exit).not.toHaveBeenCalled();
+  });
+
+  it('force-exits at the deadline when the shutdown never settles', async () => {
+    expect.assertions(4);
+    vi.useFakeTimers();
+    const shutdown = vi.fn(() => new Promise<void>(() => {}));
+    const { proc, io } = await installController(shutdown);
+
+    void proc.listener('SIGTERM')?.();
+    await vi.advanceTimersByTimeAsync(WEB_SHUTDOWN_FORCE_EXIT_MS - 1);
+
+    expect(proc.exit).not.toHaveBeenCalled();
+    expect(io.readStderr()).not.toContain('Force-exiting');
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(io.readStderr()).toContain(`Force-exiting after ${WEB_SHUTDOWN_FORCE_EXIT_MS}ms`);
+    expect(proc.exit).toHaveBeenCalledWith(143);
+  });
+
+  it('flushes telemetry exactly once, only when it force-exits', async () => {
+    expect.assertions(2);
+    vi.useFakeTimers();
+    const wedged = await installController(vi.fn(() => new Promise<void>(() => {})));
+
+    void wedged.proc.listener('SIGTERM')?.();
+    await vi.advanceTimersByTimeAsync(WEB_SHUTDOWN_FORCE_EXIT_MS);
+
+    expect(webRunMocks.flushTelemetrySync).toHaveBeenCalledTimes(1);
+    expect(wedged.proc.exit).toHaveBeenCalledWith(143);
+  });
+
+  it('does not force-exit when the shutdown settles in time', async () => {
+    expect.assertions(4);
+    vi.useFakeTimers();
+    const { proc, io } = await installController(vi.fn(async () => {}));
+
+    void proc.listener('SIGTERM')?.();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(WEB_SHUTDOWN_FORCE_EXIT_MS);
+
+    expect(io.readStderr()).toContain('Shutting down (SIGTERM)…');
+    expect(io.readStderr()).not.toContain('Force-exiting');
+    expect(webRunMocks.flushTelemetrySync).not.toHaveBeenCalled();
+    expect(proc.exit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('`kimi web` foreground shutdown', () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = mkdtempSync(join(tmpdir(), 'kimi-web-termination-'));
+    vi.stubEnv('KIMI_CODE_HOME', home);
+    vi.resetModules();
+    await mockTelemetryBoundary();
+    vi.doMock('@moonshot-ai/kap-server', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@moonshot-ai/kap-server')>();
+      return { ...actual, startServer: webRunMocks.startServer };
+    });
+    webRunMocks.startServer.mockReset();
+    webRunMocks.initializeTelemetry.mockReset();
+    webRunMocks.flushTelemetrySync.mockReset();
+    webRunMocks.track.mockReset();
+    webRunMocks.shutdownTelemetry.mockReset();
+    webRunMocks.shutdownTelemetry.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+    rmSync(home, { recursive: true, force: true });
+    vi.clearAllMocks();
+    vi.doUnmock('@moonshot-ai/kap-server');
+    vi.doUnmock('@moonshot-ai/kimi-telemetry');
+  });
+
+  /**
+   * Drive the real foreground runner against a fake process and a stubbed
+   * `startServer`. The returned promise never settles by design, so the caller
+   * must not await it.
+   */
+  async function runForeground(
+    hooks: Parameters<ForegroundRunner>[1],
+    startServer: (options: unknown) => unknown,
+  ) {
+    const { startServerForeground } = await import('#/cli/sub/web/run');
+    const { proc, io, targets } = makeTermination();
+    webRunMocks.startServer.mockImplementation(startServer);
+    const run = startServerForeground(parseServerOptions({}), hooks, targets);
+    await flushMicrotasks();
+    return { proc, io, run };
+  }
+
+  it('arms the signal handlers before startServer resolves', async () => {
+    expect.assertions(3);
+    const gate = deferred<unknown>();
+
+    const { proc } = await runForeground({}, () => gate.promise);
+
+    expect(webRunMocks.startServer).toHaveBeenCalledTimes(1);
+    expect(proc.listener('SIGTERM')).toBeDefined();
+    expect(proc.listener('SIGINT')).toBeDefined();
+  });
+
+  it('aborts startup with the signal code when a signal lands during bootstrap', async () => {
+    expect.assertions(4);
+    const onReady = vi.fn();
+    const gate = deferred<unknown>();
+
+    const { proc, io } = await runForeground({ onReady }, () => gate.promise);
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    expect(io.readStderr()).toContain('Startup aborted (SIGTERM)');
+    expect(webRunMocks.flushTelemetrySync).toHaveBeenCalledTimes(1);
+    expect(proc.exit).toHaveBeenCalledWith(143);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it('closes a server whose bootstrap finishes after a startup signal', async () => {
+    expect.assertions(2);
+    const server = startedServer();
+    const gate = deferred<unknown>();
+    const onReady = vi.fn();
+
+    const { proc } = await runForeground({ onReady }, () => gate.promise);
+    void proc.listener('SIGINT')?.();
+    await flushMicrotasks();
+    gate.resolve(server);
+    await flushMicrotasks();
+
+    expect(server.close).toHaveBeenCalledTimes(1);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it('shuts a listening server down in hook, close, telemetry order and exits 143', async () => {
+    expect.assertions(4);
+    const events: string[] = [];
+    const server = startedServer(async () => {
+      events.push('close');
+    });
+    webRunMocks.shutdownTelemetry.mockImplementation(async () => {
+      events.push('telemetry');
+    });
+    const onShutdown = vi.fn(async () => {
+      events.push('hook');
+    });
+    const onReady = vi.fn();
+
+    const { proc, io } = await runForeground({ onReady, onShutdown }, () => server);
+
+    expect(onReady).toHaveBeenCalledWith('http://127.0.0.1:58627');
+
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    expect(events).toEqual(['hook', 'close', 'telemetry']);
+    expect(onShutdown).toHaveBeenCalledWith('SIGTERM');
+    expect(io.readStderr()).toContain('Shutting down (SIGTERM)…');
+  });
+
+  it('keeps closing and exiting when the shutdown hook rejects', async () => {
+    expect.assertions(3);
+    const server = startedServer();
+    const onShutdown = vi.fn(async () => {
+      throw new Error('tunnel close failed');
+    });
+
+    const { proc } = await runForeground({ onShutdown }, () => server);
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    // A hook failure must not strand the server: the close and the exit follow.
+    expect(onShutdown).toHaveBeenCalledWith('SIGTERM');
+    expect(server.close).toHaveBeenCalledTimes(1);
+    expect(proc.exit).toHaveBeenCalledWith(143);
+  });
+
+  it('exits with the signal code when the server close rejects', async () => {
+    expect.assertions(2);
+    const server = startedServer(async () => {
+      throw new Error('close wedged');
+    });
+
+    const { proc } = await runForeground({}, () => server);
+    void proc.listener('SIGINT')?.();
+    await flushMicrotasks();
+
+    expect(proc.exit).toHaveBeenCalledWith(130);
+    expect(proc.exit).not.toHaveBeenCalledWith(0);
+  });
+
+  it('force-exits at the deadline when the server close never settles', async () => {
+    expect.assertions(3);
+    vi.useFakeTimers();
+    const { startServerForeground } = await import('#/cli/sub/web/run');
+    const { proc, io, targets } = makeTermination();
+    webRunMocks.startServer.mockResolvedValue(
+      startedServer(() => new Promise<void>(() => {})),
+    );
+
+    const run = startServerForeground(parseServerOptions({}), {}, targets);
+    await vi.advanceTimersByTimeAsync(0);
+    void proc.listener('SIGTERM')?.();
+    await vi.advanceTimersByTimeAsync(WEB_SHUTDOWN_FORCE_EXIT_MS);
+
+    expect(io.readStderr()).toContain(`Force-exiting after ${WEB_SHUTDOWN_FORCE_EXIT_MS}ms`);
+    expect(webRunMocks.flushTelemetrySync).toHaveBeenCalledTimes(1);
+    expect(proc.exit).toHaveBeenCalledWith(143);
+    void run;
   });
 });

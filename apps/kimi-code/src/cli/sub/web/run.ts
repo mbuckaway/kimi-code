@@ -1,10 +1,11 @@
 /**
  * `kimi web` — run the local server in the foreground and open the web UI.
  *
- * The server always runs in the current process, attached to the terminal,
- * and shuts down cleanly on SIGINT/SIGTERM. `--no-open` skips the browser.
- * Multiple instances can share the home directory: each registers itself in
- * the instance registry and takes the next free port (see kap-server's
+ * The server always runs in the current process, attached to the terminal, and
+ * stops on SIGINT/SIGTERM: the shutdown is reported, bounded, and exits with
+ * the signal's own code — see `./lifecycle.ts`. `--no-open` skips the browser.
+ * Multiple instances can share the home directory: each registers itself in the
+ * instance registry and takes the next free port (see kap-server's
  * `startServer`).
  */
 
@@ -12,7 +13,11 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { createServerLogger, startServer, type ServerLogger } from '@moonshot-ai/kap-server';
-import { shutdownTelemetry, track } from '@moonshot-ai/kimi-telemetry';
+import {
+  flushTelemetrySync,
+  shutdownTelemetry,
+  track,
+} from '@moonshot-ai/kimi-telemetry';
 import chalk from 'chalk';
 import { type Command, Option } from 'commander';
 
@@ -35,6 +40,10 @@ import {
   isLoopbackHost,
   splitTokenFragment,
 } from './access-urls';
+import {
+  installServerTerminationHandlers,
+  type LifecycleTargets,
+} from './lifecycle';
 import { type NetworkAddress } from './networks';
 import {
   formatRemoteControlOutput,
@@ -87,6 +96,7 @@ export interface WebCommandDeps {
   startServerForeground?: (
     options: ParsedServerOptions,
     hooks?: StartForegroundHooks,
+    targets?: LifecycleTargets,
   ) => Promise<never>;
   startRemoteControl?: (options: RemoteControlOptions) => Promise<RemoteControlHandle>;
   openUrl(url: string): void;
@@ -300,15 +310,27 @@ function formatDangerNoticeLines(): string[] {
   ];
 }
 
+/** The process and stdio a real foreground run reports termination through. */
+const DEFAULT_LIFECYCLE_TARGETS: LifecycleTargets = {
+  proc: process,
+  stdout: process.stdout,
+  stderr: process.stderr,
+};
+
 /**
  * `kimi web` — runs the local server in-process, attached to the current
- * terminal. Resolves only via `process.exit` (SIGINT/SIGTERM).
+ * terminal. It settles only by exiting: the termination handler ends a healthy
+ * run with the signal's code, and a failed startup rethrows.
+ *
+ * `targets` is a test seam for the process and stdio the signal handlers arm
+ * on; production callers leave it unset.
  */
 export async function startServerForeground(
   options: ParsedServerOptions,
   hooks: StartForegroundHooks = {},
+  targets: LifecycleTargets = DEFAULT_LIFECYCLE_TARGETS,
 ): Promise<never> {
-  return runServerInProcess(options, hooks);
+  return runServerInProcess(options, hooks, targets);
 }
 
 /**
@@ -318,6 +340,7 @@ export async function startServerForeground(
 async function runServerInProcess(
   options: ParsedServerOptions,
   hooks: StartForegroundHooks,
+  targets: LifecycleTargets,
 ): Promise<never> {
   const version = getVersion();
   // Registers the telemetry provider for `track` / `shutdownTelemetry`; the
@@ -325,31 +348,52 @@ async function runServerInProcess(
   initializeServerTelemetry({ version });
 
   let running: RoutedServer | undefined;
-  let stopping = false;
+  // The reason of the first shutdown request, and the guard that keeps a second
+  // one from starting a competing teardown. `undefined` while the server runs.
+  let stopReason: string | undefined;
 
-  async function shutdown(reason: string): Promise<void> {
-    if (stopping) return;
-    stopping = true;
-    running?.logger.info({ reason }, 'server shutting down');
+  /** Closes the server and flushes what it still owes. Never rethrows. */
+  async function closeRunningServer(server: RoutedServer, reason: string): Promise<void> {
+    server.logger.info({ reason }, 'server shutting down');
     try {
       await hooks.onShutdown?.(reason);
     } catch (error) {
-      running?.logger.error(
+      server.logger.error(
         { err: error instanceof Error ? error : new Error(String(error)) },
         'foreground shutdown hook error',
       );
     }
     try {
-      await running?.close();
+      await server.close();
       await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS });
     } catch (error) {
-      running?.logger.error(
+      server.logger.error(
         { err: error instanceof Error ? error : new Error(String(error)) },
         'server shutdown error',
       );
     }
-    process.exit(0);
   }
+
+  async function shutdown(reason: string): Promise<void> {
+    if (stopReason !== undefined) return;
+    stopReason = reason;
+    if (running === undefined) {
+      // The signal landed while `startServer` was still in flight: nothing is
+      // listening yet, so there is no connection to drain, and neither telemetry
+      // flush is reachable on this path — `closeRunningServer`'s never runs and
+      // the `onReady` failure path is not in play. Report it, flush by hand, and
+      // let the handler exit; the check after `startServer` closes the server if
+      // the startup still completes.
+      targets.stderr.write(`Startup aborted (${reason})\n`);
+      flushTelemetrySync();
+      return;
+    }
+    await closeRunningServer(running, reason);
+  }
+
+  // Armed before `startServer` so a Ctrl+C during bootstrap is reported and
+  // flushed instead of dying by Node's default disposition.
+  installServerTerminationHandlers({ ...targets, shutdown });
 
   // kap-server (the DI × Scope engine server) is the only server flavor. Its
   // `startServer` returns `{ host, port, close }` rather than `{ address,
@@ -399,14 +443,20 @@ async function runServerInProcess(
     close: () => v2.close(),
   };
 
-  track('server_started', { daemon: false });
+  // A signal that arrived during bootstrap had no server to close, so its
+  // handler only reported the abort. Close the server that just finished
+  // starting instead of serving a port the process is already leaving. Getting
+  // here with `stopReason` set proves the abort branch ran: a shutdown that
+  // found a server in hand never leaves this stretch of code pending.
+  if (stopReason !== undefined) {
+    await closeRunningServer(running, stopReason);
+    return new Promise<never>(() => {
+      // The termination handler exits the process in production; this keeps the
+      // runner's `never` contract for a host that stubs the exit out.
+    });
+  }
 
-  process.once('SIGINT', () => {
-    void shutdown('SIGINT');
-  });
-  process.once('SIGTERM', () => {
-    void shutdown('SIGTERM');
-  });
+  track('server_started', { daemon: false });
 
   running.logger.info({ address: running.address }, 'server ready');
 
@@ -423,7 +473,7 @@ async function runServerInProcess(
   }
 
   return new Promise<never>(() => {
-    // Keeps the event loop alive; the process ends via shutdown()/process.exit.
+    // Keeps the event loop alive; the process ends via a termination signal.
   });
 }
 
@@ -519,7 +569,9 @@ export function formatReadyBanner(
 
   // Auxiliary controls last.
   lines.push(`  ${label('Logs:     ')}${muted('off')}${dim('  use --log-level info to enable')}`);
-  // The server always runs in the foreground attached to this terminal.
+  // Ctrl+C is the documented stop: the termination handler reports it, bounds
+  // the teardown, and exits with the signal's code. The banner text itself stays
+  // as short as the terminal width allows.
   lines.push(`  ${label('Stop:     ')}${muted('Ctrl+C')}`);
   lines.push('');
   return lines.join('\n');

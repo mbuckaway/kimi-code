@@ -33,6 +33,16 @@ export const PROMPT_CLEANUP_TIMEOUT_MS = 8000;
 // well before this fires.
 export const HEADLESS_FORCE_EXIT_GRACE_MS = 2000;
 
+// Upper bound on a `kimi web` shutdown before we stop waiting on cleanup and
+// force-exit with the signal's code. The shutdown runs these in sequence: the
+// shutdown hook, then kap-server's close (`app.close()`, its 3 s engine
+// telemetry flush, and its drain group on one shared 3 s deadline), then the
+// CLI's own telemetry flush (CLI_SHUTDOWN_TIMEOUT_MS). That is 9 s of bounded
+// waiting plus the hook and `app.close()`; 12 s sits above the bounded part, so
+// it fires only on a genuine wedge. `scripts/dev-server-restart.mjs` keeps its
+// SIGKILL net above this so the dev harness never pre-empts the graceful path.
+export const WEB_SHUTDOWN_FORCE_EXIT_MS = 12000;
+
 // Max time to wait for buffered stdout/stderr to flush before arming the
 // force-exit fallback. A slow/piped consumer's still-draining stdio is a
 // legitimate ref'd handle — flushing first prevents the fallback from
