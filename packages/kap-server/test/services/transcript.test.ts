@@ -346,6 +346,47 @@ describe('AgentTranscriptProjector', () => {
     expect(created?.frame.frameId).toBe('t0.1.f2');
   });
 
+  it('drops an empty thinking delta while no thinking frame is open', () => {
+    const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
+    const tx = new AgentTranscript('main');
+    const feed = (event: ProjectorBusEvent): TranscriptOperation[] => {
+      const mapped = projector.map(event);
+      tx.apply(mapped);
+      return mapped;
+    };
+
+    feed(ev({ type: 'turn.started', turnId: 1, origin: { kind: 'user' } }));
+    feed(ev({ type: 'turn.step.started', turnId: 1, step: 1, stepId: 'u1' }));
+    expect(feed(ev({ type: 'thinking.delta', turnId: 1, delta: '' }))).toEqual([]);
+    feed(ev({ type: 'assistant.delta', turnId: 1, delta: 'Hello' }));
+    feed(ev({ type: 'thinking.delta', turnId: 1, delta: '' }));
+    feed(ev({ type: 'assistant.delta', turnId: 1, delta: ' world' }));
+
+    const turn = turnOps('t1', tx.getItems());
+    expect(turn.steps[0]?.frames).toEqual([
+      { kind: 'text', frameId: 't1.1.f1', role: 'assistant', text: 'Hello world' },
+    ]);
+  });
+
+  it('keeps accumulating into an open thinking frame across empty deltas', () => {
+    const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
+    const tx = new AgentTranscript('main');
+    const feed = (event: ProjectorBusEvent): void => {
+      tx.apply(projector.map(event));
+    };
+
+    feed(ev({ type: 'turn.started', turnId: 1, origin: { kind: 'user' } }));
+    feed(ev({ type: 'turn.step.started', turnId: 1, step: 1, stepId: 'u1' }));
+    feed(ev({ type: 'thinking.delta', turnId: 1, delta: 'hmm' }));
+    feed(ev({ type: 'thinking.delta', turnId: 1, delta: '' }));
+    feed(ev({ type: 'thinking.delta', turnId: 1, delta: ' yes' }));
+
+    const turn = turnOps('t1', tx.getItems());
+    const frames = turn.steps[0]?.frames;
+    expect(frames).toHaveLength(1);
+    expect(frames?.[0]).toMatchObject({ kind: 'thinking', frameId: 't1.1.f1', text: 'hmm yes' });
+  });
+
   it('adopts a backfilled tool frame when the result arrives after a mid-bind attach', () => {
     const tx = new AgentTranscript('main');
     tx.apply([
