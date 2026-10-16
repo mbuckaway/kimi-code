@@ -184,7 +184,7 @@ Multiple instances can share one home directory: each registers itself under `~/
 | `--log-level <level>` | Enable server logs at the selected level (`fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`); omitted by default |
 | `--debug-endpoints` | Mount `/api/v1/debug/*` routes (off by default) |
 | `--no-debug-endpoints` | Do not mount the `/api/v1/debug/*` routes |
-| `--web-title <title>` | Custom browser tab title for the web UI; defaults to the workspace directory name |
+| `--web-title <title>` | Custom browser tab title for the web UI; unset falls back to `<workspace dir> \| Kimi Code` |
 | `--rc`, `--remote-control` | Expose the web UI through Kimi Remote Control (experimental) |
 | `--no-rc`, `--no-remote-control` | Do not expose the web UI through Kimi Remote Control |
 | `--open` | Open the web UI in the default browser once the server is ready (the default) |
@@ -198,7 +198,7 @@ Remote Control is still experimental, so `[server] remote_control = true` cannot
 
 Of the on/off flags in the table, `--insecure-no-tls` is the only one without a negated counterpart: it can only relax the TLS requirement. Write `insecure_no_tls = false` under `[server]` to require TLS again.
 
-`kimi web` binds to local loopback only by default and prints the bearer token in the startup banner; the web UI authenticates automatically via the `#token=` URL fragment. An IPv6 bind address is printed in brackets, so `--host ::1` gives `http://[::1]:<port>/`. An IPv6 bind address is printed in brackets, so `--host ::1` shows `http://[::1]:58627/`.
+`kimi web` binds to local loopback only by default and prints the bearer token in the startup banner; the web UI authenticates automatically via the `#token=` URL fragment. An IPv6 bind address is printed in brackets, so `--host ::1` gives `http://[::1]:<port>/`.
 
 ::: info
 The `kimi server` command tree is deprecated: any `kimi server …` invocation (including all legacy subcommands) only prints a deprecation notice and exits with code 1 — use `kimi web` instead. The one exception is `kimi server kill`, which stays functional for stopping servers started by a version before 0.28.0. The notice will be removed in the next major version of Kimi Code.
@@ -216,7 +216,7 @@ The teardown is bounded. If the cleanup has not finished within 12 seconds, the 
 
 `SIGHUP` reloads `config.toml` in place; it does not restart the server. The command prints one line with what changed, for example `config reloaded: providers, thinking`, or `config reloaded: no changes`. When the edited file is invalid, it prints `config reload failed: <message> — kept previous values; config writes are blocked until the file is fixed` and keeps serving with the values it already loaded.
 
-The `[server]` keys themselves are not re-applied, because the server decides them when it binds the socket. After a reload the command compares the file against the running values and names any that need a restart, on a line such as `restart required for: port`. The engine also watches `config.toml` and applies an edit on its own shortly after you save, so a `SIGHUP` taken right after saving usually reports `no changes` followed by that line. An edit that only touches `[server]` always reads that way — it is the expected output, not a failure. See [`server`](../configuration/config-files.md#server).
+The `[server]` keys themselves are not re-applied, because the server decides them when it binds the socket. After a reload the command re-reads the file and re-applies the same command-line flags on top of it. It compares that with the running values, so a key a flag pins is never listed. The keys a restart would change are named on a line such as `restart required for: port`. The engine also watches `config.toml` and applies an edit on its own shortly after you save, so a `SIGHUP` taken right after saving usually reports `no changes` followed by that line. An edit that only touches `[server]` always reads that way — it is the expected output, not a failure. See [`server`](../configuration/config-files.md#server).
 
 #### `kimi server kill`
 

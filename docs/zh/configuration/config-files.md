@@ -520,11 +520,11 @@ log_level = "silent"
 allowed_host = [".example.com"]
 ```
 
-上表没有的键是启动错误，而不是警告。错误会点出键名和文件路径，服务不会启动——`prot = 9000` 绝不会悄悄退回默认端口。`kimi web rotate-token` 和 TUI 的 `/web` 命令会把同一条信息作为 stderr 警告打印出来，并用内置默认值继续运行。
+上表没有的键是启动错误，而不是警告。错误会点出键名和文件路径，服务不会启动——`prot = 9000` 绝不会悄悄退回默认端口。改用宽松读取的有四处：`kimi web rotate-token`、TUI 的 `/web` 与 `/rc` 命令，以及 `SIGHUP` 重载时的重启提示。它们都把同一条信息作为 stderr 警告打印出来，并用内置默认值继续运行。
 
 文件中被设为 `true` 的安全相关键会在服务启动时打印一行红色 stderr 信息，点出该键和文件路径，让你看清文件自行决定了什么。这些键是 `insecure_no_tls`、`allow_remote_shutdown`、`dangerous_bypass_auth`、`enable_kimi_oauth` 和 `debug_endpoints`。
 
-已鉴权的 `POST /api/v1/config`（[服务 API：配置](../reference/server-api.md#配置)）也能写入这些键。该路由不会把请求体对照键列表做校验。通过 API 存下的拼错的键，会在下次启动时变成上面那个启动错误。下次启动前请在 `config.toml` 里改正或删除该键。
+已鉴权的 `POST /api/v1/config`（[服务 API：配置](../reference/server-api.md#配置)）也能写入这些键。该路由会把请求体的每个顶层键当作一个配置域持久化，所以请求体里的 `server` 表会落到 `$KIMI_CODE_HOME/config.toml`（默认就是 `~/.kimi-code/config.toml`）的 `[server]` 节下。它不会把请求体对照上文的键列表做校验。通过 API 存下的拼错的键，会在下次启动时变成上面那个启动错误。下次启动前请在该文件里改正或删除该键。
 
 本节由 `kimi web` 命令自己在绑定套接字之前读取，**不**由默认的 `agent-core-v2` 引擎读取。引擎把 `[server]` 原样透传，因此走默认路径的 `kimi doctor` 不会检查这些键。`kimi web` 在启动时校验它们，而那正是错误值生效的地方。修改在下次运行时生效：正在运行的服务会保留它绑定时确定的地址、端口、日志级别和鉴权模式。
 

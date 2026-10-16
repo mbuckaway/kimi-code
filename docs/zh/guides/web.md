@@ -52,7 +52,7 @@ Kimi Code Web 是 Kimi Code CLI 内置的浏览器图形界面：在终端运行
 
 `Ctrl+C`（SIGINT）与 `kill`（SIGTERM）停止服务的方式相同：终端会打印 `Shutting down (SIGINT)…`（或 `SIGTERM`），进程关闭自己的 socket 与连接，并以该信号自己的退出码结束——SIGINT 为 `130`，SIGTERM 为 `143`。等待是有上限的：若清理在 12 秒内没有完成，进程会在 stderr 说明情况并以同样的退出码强制退出。此时再收到任意一个信号，进程不再等待，立即结束。
 
-`SIGHUP` 就地重新加载 `config.toml`，不会重启服务。终端只打印一行改了什么（`config reloaded: providers, thinking`，或 `config reloaded: no changes`）；文件写坏时打印错误，服务沿用改动前的值继续运行，且在文件改对之前不会再写入配置。保存文件本身稍后就会触发热重载，因此刚保存完就发出的重载通常报告 `no changes`——`SIGHUP` 的价值在于这一句明确确认，外加一行 `restart required for: <keys>`，列出与运行中取值不同的 `[server]` 键。十三个 `[server]` 键都只在启动时读取：绑定地址、端口、日志级别和各鉴权开关在 socket 绑定时即已确定，服务运行期间无法更改。
+`SIGHUP` 就地重新加载 `config.toml`，不会重启服务。终端只打印一行改了什么（`config reloaded: providers, thinking`，或 `config reloaded: no changes`）；文件写坏时打印错误，服务沿用改动前的值继续运行，且在文件改对之前不会再写入配置。保存文件本身稍后就会触发热重载，因此刚保存完就发出的重载通常报告 `no changes`——`SIGHUP` 的价值在于这一句明确确认，外加一行 `restart required for: <keys>`：命令会先把本次启动用到的同一组命令行 flag 重新叠加到文件之上，再列出与运行中取值仍然不同的 `[server]` 键。被 flag 固定的键不会出现在这一行，因为重启也不会改变它。十三个 `[server]` 键都只在启动时读取：绑定地址、端口、日志级别和各鉴权开关在 socket 绑定时即已确定，服务运行期间无法更改。
 
 以上为 macOS 与 Linux 的行为：Windows 不会投递 SIGTERM，其 SIGHUP 含义是「控制台正在关闭」——进程约 10 秒后无论如何都会被终止。完整的信号约定见 [kimi 命令：信号与停止](../reference/kimi-command.md#信号与停止)。
 

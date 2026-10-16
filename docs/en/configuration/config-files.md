@@ -521,11 +521,11 @@ log_level = "silent"
 allowed_host = [".example.com"]
 ```
 
-A key the list above does not contain is a startup error, not a warning. The error names the key and the file, and the server does not start — `prot = 9000` never falls silently to the default port. `kimi web rotate-token` and the TUI `/web` command print the same message as a stderr warning and continue with the built-in defaults.
+A key the list above does not contain is a startup error, not a warning. The error names the key and the file, and the server does not start — `prot = 9000` never falls silently to the default port. Four callers read the section leniently instead: `kimi web rotate-token`, the TUI `/web` and `/rc` commands, and the `SIGHUP` restart advisory. Each prints the same message as a stderr warning and continues with the built-in defaults.
 
 A security-relevant key set to `true` in the file prints a red line on stderr when the server starts. The line names the key and the file path, so you can see what the file decided on its own. The keys are `insecure_no_tls`, `allow_remote_shutdown`, `dangerous_bypass_auth`, `enable_kimi_oauth`, and `debug_endpoints`.
 
-An authenticated `POST /api/v1/config` ([Server API: Config](../reference/server-api.md#config)) can also write these keys. That route does not check the request body against the key list. A mistyped key saved through the API surfaces later as the startup error above. Fix or remove the key in `config.toml` before the next start.
+An authenticated `POST /api/v1/config` ([Server API: Config](../reference/server-api.md#config)) can also write these keys. The route persists each top-level body key as a config domain, so a `server` object in the request body lands under `[server]` in `$KIMI_CODE_HOME/config.toml` (`~/.kimi-code/config.toml` by default). It does not check the request body against the key list above. A mistyped key saved through the API surfaces later as the startup error above. Fix or remove the key in that file before the next start.
 
 This section is read by the `kimi web` command itself, before the socket binds — not by the default `agent-core-v2` engine. The engine passes `[server]` through untouched, so `kimi doctor` on its default route does not check these keys. `kimi web` validates them at startup, where a wrong value takes effect. Edits apply on the next run: a running server keeps the host, port, log level, and auth mode it bound with.
 

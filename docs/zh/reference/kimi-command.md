@@ -184,7 +184,7 @@ kimi web --port 58628    # 指定绑定端口
 | `--log-level <level>` | 按所选级别开启服务日志（`fatal`、`error`、`warn`、`info`、`debug`、`trace`、`silent`）；默认不输出 |
 | `--debug-endpoints` | 挂载 `/api/v1/debug/*` 调试路由（默认关闭） |
 | `--no-debug-endpoints` | 不挂载 `/api/v1/debug/*` 路由 |
-| `--web-title <title>` | 自定义 web UI 的浏览器标签页标题；默认为工作区目录名 |
+| `--web-title <title>` | 自定义 web UI 的浏览器标签页标题；不设置时回退为 `<workspace dir> \| Kimi Code` |
 | `--rc`、`--remote-control` | 通过 Kimi Remote Control 暴露 web UI（实验功能） |
 | `--no-rc`、`--no-remote-control` | 不通过 Kimi Remote Control 暴露 web UI |
 | `--open` | 服务就绪后用默认浏览器打开 web UI（默认） |
@@ -210,13 +210,13 @@ Remote Control 仍是实验功能，`[server] remote_control = true` 无法单�
 
 #### 信号与停止
 
-`SIGINT` 和 `SIGTERM` 会结束本次运行。服务向 stderr 打印 `Shutting down (SIGINT)…`（或 `SIGTERM`），随后关闭监听端口和连接、补完欠下的收尾工作，并以该信号自身的退出码结束：`SIGINT` 为 `130`，`SIGTERM` 为 `143`。这些数字遵循 POSIX 的 `128 + 信号编号` 约定，因此外部管理器能把"被停止"和"崩溃退出"区分开。Windows 上 `Ctrl-C` 同样会触发 `SIGINT`，所以 `130` 在那里也成立；本节其余内容请以 macOS 与 Linux 为准，因为 Windows 无法投递 `SIGTERM`，其 `SIGHUP` 表示控制台正在关闭——约 10 秒后进程一律会被终止。
+`SIGINT` 和 `SIGTERM` 会结束本次运行。服务向 stderr 打印 `Shutting down (SIGINT)…`（或 `SIGTERM`），随后关闭监听端口和连接、补完欠下的收尾工作，并以该信号自身的退出码结束：`SIGINT` 为 `130`，`SIGTERM` 为 `143`。这些数字遵循 POSIX 的 `128 + 信号编号` 约定，因此外部管理器能把「被停止」和「崩溃退出」区分开。Windows 上 `Ctrl-C` 同样会触发 `SIGINT`，所以 `130` 在那里也成立；本节其余内容请以 macOS 与 Linux 为准，因为 Windows 无法投递 `SIGTERM`，其 `SIGHUP` 表示控制台正在关闭——约 10 秒后进程一律会被终止。
 
 收尾过程有明确上限。若 12 秒内没有完成，进程会向 stderr 打印 `Force-exiting after 12000ms`，并用同一个信号退出码结束。在此之前再次发出 `SIGINT` 或 `SIGTERM`，则不再等待，立即结束进程。若信号在服务仍在启动时就到达，进程会打印 `Startup aborted (SIGINT)`，并以同一个退出码结束。
 
 `SIGHUP` 会在原地重新加载 `config.toml`，不会重启服务。命令只打印一行结果，说明发生了哪些变化，例如 `config reloaded: providers, thinking`，或 `config reloaded: no changes`。修改后的文件格式有问题时，命令打印 `config reload failed: <message> — kept previous values; config writes are blocked until the file is fixed`，并继续用已加载的配置对外服务。
 
-`[server]` 自身的键不会被重新应用，因为服务在绑定端口时就已决定了这些值。重新加载后，命令会把文件与运行中的取值逐项比较，并指名需要重启才能生效的键，输出形如 `restart required for: port`。引擎本身也会监听 `config.toml`，保存后不久就会自行应用改动，因此刚存完文件就发 `SIGHUP`，通常会先报 `no changes`、再跟上这一行。只改动 `[server]` 的编辑永远是这样的输出——这是预期结果，不是失败。详见 [`server`](../configuration/config-files.md#server)。
+`[server]` 自身的键不会被重新应用，因为服务在绑定端口时就已决定了这些值。重新加载后，命令会重新读取文件，把本次启动用到的同一组命令行 flag 重新叠加上去，再与运行中的取值逐项比较。被 flag 固定的键永远不会被列出。需要重启才能生效的键会被点名，输出形如 `restart required for: port`。引擎本身也会监听 `config.toml`，保存后不久就会自行应用改动，因此刚存完文件就发 `SIGHUP`，通常会先报 `no changes`、再跟上这一行。只改动 `[server]` 的编辑永远是这样的输出——这是预期结果，不是失败。详见 [`server`](../configuration/config-files.md#server)。
 
 #### `kimi server kill`
 
