@@ -71,6 +71,13 @@ keep_alive_on_exit = false
 [language]
 reply_language = "en"
 
+[server]
+host = "127.0.0.1"
+port = 58627
+log_level = "silent"
+open = true
+ipv6 = false
+
 [services.search]
 provider = "kimi"
 
@@ -125,10 +132,11 @@ timeout = 5
 | `hooks` | `array<table>` | — | 生命周期 hook，详见 [Hooks](../customization/hooks.md) |
 | `identity` | `table` | — | 自定义 Agent 身份 → [`identity`](#identity) |
 | `language` | `table` | — | 模型回复语言 → [`language`](#language) |
+| `server` | `table` | — | `kimi web` / `kimi rc` 服务默认值 → [`server`](#server) |
 
 `planning_model` 是 `default_model` 的姊妹字段：它指定 Agent 在 Plan 模式激活时切换到的模型，退出 Plan 模式后恢复为 `default_model`。其上下文窗口必须与 `default_model` 相同——切换保护只允许切换到上下文窗口不小于当前模型的模型，因此规划/默认这一对模型必须匹配。可以在 TUI 中用 [`/planning-model`](../reference/slash-commands.md) 命令或 Web 设置里配置。
 
-以下各节对 `providers`、`models`、`thinking`、`loop_control`、`background`、`image`、`services`、`permission` 等嵌套表逐一展开。
+以下各节对 `providers`、`models`、`thinking`、`loop_control`、`background`、`image`、`services`、`permission`、`server` 等嵌套表逐一展开。
 
 ## `providers`
 
@@ -483,6 +491,42 @@ reply_language = "en"     # 可选 — 默认值为 "en"
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `socket` | `string` | 未设置 | 改为监听的 Unix domain socket（macOS/Linux）或 Windows 命名管道（`\\.\pipe\...`）路径；`--socket` 标志会覆盖此值。详见 [Socket 传输](../reference/kimi-acp.md#socket-传输) |
+
+## `server`
+
+`server` 存放 `kimi web` / `kimi rc` 本地服务的默认值。你每次都要用的绑定地址、端口或日志级别可以在这里写一次，不必每次在命令行里重复。CLI 在启动时、套接字绑定之前读取本节一次，并按 **CLI 标志 > `[server]` 键 > 内置默认值** 的顺序解析每个选项。表中「默认值」一列给出内置值——只有当命令行和配置文件都没有给出时才生效。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `host` | `string` | `127.0.0.1` | 绑定地址。`all`、`*` 和 `""` 都表示通配绑定 `0.0.0.0`（所有网卡）；不带值的 `--host` 会以同一通配地址覆盖此值 |
+| `port` | `integer` | `58627` | 监听端口；`0` 表示向操作系统申请空闲端口。端口被占用时按 `port + 1` 重试 |
+| `log_level` | `string` | `silent` | 服务日志级别：`fatal`、`error`、`warn`、`info`、`debug`、`trace`、`silent`。只要不是 `silent`，完整的就绪横幅就会改为日志加一行就绪提示 |
+| `allowed_host` | `array<string>` | — | 允许通过 DNS 重绑定检查的额外 `Host` 请求头值；以 `.` 开头匹配域名后缀（例如 `.example.com`）。`KIMI_CODE_ALLOWED_HOSTS` 与本列表合并，而非覆盖它 |
+| `web_title` | `string` | — | 本 web UI 实例的浏览器标签页标题；不设置时回退为 `<workspace dir> \| Kimi Code` |
+| `open` | `boolean` | `true` | 服务就绪后是否在默认浏览器中打开 web UI |
+| `ipv6` | `boolean` | `false` | 通配绑定时列出 IPv6 网卡提示。该开关只改变打印内容，绝不改变实际绑定的地址 |
+| `insecure_no_tls` | `boolean` | `true` | 允许在非本机回环绑定上不使用终结 TLS 的反向代理；仅对非回环绑定有意义。设为 `false` 即要求 TLS——`--insecure-no-tls` 标志没有取反形式，只能放宽此项 |
+| `allow_remote_shutdown` | `boolean` | `false` | 在非本机回环绑定上保留 `POST /api/v1/shutdown` 可用 |
+| `dangerous_bypass_auth` | `boolean` | `false` | 在所有 REST 与 WebSocket 路由上关闭 bearer token 鉴权。此后任何能访问该端口的人都拥有完整权限——仅在可信网络或自有鉴权代理之后使用 |
+| `enable_kimi_oauth` | `boolean` | `false` | 在 web UI 和 TUI 中启用 kimi.com/kimi.ai 的 OAuth 设备码登录；token/apiKey 鉴权仍为默认 |
+| `debug_endpoints` | `boolean` | `false` | 挂载 `/api/v1/debug/*` 自省路由 |
+| `remote_control` | `boolean` | `false` | 通过 Kimi Remote Control 暴露 web UI。实验开关仍然生效：本值无法单独启用 Remote Control，因此还需设置 `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1`（或 `KIMI_CODE_EXPERIMENTAL_FLAG=1`） |
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 58627
+log_level = "silent"
+allowed_host = [".example.com"]
+```
+
+上表没有的键是启动错误，而不是警告。错误会点出键名和文件路径，服务不会启动——`prot = 9000` 绝不会悄悄退回默认端口。`kimi web rotate-token` 和 TUI 的 `/web` 命令会把同一条信息作为 stderr 警告打印出来，并用内置默认值继续运行。
+
+文件中被设为 `true` 的安全相关键会在服务启动时打印一行红色 stderr 信息，点出该键和文件路径，让你看清文件自行决定了什么。这些键是 `insecure_no_tls`、`allow_remote_shutdown`、`dangerous_bypass_auth`、`enable_kimi_oauth` 和 `debug_endpoints`。
+
+已鉴权的 `POST /api/v1/config`（[服务 API：配置](../reference/server-api.md#配置)）也能写入这些键。该路由不会把请求体对照键列表做校验。通过 API 存下的拼错的键，会在下次启动时变成上面那个启动错误。下次启动前请在 `config.toml` 里改正或删除该键。
+
+本节由 `kimi web` 命令自己在绑定套接字之前读取，**不**由默认的 `agent-core-v2` 引擎读取。引擎把 `[server]` 原样透传，因此走默认路径的 `kimi doctor` 不会检查这些键。`kimi web` 在启动时校验它们，而那正是错误值生效的地方。修改在下次运行时生效：正在运行的服务会保留它绑定时确定的地址、端口、日志级别和鉴权模式。
 
 ## `experimental`
 

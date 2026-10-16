@@ -71,6 +71,13 @@ keep_alive_on_exit = false
 [language]
 reply_language = "en"
 
+[server]
+host = "127.0.0.1"
+port = 58627
+log_level = "silent"
+open = true
+ipv6 = false
+
 [services.search]
 provider = "kimi"
 
@@ -125,10 +132,11 @@ Fields in the config file fall into two categories: **top-level scalars** that d
 | `hooks` | `array<table>` | — | Lifecycle hooks; see [Hooks](../customization/hooks.md) |
 | `identity` | `table` | — | Custom agent identity → [`identity`](#identity) |
 | `language` | `table` | — | Model reply language → [`language`](#language) |
+| `server` | `table` | — | `kimi web` / `kimi rc` server defaults → [`server`](#server) |
 
 `planning_model` is a sibling of `default_model`: it names the model the agent switches to while Plan mode is active, and on Plan-mode exit the agent reverts to `default_model`. Its context window must equal `default_model`'s — the switch guard only allows switching to a model whose context window is at least as large as the current model's, so the planning/default pair must match. You can set it in the TUI with [`/planning-model`](../reference/slash-commands.md) or via the web settings.
 
-The following sections cover each of the nested tables in turn: `providers`, `models`, `thinking`, `loop_control`, `background`, `tools`, `image`, `services`, and `permission`.
+The following sections cover each of the nested tables in turn: `providers`, `models`, `thinking`, `loop_control`, `background`, `tools`, `image`, `services`, `permission`, and `server`.
 
 ## `providers`
 
@@ -484,6 +492,42 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `socket` | `string` | unset | Path of a Unix domain socket (macOS/Linux) or Windows named pipe (`\\.\pipe\...`) to listen on instead of stdio; the `--socket` flag overrides this value. See [Socket transport](../reference/kimi-acp.md#socket-transport) |
+
+## `server`
+
+`server` holds the defaults for the `kimi web` / `kimi rc` local server. A bind address, port, or log level you always use can be written once here instead of typed on every command line. The CLI reads the section once at startup, before the socket binds, and resolves every option as **CLI flag > `[server]` key > built-in default**. The **Default** column lists the built-in value, which applies only when the command line and the file both leave the key out.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `host` | `string` | `127.0.0.1` | Bind address. `all`, `*` and `""` all mean the wildcard bind `0.0.0.0` (every interface); a bare `--host` overrides this value with the same wildcard |
+| `port` | `integer` | `58627` | Listen port; `0` asks the operating system for a free port. A busy port is retried with `port + 1` |
+| `log_level` | `string` | `silent` | Server log level: `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`. Any level other than `silent` replaces the full ready banner with logs plus a one-line ready message |
+| `allowed_host` | `array<string>` | — | Extra `Host` header values allowed through the DNS-rebinding check; a leading dot matches a domain suffix (for example `.example.com`). `KIMI_CODE_ALLOWED_HOSTS` is merged with this list rather than replacing it |
+| `web_title` | `string` | — | Browser tab title for this web UI instance; unset falls back to `<workspace dir> \| Kimi Code` |
+| `open` | `boolean` | `true` | Open the web UI in the default browser once the server is ready |
+| `ipv6` | `boolean` | `false` | List the IPv6 interface hints for a wildcard bind. The switch changes what is printed, never what is bound |
+| `insecure_no_tls` | `boolean` | `true` | Allow a non-loopback bind without a TLS-terminating reverse proxy; only relevant for a non-loopback bind. Set it to `false` to require TLS — the `--insecure-no-tls` flag has no negated form and can only loosen this |
+| `allow_remote_shutdown` | `boolean` | `false` | Keep `POST /api/v1/shutdown` enabled on a non-loopback bind |
+| `dangerous_bypass_auth` | `boolean` | `false` | Disable bearer-token auth on every REST and WebSocket route. Anyone who can reach the port then has full access — only for a trusted network or behind your own authenticating proxy |
+| `enable_kimi_oauth` | `boolean` | `false` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI; token/apiKey auth remains the default |
+| `debug_endpoints` | `boolean` | `false` | Mount the `/api/v1/debug/*` introspection routes |
+| `remote_control` | `boolean` | `false` | Expose the web UI through Kimi Remote Control. The experimental gate still applies: this value cannot enable Remote Control on its own, so set `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1` (or `KIMI_CODE_EXPERIMENTAL_FLAG=1`) as well |
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 58627
+log_level = "silent"
+allowed_host = [".example.com"]
+```
+
+A key the list above does not contain is a startup error, not a warning. The error names the key and the file, and the server does not start — `prot = 9000` never falls silently to the default port. `kimi web rotate-token` and the TUI `/web` command print the same message as a stderr warning and continue with the built-in defaults.
+
+A security-relevant key set to `true` in the file prints a red line on stderr when the server starts. The line names the key and the file path, so you can see what the file decided on its own. The keys are `insecure_no_tls`, `allow_remote_shutdown`, `dangerous_bypass_auth`, `enable_kimi_oauth`, and `debug_endpoints`.
+
+An authenticated `POST /api/v1/config` ([Server API: Config](../reference/server-api.md#config)) can also write these keys. That route does not check the request body against the key list. A mistyped key saved through the API surfaces later as the startup error above. Fix or remove the key in `config.toml` before the next start.
+
+This section is read by the `kimi web` command itself, before the socket binds — not by the default `agent-core-v2` engine. The engine passes `[server]` through untouched, so `kimi doctor` on its default route does not check these keys. `kimi web` validates them at startup, where a wrong value takes effect. Edits apply on the next run: a running server keeps the host, port, log level, and auth mode it bound with.
 
 ## `experimental`
 

@@ -23,6 +23,8 @@ Kimi Code CLI 有三个地方可以影响运行参数：配置文件、命令行
 1. **命令行选项**（`-m`、`--plan`、`--yolo` 等）：仅对本次启动生效
 2. **用户配置文件**（`~/.kimi-code/config.toml`）：保存长期偏好
 
+`kimi web` 和 `kimi rc` 的选项在这条链上多加了一层：每个选项同时对应 `config.toml` 里 `[server]` 下的一个键，解析顺序为 `CLI flag` > `[server] 键` > 命令自带的内置默认值。也就是说，flag 仍然优先于文件，文件仍然优先于内置默认；只有完全不传该 flag 时，才由 `[server]` 决定。键名见 [`server`](./config-files.md#server)，flag 见 [`kimi web`](../reference/kimi-command.md#kimi-web)。
+
 少数环境变量明确覆盖特定配置字段，例如 `KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT` 的优先级高于 `[background].keep_alive_on_exit`。这类例外在[环境变量](./env-vars.md)和[配置文件](./config-files.md)对应字段里都有标注。
 
 ::: warning
@@ -73,6 +75,8 @@ Kimi Code CLI 有三个地方可以影响运行参数：配置文件、命令行
 ::: tip
 `--skills-dir` 是一次性替换，只影响本次启动。如需长期追加搜索目录，在 `config.toml` 里写 `extra_skill_dirs`（详见 [Agent Skills](../customization/skills.md)）。
 :::
+
+`kimi web` 和 `kimi rc` 是这些子命令里的例外：它们的每个选项都可以写成 `[server]` 下的一个键，于是 flag 变成叠加在长期配置之上的一次性改动，且 flag 优先。环境变量仍在这条链之外——它不是 `[server]` 键的后备来源，规则同[普通运行参数的优先级](#普通运行参数的优先级)。
 
 ## 典型场景
 

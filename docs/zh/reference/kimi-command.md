@@ -155,7 +155,7 @@ kimi acp
 
 ### `kimi web`
 
-在当前终端前台运行本地 Kimi 服务 —— 同一个进程同时挂载 REST + WebSocket API 与 web UI —— 并在服务就绪后用默认浏览器打开 web UI。命令会一直挂在终端，直到收到 `SIGINT` / `SIGTERM`（如 `Ctrl-C`）时干净退出。
+在当前终端前台运行本地 Kimi 服务 —— 同一个进程同时挂载 REST + WebSocket API 与 web UI —— 并在服务就绪后用默认浏览器打开 web UI。命令会一直挂在终端。收到 `SIGINT` / `SIGTERM`（如 `Ctrl-C`）时，进程会打印停止过程并在限定时间内结束；收到 `SIGHUP` 时会在不重启服务的前提下重新加载 `config.toml`，详见[信号与停止](#信号与停止)。
 
 服务运行时，`GET /openapi.json` 会返回 REST OpenAPI 文档，`GET /asyncapi.json` 会返回本地 WebSocket 协议的 AsyncAPI 文档。用 API 驱动会话的完整流程见[服务 API：用 API 驱动一个会话](./server-api.md#用-api-驱动一个会话)，协议细节见[服务 API](./server-api.md)。
 
@@ -169,29 +169,58 @@ kimi web --port 58628    # 指定绑定端口
 
 | 选项 | 说明 |
 | --- | --- |
-| `--port <port>` | 绑定端口；默认 `58627`；被占用时自动 +1 重试 |
-| `--host [host]` | 绑定地址；缺省 `127.0.0.1`（仅本机），裸 `--host` 绑 `0.0.0.0`（所有网卡） |
+| `--port <port>` | 绑定端口；内置默认 `58627`；被占用时自动 +1 重试 |
+| `--host [host]` | 绑定地址；缺省 `127.0.0.1`（仅本机），裸 `--host` 绑 `0.0.0.0`（所有网卡），`--host <host>` 绑定指定地址 |
 | `--allowed-host <host...>` | DNS 重绑定检查额外允许的 Host 头，可重复或逗号分隔 |
-| `--log-level <level>` | 按所选级别开启服务日志；默认不输出 |
-| `--debug-endpoints` | 挂载 `/api/v1/debug/*` 调试路由（默认关闭） |
+| `--ipv6` | 通配绑定时一并列出 IPv6 网卡提示；默认关闭。只改变打印内容，不改变绑定内容 |
+| `--no-ipv6` | 不列出 IPv6 网卡提示（默认） |
+| `--insecure-no-tls` | 允许非 loopback 绑定在没有 TLS 反向代理的情况下运行；仅对非 loopback 绑定有意义 |
+| `--allow-remote-shutdown` | 非 loopback 绑定时保留 `POST /api/v1/shutdown`；默认该路由返回 404 |
+| `--no-allow-remote-shutdown` | 非 loopback 绑定时关闭 `POST /api/v1/shutdown` |
 | `--dangerous-bypass-auth` | 关闭所有 REST 与 WebSocket 路由的 bearer token 鉴权，使 web UI 无需 token 即可连接；仅用于可信网络或自有鉴权代理之后 |
+| `--no-dangerous-bypass-auth` | 保持开启 bearer token 鉴权 |
 | `--enable-kimi-oauth` | 在 web UI 和 TUI 中启用 kimi.com/kimi.ai 的 OAuth 设备码登录（默认关闭；token/apiKey 鉴权仍为默认） |
+| `--no-enable-kimi-oauth` | 保持关闭 kimi.com/kimi.ai 的 OAuth 登录 |
+| `--log-level <level>` | 按所选级别开启服务日志（`fatal`、`error`、`warn`、`info`、`debug`、`trace`、`silent`）；默认不输出 |
+| `--debug-endpoints` | 挂载 `/api/v1/debug/*` 调试路由（默认关闭） |
+| `--no-debug-endpoints` | 不挂载 `/api/v1/debug/*` 路由 |
 | `--web-title <title>` | 自定义 web UI 的浏览器标签页标题；默认为工作区目录名 |
+| `--rc`、`--remote-control` | 通过 Kimi Remote Control 暴露 web UI（实验功能） |
+| `--no-rc`、`--no-remote-control` | 不通过 Kimi Remote Control 暴露 web UI |
+| `--open` | 服务就绪后用默认浏览器打开 web UI（默认） |
 | `--no-open` | 就绪后不自动打开浏览器 |
 
-`kimi web` 默认只绑定本机 loopback 地址，并在启动横幅中打印 bearer token；web UI 通过 URL 的 `#token=` 片段自动完成鉴权。
+上表的每个选项同时从 `config.toml` 的 `[server]` 段落读取；没有传对应 flag 时，直接采用文件里的值。优先级为 `CLI flag` > `[server]` > 内置默认。`[server]` 下出现本命令不认识的键，会在启动时按键名报错，而不是给出警告。字段列表与类型见 [`server`](../configuration/config-files.md#server)。
+
+当文件把某个安全相关的键设为 `true`、而命令行没有传对应 flag 时——`dangerous_bypass_auth`、`allow_remote_shutdown`、`debug_endpoints`、`enable_kimi_oauth`、`insecure_no_tls`——服务启动时会打印到 stderr，并点名这个键来自哪个文件。
+
+Remote Control 仍是实验功能，`[server] remote_control = true` 无法单独开启它：需要先设置 `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1`（或 `KIMI_CODE_EXPERIMENTAL_FLAG=1`），否则命令会报错退出。只有该开关打开时，`kimi web --help` 才会列出 `--rc` 这组 flag。
+
+上表的开关型 flag 中，只有 `--insecure-no-tls` 没有反向形式：它只能放松 TLS 要求。需要重新强制 TLS 时，在 `[server]` 下写 `insecure_no_tls = false`。
+
+`kimi web` 默认只绑定本机 loopback 地址，并在启动横幅中打印 bearer token；web UI 通过 URL 的 `#token=` 片段自动完成鉴权。绑定 IPv6 地址时，打印出的地址会带方括号，因此 `--host ::1` 得到 `http://[::1]:<port>/`。
 
 ::: info 提示
 `kimi server` 命令树已废弃：任何 `kimi server …` 调用（含全部旧子命令）只会打印弃用提示并以退出码 1 结束，请改用 `kimi web`。唯一的例外是 `kimi server kill`，它仍然可用，仅用于停止 0.28.0 之前版本启动的服务。该提示将在 Kimi Code 下个大版本移除。
 :::
 
 ::: danger 警告
-`--dangerous-bypass-auth` 会彻底关闭鉴权。任何能访问该端口的人都能完全控制你的会话、文件系统和 shell。请仅在可信网络或自有鉴权反向代理之后使用，用完后按 `Ctrl+C` 停止服务。
+`--dangerous-bypass-auth` 会彻底关闭鉴权。任何能访问该端口的人都能完全控制你的会话、文件系统和 shell。请仅在可信网络或自有鉴权反向代理之后使用，用完后按 `Ctrl+C` 停止服务——进程会报告停止过程，并以退出码 `130` 结束。
 :::
+
+#### 信号与停止
+
+`SIGINT` 和 `SIGTERM` 会结束本次运行。服务向 stderr 打印 `Shutting down (SIGINT)…`（或 `SIGTERM`），随后关闭监听端口和连接、补完欠下的收尾工作，并以该信号自身的退出码结束：`SIGINT` 为 `130`，`SIGTERM` 为 `143`。这些数字遵循 POSIX 的 `128 + 信号编号` 约定，因此外部管理器能把"被停止"和"崩溃退出"区分开。Windows 上 `Ctrl-C` 同样会触发 `SIGINT`，所以 `130` 在那里也成立；本节其余内容请以 macOS 与 Linux 为准，因为 Windows 无法投递 `SIGTERM`，其 `SIGHUP` 表示控制台正在关闭——约 10 秒后进程一律会被终止。
+
+收尾过程有明确上限。若 12 秒内没有完成，进程会向 stderr 打印 `Force-exiting after 12000ms`，并用同一个信号退出码结束。在此之前再次发出 `SIGINT` 或 `SIGTERM`，则不再等待，立即结束进程。若信号在服务仍在启动时就到达，进程会打印 `Startup aborted (SIGINT)`，并以同一个退出码结束。
+
+`SIGHUP` 会在原地重新加载 `config.toml`，不会重启服务。命令只打印一行结果，说明发生了哪些变化，例如 `config reloaded: providers, thinking`，或 `config reloaded: no changes`。修改后的文件格式有问题时，命令打印 `config reload failed: <message> — kept previous values; config writes are blocked until the file is fixed`，并继续用已加载的配置对外服务。
+
+`[server]` 自身的键不会被重新应用，因为服务在绑定端口时就已决定了这些值。重新加载后，命令会把文件与运行中的取值逐项比较，并指名需要重启才能生效的键，输出形如 `restart required for: port`。引擎本身也会监听 `config.toml`，保存后不久就会自行应用改动，因此刚存完文件就发 `SIGHUP`，通常会先报 `no changes`、再跟上这一行。只改动 `[server]` 的编辑永远是这样的输出——这是预期结果，不是失败。详见 [`server`](../configuration/config-files.md#server)。
 
 #### `kimi server kill`
 
-已废弃——仅用于停止 0.28.0 之前的 Kimi Code 版本启动的服务。那些版本可能在后台遗留服务进程，记录在 legacy 单实例锁文件 `~/.kimi-code/server/lock` 中；该命令先请求 `POST /api/v1/shutdown` 优雅退出，再对锁中记录的 pid 发 SIGTERM、必要时升级为 SIGKILL，并在确认进程退出后删除锁文件。`kimi web` 启动的服务在前台运行，直接用 `Ctrl+C` 停止即可。
+已废弃——仅用于停止 0.28.0 之前的 Kimi Code 版本启动的服务。那些版本可能在后台遗留服务进程，记录在 legacy 单实例锁文件 `~/.kimi-code/server/lock` 中；该命令先请求 `POST /api/v1/shutdown` 优雅退出，再对锁中记录的 pid 发 SIGTERM、必要时升级为 SIGKILL，并在确认进程退出后删除锁文件。`kimi web` 启动的服务在前台运行，且不会写入这个锁文件——直接用 `Ctrl+C` 停止即可。
 
 #### `kimi web rotate-token`
 

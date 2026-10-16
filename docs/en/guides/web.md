@@ -24,13 +24,15 @@ If you're already in the CLI, you can also type `/web` to hand the current sessi
 The startup banner prints the access URL — if the browser doesn't open by itself, copy this URL and open it manually:
 
 ```text
-Local:   http://127.0.0.1:58627/#token=...
-Token:   ...
-Stop:    Ctrl+C
+  Local:    http://127.0.0.1:58627/#token=...
+  Network:  off  use --host to enable
+  Token:    ...
+  Logs:     off  use --log-level info to enable
+  Stop:     Ctrl+C
 ```
 
 ::: warning
-The `#token=` fragment is the access credential — don't share it. Stop the server with `Ctrl+C` in the terminal.
+The `#token=` fragment is the access credential — don't share it. Stop the server with `Ctrl+C` in the terminal: on macOS and Linux the process reports the shutdown, finishes within 12 seconds at the latest, and exits with code `130` (an exit code is the status number a program returns when it finishes; 0 means success). `kill` (SIGTERM) behaves the same and exits with `143`. See [Signals and reloading](#signals-and-reloading).
 :::
 </div>
 
@@ -38,14 +40,25 @@ The `#token=` fragment is the access credential — don't share it. Stop the ser
 
 | Option | Description |
 | --- | --- |
-| `--port <port>` | Bind port; defaults to `58627`, auto-increments when taken |
+| `--port <port>` | Bind port; the built-in default is `58627`, auto-increments when taken, and `[server] port` in `config.toml` decides it when no flag is passed |
 | `--host [host]` | Let phones, tablets, or other computers on the same LAN access the web address; you can also specify an IP, e.g. `--host 192.168.1.10` |
+| `--ipv6` | Also list the IPv6 interface hints for a wildcard bind; off by default — it changes what the banner prints, never what is bound |
 | `--no-open` | Don't open the browser when ready |
 | `--log-level <level>` | Enable server logs at the given level; off by default |
 
+Every option has a matching key under `[server]` in `config.toml`, so a preferred bind can be saved instead of retyped; the precedence is `CLI flag` > `[server]` > built-in default. See [the `server` section](../configuration/config-files.md#server).
+
+### Signals and reloading
+
+`Ctrl+C` (SIGINT) and `kill` (SIGTERM) stop the server the same way: the terminal prints `Shutting down (SIGINT)…` (or `SIGTERM`), the process closes its socket and connections, and it exits with the signal's own code — `130` for SIGINT, `143` for SIGTERM. The wait is bounded: if cleanup has not finished after 12 seconds, the process says so on stderr and force-exits with the same code. A second signal of either kind stops the waiting and kills the process immediately.
+
+`SIGHUP` reloads `config.toml` in place — it does not restart the server. The terminal prints one line with what changed (`config reloaded: providers, thinking`, or `config reloaded: no changes`); a broken file prints the error, the server keeps running on the previous values, and it will not write to the config until the file is valid again. Saving the file already hot-reloads it a moment later, so a reload taken right after saving usually reports `no changes` — the value of `SIGHUP` is that explicit confirmation, plus a `restart required for: <keys>` line naming any `[server]` key that differs from the running values. All thirteen `[server]` keys are consumed at startup: host, port, log level, and the auth switches are decided when the socket binds and cannot change while the server runs.
+
+This is macOS and Linux behavior: Windows does not deliver SIGTERM, and its SIGHUP means "the console is closing" — the process is terminated about 10 seconds later regardless. For the full signal contract, see [kimi command: Signals and shutdown](../reference/kimi-command.md#signals-and-shutdown).
+
 ## Relationship with the CLI
 
-The web UI and the CLI share the same login state, configuration (`config.toml`), and session data.
+The web UI and the CLI share the same login state, configuration (`config.toml`, including the `[server]` section that holds the `kimi web` defaults), and session data.
 
 Note that the web UI supports only a subset of the CLI's slash commands — common ones like `/new`, `/goal`, and `/compact` all work. Everything else usually has a point-and-click equivalent in the UI (the settings page, the model picker, the account menu, the task panel).
 
@@ -62,7 +75,7 @@ How the two sides compare:
 | Files and changes | ✓ | ✓ | Web has a changed-files summary card and per-file diffs |
 | Settings | ✓ | ✓ | Web adds a settings UI (providers, account & usage, Lab experiments) |
 | Global search | — | ✓ | Web searches across sessions and workspaces |
-| Mobile layout | — | ✓ | With LAN sharing on (`--host`), it works in phone browsers on the same network |
+| Mobile layout | — | ✓ | With LAN sharing on (`--host`), it works in phone browsers on the same network; the banner lists the IPv4 addresses to use |
 
 </div>
 
@@ -87,7 +100,7 @@ Run `kimi web rotate-token` to generate a new token, then open the new banner UR
 
 ### Other devices on the same Wi-Fi can't connect
 
-Make sure you started with `--host` (bare is fine), and use the LAN URL from the banner (like `http://192.168.x.x:58627/#token=...`). If it still fails, check that the machine's firewall allows the port, and that both devices are really on the same network segment — guest Wi-Fi, VPNs, and switching to a 4G/5G hotspot all isolate devices.
+Make sure you started with `--host` (bare is fine), and use the LAN URL from the banner (like `http://192.168.x.x:58627/#token=...`). A bare `--host` binds every interface over IPv4 only, so the banner's `Network:` lines are IPv4 addresses; pass `--ipv6` (or set `[server] ipv6 = true`) to have it list the IPv6 ones too — that adds hints, it never changes what is bound. If it still fails, check that the machine's firewall allows the port, and that both devices are really on the same network segment — guest Wi-Fi, VPNs, and switching to a 4G/5G hotspot all isolate devices.
 
 ## Next steps
 
