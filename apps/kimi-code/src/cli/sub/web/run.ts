@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { createServerLogger, startServer, type ServerLogger } from '@moonshot-ai/kap-server';
+import { resolveConfigPath, resolveKimiHome } from '@moonshot-ai/kimi-code-sdk';
 import {
   flushTelemetrySync,
   shutdownTelemetry,
@@ -55,6 +56,7 @@ import {
   type RemoteControlOptions,
   type RemoteControlStatus,
 } from './remote-control';
+import { readServerConfig, type ServerConfigDefaults } from './server-config';
 import {
   DEFAULT_FOREGROUND_LOG_LEVEL,
   DEFAULT_LAN_HOST,
@@ -69,6 +71,34 @@ import {
 
 const WEB_ASSETS_DIR = 'dist-web';
 
+/** The `[server]` keys that are security-relevant when their value is `true`. */
+type SecurityConfigKey =
+  | 'dangerousBypassAuth'
+  | 'allowRemoteShutdown'
+  | 'debugEndpoints'
+  | 'enableKimiOauth'
+  | 'insecureNoTls';
+
+/** Key as the resolver reads it, and as the user wrote it in the file. */
+const SECURITY_CONFIG_KEYS: readonly (readonly [SecurityConfigKey, string])[] = [
+  ['dangerousBypassAuth', 'dangerous_bypass_auth'],
+  ['allowRemoteShutdown', 'allow_remote_shutdown'],
+  ['debugEndpoints', 'debug_endpoints'],
+  ['enableKimiOauth', 'enable_kimi_oauth'],
+  ['insecureNoTls', 'insecure_no_tls'],
+];
+
+/**
+ * The config story, stated once instead of in eleven option descriptions. The
+ * options no longer carry commander defaults (that would outrank the file), so
+ * help has to say where a value comes from when no flag was passed.
+ */
+const SERVER_CONFIG_HELP = `
+Configuration: every option above also reads from the [server] section of
+<KIMI_CODE_HOME>/config.toml. Precedence is CLI > [server] > built-in default,
+and a security-relevant value taken from the file is reported when the server
+starts. A key this command does not know is a startup error, not a warning.`;
+
 /**
  * Minimal surface `runServerInProcess` needs from the server. kap-server's
  * `RunningServer` is adapted to it (it returns `{ host, port, close }`
@@ -78,11 +108,6 @@ interface RoutedServer {
   readonly address: string;
   readonly logger: ServerLogger;
   close(): Promise<void>;
-}
-
-export interface WebCliOptions extends ServerCliOptions {
-  open?: boolean;
-  remoteControl?: boolean;
 }
 
 export interface StartForegroundHooks {
@@ -128,18 +153,23 @@ export function buildWebUrl(origin: string, token: string): string {
   return buildOpenableUrl(origin, token);
 }
 
-/** Build the `web` command, mounting the runner action on `cmd` itself. */
+/**
+ * Build the `web` command, mounting the runner action on `cmd` itself.
+ *
+ * No option carries a commander default: a seeded default is indistinguishable
+ * from a flag the user typed, and it would outrank `[server]` forever. Each
+ * boolean that the file could turn on therefore needs its negated counterpart —
+ * registered AFTER the positive flag, which is what keeps "not passed" a state
+ * commander can express.
+ */
 export function buildWebCommand(
   cmd: Command,
   opts: { forceRemoteControl?: boolean } = {},
 ): Command {
   const forceRemoteControl = opts.forceRemoteControl === true;
+  const hideRemoteControlHelp = !isRemoteControlEnabled();
   const withServerOptions = cmd
-    .option(
-      '--port <port>',
-      `Bind port (default ${DEFAULT_SERVER_PORT})`,
-      String(DEFAULT_SERVER_PORT),
-    )
+    .option('--port <port>', `Bind port (default ${DEFAULT_SERVER_PORT})`)
     .option(
       '--host [host]',
       `Bind host. Omit to bind ${DEFAULT_SERVER_HOST} (this machine only); pass --host to bind ${DEFAULT_LAN_HOST} (all interfaces), or --host <host> for a specific host. The bearer token is printed at startup.`,
@@ -149,24 +179,40 @@ export function buildWebCommand(
       'Extra Host header value to allow through the DNS-rebinding check. Repeat or comma-separate; a leading dot matches a domain suffix (e.g. .example.com).',
     )
     .option(
+      '--ipv6',
+      'Also list the IPv6 interface hints for a wildcard bind. OFF by default; it changes what is printed, never what is bound.',
+    )
+    .option('--no-ipv6', 'Do not list the IPv6 interface hints (default).')
+    // The one security key with no negated counterpart: this flag can only ever
+    // turn the refusal off, and `[server] insecure_no_tls = false` is the way to
+    // require TLS again.
+    .option(
       '--insecure-no-tls',
       'Allow a non-loopback bind without a TLS-terminating reverse proxy. Defaults to true; only relevant for non-loopback binds.',
-      true,
     )
     .option(
       '--allow-remote-shutdown',
       'On a non-loopback bind, keep POST /api/v1/shutdown enabled (default: route is disabled → 404).',
-      false,
+    )
+    .option(
+      '--no-allow-remote-shutdown',
+      'Disable POST /api/v1/shutdown on a non-loopback bind, overriding [server] allow_remote_shutdown.',
     )
     .option(
       '--dangerous-bypass-auth',
       'Disable bearer-token auth on every REST and WebSocket route, and advertise it via /api/v1/meta so the web UI connects without a token. Only use on a trusted network or behind your own authenticating proxy.',
-      false,
+    )
+    .option(
+      '--no-dangerous-bypass-auth',
+      'Keep bearer-token auth enabled, overriding [server] dangerous_bypass_auth.',
     )
     .option(
       '--enable-kimi-oauth',
       'Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI. Disabled by default; token/apiKey auth remains the default.',
-      false,
+    )
+    .option(
+      '--no-enable-kimi-oauth',
+      'Keep kimi.com/kimi.ai OAuth login disabled, overriding [server] enable_kimi_oauth.',
     )
     .option(
       '--log-level <level>',
@@ -175,25 +221,40 @@ export function buildWebCommand(
     .option(
       '--debug-endpoints',
       'Mount /api/v1/debug/* routes for test introspection. OFF by default; production callers leave this unset.',
-      false,
+    )
+    .option(
+      '--no-debug-endpoints',
+      'Do not mount the /api/v1/debug/* routes, overriding [server] debug_endpoints.',
     )
     .option(
       '--web-title <title>',
       'Set a custom browser tab title for this web UI instance (default: "<workspace dir> | Kimi Code").',
     );
   if (!forceRemoteControl) {
-    withServerOptions.addOption(
-      new Option(
-        '--rc, --remote-control',
-        'Expose the web UI through Kimi Remote Control (experimental).',
+    const remoteControlOffDescription =
+      'Do not expose the web UI through Kimi Remote Control, overriding [server] remote_control.';
+    withServerOptions
+      .addOption(
+        new Option(
+          '--rc, --remote-control',
+          'Expose the web UI through Kimi Remote Control (experimental).',
+        ).hideHelp(hideRemoteControlHelp),
       )
-        .default(false)
-        .hideHelp(!isRemoteControlEnabled()),
-    );
+      // Both flags are spelled out: a lone `--no-rc` would take its key from
+      // the long form and write `rc`, so the value would never reach the runner.
+      // `hideHelp` is per-Option, so it is applied to each polarity.
+      .addOption(
+        new Option(
+          '--no-rc, --no-remote-control',
+          remoteControlOffDescription,
+        ).hideHelp(hideRemoteControlHelp),
+      );
   }
   return withServerOptions
-    .option('--no-open', 'Do not open the web UI in the default browser.', true)
-    .action(async (opts: WebCliOptions) => {
+    .option('--open', 'Open the web UI in the default browser once the server is ready (default).')
+    .option('--no-open', 'Do not open the web UI in the default browser.')
+    .addHelpText('after', SERVER_CONFIG_HELP)
+    .action(async (opts: ServerCliOptions) => {
       try {
         await handleWebCommand(
           forceRemoteControl ? { ...opts, remoteControl: true } : opts,
@@ -205,20 +266,35 @@ export function buildWebCommand(
     });
 }
 
+/**
+ * `kimi web` — parse, merge with `[server]`, warn about what the file decided,
+ * and run the server. The `[server]` section is read here (once), because the
+ * options the runner consumes are decided once too: a `[server]` typo is a hard
+ * error, and the action's `catch` turns it into exit 1.
+ */
 export async function handleWebCommand(
-  opts: WebCliOptions,
+  opts: ServerCliOptions,
   deps: WebCommandDeps = DEFAULT_WEB_COMMAND_DEPS,
 ): Promise<void> {
-  const parsed = parseServerOptions(opts);
-  if (opts.remoteControl === true && !isRemoteControlEnabled()) {
+  const serverConfig = readServerConfig();
+  // The reader hands these over instead of printing them, so this is the only
+  // place they get said — printing the reader's own rejection too would
+  // report one problem twice.
+  for (const warning of serverConfig.warnings) deps.stderr.write(`warning: ${warning}\n`);
+  const parsed = parseServerOptions(opts, serverConfig.defaults);
+  for (const line of formatConfigProvenanceLines(opts, serverConfig.defaults)) {
+    deps.stderr.write(`${line}\n`);
+  }
+  if (parsed.remoteControl && !isRemoteControlEnabled()) {
     throw new Error(
-      `--remote-control is experimental: set ${REMOTE_CONTROL_FLAG_ENV}=1 (or KIMI_CODE_EXPERIMENTAL_FLAG=1) to enable it.`,
+      `--remote-control is experimental: set ${REMOTE_CONTROL_FLAG_ENV}=1 (or KIMI_CODE_EXPERIMENTAL_FLAG=1) to enable it; ` +
+        'the env gate also covers [server] remote_control, which cannot enable it on its own.',
     );
   }
-  if (opts.remoteControl === true && parsed.dangerousBypassAuth) {
+  if (parsed.remoteControl && parsed.dangerousBypassAuth) {
     throw new Error('--remote-control cannot be combined with --dangerous-bypass-auth.');
   }
-  if (opts.remoteControl === true && !isLoopbackHost(parsed.host)) {
+  if (parsed.remoteControl && !isLoopbackHost(parsed.host)) {
     throw new Error('--remote-control requires a loopback host.');
   }
   const run = deps.startServerForeground ?? startServerForeground;
@@ -233,7 +309,7 @@ export async function handleWebCommand(
       // token line when unavailable. When auth is bypassed, the token is
       // meaningless and is intentionally NOT shown or carried in the URL.
       const token = parsed.dangerousBypassAuth ? undefined : deps.resolveToken?.();
-      if (opts.remoteControl === true) {
+      if (parsed.remoteControl) {
         if (token === undefined) throw new Error('Unable to read the local server token.');
         const dataDir = getDataDir();
         let outputReady = false;
@@ -262,7 +338,7 @@ export async function handleWebCommand(
         );
         outputReady = true;
         for (const line of pendingStatuses) deps.stdout.write(line);
-        if (opts.open === true) deps.openUrl(remoteControl.url);
+        if (parsed.open) deps.openUrl(remoteControl.url);
         return;
       }
       deps.stdout.write(
@@ -274,7 +350,7 @@ export async function handleWebCommand(
             })
           : formatReadyLine(origin, token, parsed.dangerousBypassAuth),
       );
-      if (opts.open === true) {
+      if (parsed.open) {
         deps.openUrl(token !== undefined ? buildWebUrl(origin, token) : origin);
       }
     },
@@ -308,6 +384,34 @@ function formatDangerNoticeLines(): string[] {
     `  ${danger('Anyone who can reach this port gets full access. Only continue if you understand the risk.')}`,
     `  ${danger('If you are unsure, stop this process now with ')}${dangerBold('Ctrl+C')}${danger('.')}`,
   ];
+}
+
+/**
+ * One red line per security-relevant `[server]` key the file set to `true` and
+ * the command line did not. A value the user never typed still widens the
+ * server, so it is named with the file it came from — that is the line to find
+ * and delete.
+ */
+function formatConfigProvenanceLines(
+  opts: ServerCliOptions,
+  defaults: ServerConfigDefaults,
+): string[] {
+  const configSourced = SECURITY_CONFIG_KEYS.filter(
+    ([key]) => opts[key] === undefined && defaults[key] === true,
+  ).map(([, tomlKey]) => tomlKey);
+  if (configSourced.length === 0) return [];
+
+  // The same resolution `readServerConfig` used, so the notice names the file
+  // that was actually read.
+  const configPath = resolveConfigPath({ homeDir: resolveKimiHome() });
+  const danger = (text: string): string => chalk.hex(darkColors.error)(text);
+  const dangerBold = (text: string): string => chalk.bold.hex(darkColors.error)(text);
+  return configSourced.map(
+    (tomlKey) =>
+      `  ${dangerBold('⚠ security setting from config:')} ${danger(
+        `[server] ${tomlKey} = true comes from ${configPath}, not from the command line.`,
+      )}`,
+  );
 }
 
 /** The process and stdio a real foreground run reports termination through. */

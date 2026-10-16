@@ -13,7 +13,12 @@ import {
   inspectRemoteControlLock,
 } from '#/cli/sub/web/remote-control-lock';
 import { formatReadyBanner, startServerForeground } from '#/cli/sub/web/run';
-import { parseServerOptions, tryResolveServerToken } from '#/cli/sub/web/shared';
+import { tryReadServerConfig } from '#/cli/sub/web/server-config';
+import {
+  parseServerOptions,
+  tryResolveServerToken,
+  type ParsedServerOptions,
+} from '#/cli/sub/web/shared';
 import { openUrl } from '#/utils/open-url';
 import { getDataDir } from '#/utils/paths';
 import { generateRemoteControlQr } from '#/utils/remote-control-qr';
@@ -22,6 +27,22 @@ import { NO_ACTIVE_SESSION_MESSAGE } from '../constant/kimi-tui';
 import { darkColors } from '../theme/colors';
 import { formatErrorMessage } from '../utils/event-payload';
 import type { SlashCommandHost } from './dispatch';
+
+/**
+ * Server options for a TUI-initiated server. There are no CLI flags here, so
+ * every value comes from `[server]` or the built-in default — which is what
+ * keeps `/web` and `/rc` from silently diverging from `kimi web`.
+ *
+ * The lenient reader is deliberate: both call sites sit outside their `try`
+ * blocks, so a `[server]` typo thrown here would escape into the exit-foreground
+ * machinery after the TUI has already stopped. It warns on stderr instead, and
+ * stderr is visible because the terminal has been restored by then.
+ */
+function parseTuiServerOptions(): ParsedServerOptions {
+  const { defaults, warnings } = tryReadServerConfig();
+  for (const warning of warnings) process.stderr.write(`warning: ${warning}\n`);
+  return parseServerOptions({}, defaults);
+}
 
 /**
  * `/web` — hand the current session off to the browser.
@@ -53,7 +74,7 @@ export async function handleRemoteControlCommand(host: SlashCommandHost): Promis
   }
 
   host.setExitForegroundTask(async () => {
-    const options = parseServerOptions({});
+    const options = parseTuiServerOptions();
     let remoteControl: Awaited<ReturnType<typeof startRemoteControl>> | undefined;
     try {
       await startServerForeground(options, {
@@ -110,7 +131,7 @@ export async function handleRemoteControlCommand(host: SlashCommandHost): Promis
  */
 function startNewServerAfterExit(host: SlashCommandHost, sessionId: string): void {
   host.setExitForegroundTask(async () => {
-    const options = parseServerOptions({});
+    const options = parseTuiServerOptions();
     try {
       await startServerForeground(options, {
         onReady: (origin) => {

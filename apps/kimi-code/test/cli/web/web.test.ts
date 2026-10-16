@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import chalk, { Chalk } from 'chalk';
 import { Command } from 'commander';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetCapabilitiesCache, setCapabilities } from '@moonshot-ai/pi-tui';
 
@@ -23,7 +23,12 @@ import { CLI_SHUTDOWN_TIMEOUT_MS, WEB_SHUTDOWN_FORCE_EXIT_MS } from '#/constant/
 import { registerWebCommand } from '#/cli/sub/web';
 import type { LegacyKillDeps } from '#/cli/sub/web/legacy-kill';
 import type { WebCommandDeps } from '#/cli/sub/web/run';
-import { parseServerOptions, type ParsedServerOptions } from '#/cli/sub/web/shared';
+import type { ServerConfigDefaults } from '#/cli/sub/web/server-config';
+import {
+  parseServerOptions,
+  type ParsedServerOptions,
+  type ServerCliOptions,
+} from '#/cli/sub/web/shared';
 import { darkColors } from '#/tui/theme/colors';
 
 // Boundary stubs for the termination tests: `startServer` binds a real port and
@@ -68,6 +73,24 @@ function makeProgram(): Command {
   const program = new Command('kimi').exitOverride();
   registerWebCommand(program);
   return program;
+}
+
+/**
+ * Render a command's full `--help` text. `helpInformation()` returns only the
+ * built-in block — the text added by `addHelpText()` is emitted by
+ * `outputHelp()` (commander 13.1.0 `lib/command.js:2341-2352` vs `:2416`) — so
+ * asserting the epilogue has to capture the stream the real `--help` writes to.
+ */
+function renderHelp(commandName: string): string {
+  const command = makeProgram().commands.find((c) => c.name() === commandName)!;
+  let out = '';
+  command.configureOutput({
+    writeOut: (chunk) => {
+      out += chunk;
+    },
+  });
+  command.outputHelp();
+  return out;
 }
 
 type ForegroundRunner = NonNullable<WebCommandDeps['startServerForeground']>;
@@ -144,6 +167,27 @@ function makeTermination() {
   return { proc, io, targets: { proc, stdout: io.stdout, stderr: io.stderr } };
 }
 
+/**
+ * `handleWebCommand` reads `[server]` from `<KIMI_CODE_HOME>/config.toml` and
+ * `kimi rc` runs it for real, so the whole file needs a home of its own:
+ * a stray `[server]` key in the developer's own config would otherwise change
+ * (or fail) suites that never configured a server. Suites that need a specific
+ * config write their own `config.toml` into a directory of their own, whose
+ * `beforeEach` runs after this one and whose `afterEach` restores this value.
+ */
+const isolatedHome = mkdtempSync(join(tmpdir(), 'kimi-web-test-home-'));
+const realHome = process.env['KIMI_CODE_HOME'];
+process.env['KIMI_CODE_HOME'] = isolatedHome;
+
+afterAll(() => {
+  if (realHome === undefined) {
+    delete process.env['KIMI_CODE_HOME'];
+  } else {
+    process.env['KIMI_CODE_HOME'] = realHome;
+  }
+  rmSync(isolatedHome, { recursive: true, force: true });
+});
+
 /** A `RunningServer` surface with only what `runServerInProcess` consumes. */
 function startedServer(close?: () => Promise<unknown>) {
   return { host: '127.0.0.1', port: 58627, close: vi.fn(close ?? (async () => {})) };
@@ -188,14 +232,31 @@ describe('kimi web', () => {
     expect(longs).toContain('--allowed-host');
     expect(longs).toContain('--insecure-no-tls');
     expect(longs).toContain('--allow-remote-shutdown');
+    expect(longs).toContain('--no-allow-remote-shutdown');
     expect(longs).toContain('--dangerous-bypass-auth');
+    expect(longs).toContain('--no-dangerous-bypass-auth');
+    expect(longs).toContain('--enable-kimi-oauth');
+    expect(longs).toContain('--no-enable-kimi-oauth');
     expect(longs).toContain('--log-level');
     expect(longs).toContain('--debug-endpoints');
+    expect(longs).toContain('--no-debug-endpoints');
+    expect(longs).toContain('--ipv6');
+    expect(longs).toContain('--no-ipv6');
     expect(longs).toContain('--web-title');
     const remoteControl = web!.options.find((option) => option.long === '--remote-control');
     expect(remoteControl?.short).toBe('--rc');
-    // web opens the browser by default → the option is the negative --no-open.
+    // The negated pair is the two-flag spelling, so its `long` is
+    // `--no-remote-control` and the key it writes is `remoteControl`. A lone
+    // `--no-rc` would derive the key from `long`, write `rc`, and never reach
+    // the runner.
+    const noRemoteControl = web!.options.find((option) => option.long === '--no-remote-control');
+    expect(noRemoteControl?.short).toBe('--no-rc');
+    // web opens the browser by default → both polarities are declared, so
+    // `[server] open` can be overridden in either direction.
+    expect(longs).toContain('--open');
     expect(longs).toContain('--no-open');
+    // `--insecure-no-tls` is the one security key with no negated counterpart.
+    expect(longs).not.toContain('--no-insecure-no-tls');
     // The background/daemon era flags are gone: the server always runs in the
     // foreground.
     expect(longs).not.toContain('--foreground');
@@ -203,6 +264,63 @@ describe('kimi web', () => {
     expect(longs).not.toContain('--daemon');
     expect(longs).not.toContain('--idle-grace-ms');
     expect(longs).not.toContain('--allow-remote-terminals');
+  });
+
+  it('leaves every flag that has a config default unseeded when it is not passed', () => {
+    // The registration-order guard: a positive boolean flag must be declared
+    // before its `--no-` counterpart, or commander seeds the key with source
+    // `default` and "not passed" becomes inexpressible — and "not passed" is
+    // the only state that lets `[server]` and the built-in be reached.
+    const web = makeProgram().commands.find((c) => c.name() === 'web')!;
+    web.parseOptions([]);
+
+    expect(web.opts()).toEqual({});
+  });
+
+  it.each([
+    ['--open', { open: true }],
+    ['--no-open', { open: false }],
+    ['--ipv6', { ipv6: true }],
+    ['--no-ipv6', { ipv6: false }],
+    ['--dangerous-bypass-auth', { dangerousBypassAuth: true }],
+    ['--no-dangerous-bypass-auth', { dangerousBypassAuth: false }],
+    ['--allow-remote-shutdown', { allowRemoteShutdown: true }],
+    ['--no-allow-remote-shutdown', { allowRemoteShutdown: false }],
+    ['--enable-kimi-oauth', { enableKimiOauth: true }],
+    ['--no-enable-kimi-oauth', { enableKimiOauth: false }],
+    ['--debug-endpoints', { debugEndpoints: true }],
+    ['--no-debug-endpoints', { debugEndpoints: false }],
+    ['--rc', { remoteControl: true }],
+    ['--no-rc', { remoteControl: false }],
+    ['--remote-control', { remoteControl: true }],
+    ['--no-remote-control', { remoteControl: false }],
+  ] as const)('maps %s onto the option key the resolver reads', (flag, expected) => {
+    const web = makeProgram().commands.find((c) => c.name() === 'web')!;
+    web.parseOptions([flag]);
+
+    expect(web.opts()).toEqual(expected);
+  });
+
+  it('names the [server] section and the precedence order in the help epilogue', () => {
+    // One epilogue carries the config story for all thirteen options instead of
+    // eleven duplicated "(default: …)" mentions.
+    const normalized = renderHelp('web').replaceAll(/\s+/g, ' ');
+
+    expect(normalized).toContain('[server]');
+    expect(normalized).toContain('CLI > [server] > built-in');
+    expect(normalized).toContain('--open');
+    // Commander only prints the `(default: …)` suffix for a seeded default, so
+    // its absence is the proof that none of them survived. The prose that still
+    // says "default" is the option's own description.
+    expect(normalized).not.toContain('(default: 58627)');
+    expect(normalized).not.toContain('(default: true)');
+    expect(normalized).not.toContain('(default: false)');
+  });
+
+  it('repeats the same epilogue on `kimi rc`', () => {
+    // Both commands come out of `buildWebCommand`, so neither can document a
+    // config source the other one ignores.
+    expect(renderHelp('rc')).toContain('CLI > [server] > built-in');
   });
 
   it('routes `kimi server` and any legacy subcommand to a deprecation notice', async () => {
@@ -524,20 +642,28 @@ describe('`kimi web` opens the browser', () => {
         { remoteControl: true, open: false },
         { startServerForeground: runner, openUrl: vi.fn(), stdout, stderr },
       ),
-    ).rejects.toThrow('--remote-control is experimental:');
+    ).rejects.toThrow('is experimental: set KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1');
   });
 
   it('hides --remote-control from help unless the experimental flag is on', () => {
-    const remoteControlOption = () =>
+    // `hideHelp` is per-Option, so both polarities need it or `--no-rc` leaks
+    // an off-switch for a feature that is not advertised at all.
+    const rcPair = () =>
       makeProgram()
         .commands.find((command) => command.name() === 'web')!
-        .options.find((option) => option.long === '--remote-control');
+        .options.filter((option) => option.short === '--rc' || option.short === '--no-rc');
 
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL', '0');
-    expect(remoteControlOption()?.hidden).toBe(true);
+    expect(rcPair().map((option) => option.hidden)).toEqual([true, true]);
+    expect(
+      makeProgram().commands.find((command) => command.name() === 'web')!.helpInformation(),
+    ).not.toContain('--rc');
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL', '1');
-    expect(remoteControlOption()?.hidden).toBe(false);
+    expect(rcPair().map((option) => option.hidden)).toEqual([false, false]);
+    expect(
+      makeProgram().commands.find((command) => command.name() === 'web')!.helpInformation(),
+    ).toContain('--no-remote-control');
   });
 });
 
@@ -554,8 +680,16 @@ describe('kimi rc', () => {
     const longs = rc!.options.map((o) => o.long).filter(Boolean);
     expect(longs).toContain('--port');
     expect(longs).toContain('--host');
+    // The shared config pairs come along with the server options...
+    expect(longs).toContain('--open');
     expect(longs).toContain('--no-open');
+    expect(longs).toContain('--ipv6');
+    expect(longs).toContain('--no-ipv6');
+    // ...but Remote Control itself has no switch here: `kimi rc` force-enables
+    // it, so an off-switch would be a flag that can never do anything.
     expect(longs).not.toContain('--remote-control');
+    expect(longs).not.toContain('--no-remote-control');
+    expect(rc!.options.map((o) => o.short)).not.toContain('--no-rc');
   });
 
   it('hides `rc` from help unless the experimental flag is on', () => {
@@ -623,6 +757,9 @@ describe('`kimi web` option threading', () => {
       enableKimiOauth: false,
       allowedHosts: ['.example.com'],
       webTitle: undefined,
+      open: false,
+      ipv6: false,
+      remoteControl: false,
     });
   });
 
@@ -751,9 +888,22 @@ describe('shared parsers stay strict', () => {
 
   it('rejects unknown --log-level values', async () => {
     const { parseLogLevel } = await import('#/cli/sub/web/shared');
-    expect(() => parseLogLevel('shout')).toThrow(/invalid --log-level/);
-    expect(parseLogLevel(undefined)).toBe('info');
-    expect(parseLogLevel('debug')).toBe('debug');
+    expect(() => parseLogLevel('shout', '--log-level')).toThrow(/invalid --log-level/);
+    expect(parseLogLevel(undefined, '--log-level')).toBe('info');
+    expect(parseLogLevel('debug', '--log-level')).toBe('debug');
+  });
+
+  it('names the source that supplied a rejected value', async () => {
+    // A rejected `[server]` value has to point at the file, not at a flag the
+    // user never typed.
+    const { parseLogLevel, parsePort } = await import('#/cli/sub/web/shared');
+
+    expect(() => parseLogLevel('shout', '[server].log_level')).toThrow(
+      'error: invalid [server].log_level value: shout (allowed: fatal, error, warn, info, debug, trace, silent)',
+    );
+    expect(() => parsePort('99999', '[server].port', 58627)).toThrow(
+      'error: invalid [server].port value: 99999',
+    );
   });
 });
 
@@ -1825,3 +1975,474 @@ describe('tryReadServerConfig', () => {
   });
 });
 
+
+describe('`kimi web` [server] option precedence', () => {
+  /**
+   * One row per `[server]` key. `fromCli` is what the flag must resolve to while
+   * the file says otherwise — that is the whole point of un-seeding commander's
+   * defaults, since a flag that cannot be "absent" would outrank the file
+   * unconditionally. Booleans are driven from the direction the negated flag
+   * exists for (D4): `[server] dangerous_bypass_auth = true` has to be
+   * overridable by `--no-dangerous-bypass-auth`.
+   */
+  const precedenceCases: readonly {
+    readonly key: keyof ParsedServerOptions;
+    readonly cli: ServerCliOptions;
+    readonly config: ServerConfigDefaults;
+    readonly fromCli: unknown;
+    readonly fromConfig: unknown;
+    readonly builtIn: unknown;
+  }[] = [
+    {
+      key: 'host',
+      cli: { host: '198.51.100.20' },
+      config: { host: '192.0.2.10' },
+      fromCli: '198.51.100.20',
+      fromConfig: '192.0.2.10',
+      builtIn: '127.0.0.1',
+    },
+    {
+      key: 'port',
+      cli: { port: '59001' },
+      config: { port: 58999 },
+      fromCli: 59001,
+      fromConfig: 58999,
+      builtIn: 58627,
+    },
+    {
+      key: 'logLevel',
+      cli: { logLevel: 'warn' },
+      config: { logLevel: 'info' },
+      fromCli: 'warn',
+      fromConfig: 'info',
+      builtIn: 'silent',
+    },
+    {
+      key: 'allowedHosts',
+      cli: { allowedHost: ['cli.example.com'] },
+      config: { allowedHost: ['file.example.com'] },
+      fromCli: ['cli.example.com'],
+      fromConfig: ['file.example.com'],
+      builtIn: [],
+    },
+    {
+      key: 'webTitle',
+      cli: { webTitle: 'From the flag' },
+      config: { webTitle: 'From the file' },
+      fromCli: 'From the flag',
+      fromConfig: 'From the file',
+      builtIn: undefined,
+    },
+    {
+      key: 'open',
+      cli: { open: false },
+      config: { open: true },
+      fromCli: false,
+      fromConfig: true,
+      // Nothing sets it: `kimi web` opens the browser. Removing the seeded
+      // commander default without pinning this would flip the behavior.
+      builtIn: true,
+    },
+    {
+      key: 'ipv6',
+      cli: { ipv6: true },
+      config: { ipv6: false },
+      fromCli: true,
+      fromConfig: false,
+      builtIn: false,
+    },
+    {
+      key: 'insecureNoTls',
+      cli: { insecureNoTls: true },
+      config: { insecureNoTls: false },
+      fromCli: true,
+      fromConfig: false,
+      builtIn: true,
+    },
+    {
+      key: 'allowRemoteShutdown',
+      cli: { allowRemoteShutdown: false },
+      config: { allowRemoteShutdown: true },
+      fromCli: false,
+      fromConfig: true,
+      builtIn: false,
+    },
+    {
+      key: 'dangerousBypassAuth',
+      cli: { dangerousBypassAuth: false },
+      config: { dangerousBypassAuth: true },
+      fromCli: false,
+      fromConfig: true,
+      builtIn: false,
+    },
+    {
+      key: 'enableKimiOauth',
+      cli: { enableKimiOauth: false },
+      config: { enableKimiOauth: true },
+      fromCli: false,
+      fromConfig: true,
+      builtIn: false,
+    },
+    {
+      key: 'debugEndpoints',
+      cli: { debugEndpoints: false },
+      config: { debugEndpoints: true },
+      fromCli: false,
+      fromConfig: true,
+      builtIn: false,
+    },
+    {
+      key: 'remoteControl',
+      cli: { remoteControl: false },
+      config: { remoteControl: true },
+      fromCli: false,
+      fromConfig: true,
+      builtIn: false,
+    },
+  ];
+
+  it.each(precedenceCases)('$key: the CLI flag beats [server]', ({ cli, config, key, fromCli }) => {
+    expect(parseServerOptions(cli, config)).toMatchObject({ [key]: fromCli });
+  });
+
+  it.each(
+    precedenceCases,
+  )('$key: [server] applies when the flag is absent', ({ config, key, fromConfig }) => {
+    expect(parseServerOptions({}, config)).toMatchObject({ [key]: fromConfig });
+  });
+
+  it.each(precedenceCases)('$key: the built-in applies when neither is set', ({ key, builtIn }) => {
+    expect(parseServerOptions({})).toMatchObject({ [key]: builtIn });
+  });
+
+  it('runs a configured allowed_host list through the same comma splitter as the flag', () => {
+    expect(
+      parseServerOptions({}, { allowedHost: ['a.example.com, b.example.com'] }),
+    ).toMatchObject({ allowedHosts: ['a.example.com', 'b.example.com'] });
+  });
+
+  it('names the config key when a configured port is out of range', () => {
+    // The reader validates through zod first, so this is the resolver's own
+    // defense for a directly-supplied `ServerConfigDefaults`.
+    expect(() => parseServerOptions({}, { port: 70000 })).toThrow(
+      'error: invalid [server].port value: 70000',
+    );
+  });
+
+  it('accepts the port range boundaries from either source', () => {
+    expect(parseServerOptions({ port: '0' })).toMatchObject({ port: 0 });
+    expect(parseServerOptions({ port: '65535' })).toMatchObject({ port: 65535 });
+    expect(parseServerOptions({}, { port: 0 })).toMatchObject({ port: 0 });
+    expect(parseServerOptions({}, { port: 65535 })).toMatchObject({ port: 65535 });
+  });
+
+  it('still treats a bare --host as the wildcard bind over the file', () => {
+    expect(parseServerOptions({ host: true }, { host: '192.0.2.10' })).toMatchObject({
+      host: '0.0.0.0',
+    });
+  });
+});
+
+describe('`kimi web` against a [server] config file', () => {
+  let dir: string;
+  let configPath: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'kimi-web-server-'));
+    configPath = join(dir, 'config.toml');
+    prevHome = process.env['KIMI_CODE_HOME'];
+    process.env['KIMI_CODE_HOME'] = dir;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) {
+      delete process.env['KIMI_CODE_HOME'];
+    } else {
+      process.env['KIMI_CODE_HOME'] = prevHome;
+    }
+    vi.unstubAllEnvs();
+    resetCapabilitiesCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeConfig(text: string): void {
+    writeFileSync(configPath, text, 'utf-8');
+  }
+
+  /** Runs `handleWebCommand` on the fake runner against the current config. */
+  async function run(opts: ServerCliOptions = {}) {
+    const { handleWebCommand } = await import('#/cli/sub/web/run');
+    const { runner, calls } = makeRunner();
+    const io = makeIo();
+    const openUrl = vi.fn();
+    await handleWebCommand(opts, {
+      startServerForeground: runner,
+      resolveToken: () => 'tok',
+      openUrl,
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+    return { calls, io, openUrl };
+  }
+
+  /** The same, with the Remote Control boundary injected instead of started. */
+  async function runWithTunnel(opts: ServerCliOptions = {}) {
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+    const { handleWebCommand } = await import('#/cli/sub/web/run');
+    const io = makeIo();
+    const close = vi.fn(async () => {});
+    const startRemoteControl = vi.fn<NonNullable<WebCommandDeps['startRemoteControl']>>(
+      async (options) => {
+        // A status that lands before the tunnel output is assembled must be
+        // queued and flushed after it, not interleaved with the header.
+        options.onStatus?.('relay_connected');
+        return {
+          deviceId: 'device-1',
+          deviceName: 'example-device',
+          url: 'https://rc.example.test/devices/device-1/',
+          close,
+        };
+      },
+    );
+    // Fires `onReady` and then the shutdown hook, which is what closes the tunnel.
+    const runner: ForegroundRunner = async (_options, hooks) => {
+      await hooks?.onReady?.('http://127.0.0.1:58627');
+      await hooks?.onShutdown?.('SIGTERM');
+      return undefined as never;
+    };
+    await handleWebCommand(opts, {
+      startServerForeground: runner,
+      startRemoteControl,
+      resolveToken: () => 'tok',
+      openUrl: vi.fn(),
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+    return { io, startRemoteControl, close };
+  }
+
+  it('fails the whole command when the configured log level is invalid', async () => {
+    // The real commander action, not `handleWebCommand` called directly: the
+    // un-seeded flag bag has to reach `[server]`, and a value the file got wrong
+    // must exit non-zero rather than fall back to the built-in unnoticed.
+    writeConfig('[server]\nlog_level = "shout"\n');
+    let stderr = '';
+    const exitCodes: number[] = [];
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderr += String(chunk);
+      return true;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      exitCodes.push(code ?? 0);
+      return undefined;
+    }) as never);
+
+    try {
+      await makeProgram().parseAsync(['node', 'kimi', 'web', '--no-open']);
+    } finally {
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+
+    expect(exitCodes).toEqual([1]);
+    expect(stderr).toContain('invalid [server].log_level value: shout');
+  });
+
+  it('binds the configured port when --port is not passed', async () => {
+    writeConfig('[server]\nport = 58999\n');
+    const { calls } = await run();
+
+    expect(calls.options?.port).toBe(58999);
+  });
+
+  it('prefers --port over the configured port', async () => {
+    writeConfig('[server]\nport = 58999\n');
+    const { calls } = await run({ port: '59001' });
+
+    expect(calls.options?.port).toBe(59001);
+  });
+
+  it('threads the configured host sentinel, title and allowed hosts', async () => {
+    writeConfig(
+      '[server]\nhost = "all"\nweb_title = "My Dev Box"\nallowed_host = ["a.example.com, b.example.com"]\n',
+    );
+    const { calls } = await run();
+
+    expect(calls.options).toMatchObject({
+      host: '0.0.0.0',
+      webTitle: 'My Dev Box',
+      allowedHosts: ['a.example.com', 'b.example.com'],
+    });
+  });
+
+  it('refuses to start on an unknown [server] key instead of ignoring it', async () => {
+    // The startup path uses the throwing reader: a key nobody reads must not
+    // leave the server on a default the file appears to override.
+    writeConfig('[server]\nbost = "127.0.0.1"\n');
+
+    await expect(run()).rejects.toThrow(/unknown key 'bost' in \[server\] of/);
+  });
+
+  it('prints a loader warning exactly once', async () => {
+    // `readServerConfig` hands warnings to the caller precisely so the caller
+    // prints them once; printing the reader's own error too would double-report.
+    writeConfig('[acp]\nsocket = 5\n[server]\nport = 58999\n');
+    const { io } = await run();
+
+    expect(io.readStderr().match(/Run `kimi doctor`/g)).toHaveLength(1);
+  });
+
+  it('opens the browser when neither the flag nor the file decides otherwise', async () => {
+    // The un-seeded `open` default: dropping this to `false` would quietly stop
+    // `kimi web` from doing the one thing its name promises.
+    const { openUrl } = await run();
+
+    expect(openUrl).toHaveBeenCalledWith('http://127.0.0.1:58627/#token=tok');
+  });
+
+  it('keeps the browser closed for [server] open = false', async () => {
+    writeConfig('[server]\nopen = false\n');
+    const { openUrl } = await run();
+
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it('lets --open override [server] open = false', async () => {
+    writeConfig('[server]\nopen = false\n');
+    const { openUrl } = await run({ open: true });
+
+    expect(openUrl).toHaveBeenCalledWith('http://127.0.0.1:58627/#token=tok');
+  });
+
+  it('replaces the ready banner with the one-line form for [server] log_level', async () => {
+    // The banner and the server logs compete for the same terminal, so a
+    // configured level that is not `silent` keeps the compact line.
+    writeConfig('[server]\nlog_level = "info"\n');
+    const { io } = await run();
+    const plain = stripAnsi(io.readStdout());
+
+    expect(plain).toContain('Kimi server: http://127.0.0.1:58627/#token=tok');
+    expect(plain).not.toContain('Kimi server ready');
+  });
+
+  it('resolves [server] ipv6 for the banner to consume', async () => {
+    writeConfig('[server]\nipv6 = true\n');
+    const { calls } = await run();
+
+    expect(calls.options?.ipv6).toBe(true);
+  });
+
+  const dangerKeys: readonly {
+    readonly toml: string;
+    readonly cli: ServerCliOptions;
+    readonly key: keyof ParsedServerOptions;
+  }[] = [
+    {
+      toml: 'dangerous_bypass_auth',
+      cli: { dangerousBypassAuth: true },
+      key: 'dangerousBypassAuth',
+    },
+    {
+      toml: 'allow_remote_shutdown',
+      cli: { allowRemoteShutdown: true },
+      key: 'allowRemoteShutdown',
+    },
+    { toml: 'debug_endpoints', cli: { debugEndpoints: true }, key: 'debugEndpoints' },
+    { toml: 'enable_kimi_oauth', cli: { enableKimiOauth: true }, key: 'enableKimiOauth' },
+    { toml: 'insecure_no_tls', cli: { insecureNoTls: true }, key: 'insecureNoTls' },
+  ];
+
+  it.each(dangerKeys)(
+    'reports config-sourced [server] $toml with the file path',
+    async ({ toml }) => {
+    writeConfig(`[server]\n${toml} = true\n`);
+    const { io } = await run();
+    const plain = stripAnsi(io.readStderr());
+
+    expect(plain).toContain(`${toml} = true`);
+    expect(plain).toContain(configPath);
+  });
+
+  it.each(dangerKeys)('stays silent about $toml when the flag supplied it', async ({ toml, cli }) => {
+    writeConfig(`[server]\n${toml} = true\n`);
+    const { io } = await run(cli);
+
+    expect(stripAnsi(io.readStderr())).not.toContain(configPath);
+  });
+
+  it.each(dangerKeys)(
+    'does not report a $toml the file left at its safe value',
+    async ({ toml, key }) => {
+    writeConfig(`[server]\n${toml} = false\n`);
+    const { calls, io } = await run();
+
+    expect(calls.options?.[key]).toBe(false);
+    expect(stripAnsi(io.readStderr())).not.toContain(configPath);
+  });
+
+  it('lets --no-dangerous-bypass-auth turn off [server] dangerous_bypass_auth', async () => {
+    writeConfig('[server]\ndangerous_bypass_auth = true\n');
+    const { calls, io } = await run({ dangerousBypassAuth: false });
+
+    expect(calls.options?.dangerousBypassAuth).toBe(false);
+    expect(stripAnsi(io.readStderr())).not.toContain('dangerous_bypass_auth');
+  });
+
+  it('starts the tunnel from [server] remote_control = true', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL', '1');
+    writeConfig('[server]\nremote_control = true\n');
+    const { io, startRemoteControl, close } = await runWithTunnel();
+
+    expect(startRemoteControl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        localOrigin: 'http://127.0.0.1:58627',
+        localServerToken: 'tok',
+      }),
+    );
+    const plain = stripAnsi(io.readStdout());
+    expect(plain).toContain('example-device');
+    // The status queued before the header was flushed after it.
+    expect(plain).toContain('Connected to relay');
+    expect(plain.indexOf('example-device')).toBeLessThan(plain.indexOf('Connected to relay'));
+    // And the shutdown hook closed it again.
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('lets --no-rc override [server] remote_control = true', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL', '1');
+    writeConfig('[server]\nremote_control = true\n');
+    const { startRemoteControl } = await runWithTunnel({ remoteControl: false });
+
+    expect(startRemoteControl).not.toHaveBeenCalled();
+  });
+
+  it('will not let [server] remote_control bypass the experimental env gate', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL', '0');
+    writeConfig('[server]\nremote_control = true\n');
+    const message = await run().catch((error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+    );
+
+    expect(message).toContain('[server] remote_control');
+    expect(message).toContain('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1');
+  });
+
+  it('keeps the loopback guard for a configured remote_control', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL', '1');
+    writeConfig('[server]\nremote_control = true\nhost = "192.0.2.10"\n');
+
+    await expect(run()).rejects.toThrow('--remote-control requires a loopback host.');
+  });
+
+  it('keeps the bypass-auth guard for a configured remote_control', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL', '1');
+    writeConfig('[server]\nremote_control = true\ndangerous_bypass_auth = true\n');
+
+    await expect(run()).rejects.toThrow(
+      '--remote-control cannot be combined with --dangerous-bypass-auth.',
+    );
+  });
+});

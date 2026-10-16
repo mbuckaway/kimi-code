@@ -9,6 +9,12 @@ import { join } from 'node:path';
 
 import type { ServerLogLevel } from '@moonshot-ai/kap-server';
 
+// Type-only on purpose: `server-config.ts` reads this module for `DEFAULT_LAN_HOST`,
+// so a value import here would be an import cycle. `parseServerOptions` is the
+// single place where `CLI flag > [server] > built-in` is decided, and it declares
+// every built-in because the reader returns only the keys the file actually set.
+import type { ServerConfigDefaults } from './server-config';
+
 export const LOCAL_SERVER_HOST = '127.0.0.1';
 export const DEFAULT_LAN_HOST = '0.0.0.0';
 export const DEFAULT_SERVER_HOST = LOCAL_SERVER_HOST;
@@ -48,8 +54,25 @@ export interface ParsedServerOptions {
   allowedHosts: readonly string[];
   /** Custom browser tab title for this web UI instance (`--web-title`). */
   webTitle?: string;
+  /** Open the web UI in the default browser once the server is ready. */
+  open: boolean;
+  /** Print the IPv6 interface hints for a wildcard bind. */
+  ipv6: boolean;
+  /**
+   * Expose the web UI through Kimi Remote Control. Resolved here rather than at
+   * the call sites because `--rc` is read at four of them: reading it raw would
+   * make `[server] remote_control = true` a silent no-op that also skips the
+   * experimental-flag, bypass-auth and loopback guards.
+   */
+  remoteControl: boolean;
 }
 
+/**
+ * The parsed `kimi web` / `kimi rc` option bag. `open`, `remoteControl` and
+ * `ipv6` live here (and not on the command's own type) because this is where
+ * their config defaults are resolved — declaring them twice would let one of
+ * the two shadow the other.
+ */
 export interface ServerCliOptions {
   host?: string | boolean;
   port?: string;
@@ -67,20 +90,55 @@ export interface ServerCliOptions {
   allowedHost?: string[];
   /** Custom browser tab title for this web UI instance (`--web-title`). */
   webTitle?: string;
+  /** Open the browser (`--open` / `--no-open`). */
+  open?: boolean;
+  /** Expose the web UI through Kimi Remote Control (`--rc` / `--no-rc`). */
+  remoteControl?: boolean;
+  /** Print the IPv6 interface hints (`--ipv6` / `--no-ipv6`). */
+  ipv6?: boolean;
 }
 
-export function parseServerOptions(opts: ServerCliOptions): ParsedServerOptions {
+/**
+ * Resolve every server option as `CLI flag > [server] key > built-in default`.
+ *
+ * The built-ins are declared here — not in the config reader — because that is
+ * where the precedence is visible, and a commander default would look like a
+ * flag the user actually typed and outrank the file forever.
+ *
+ * @param config the `[server]` section as read by `readServerConfig`, which
+ *   returns only the keys the file set (and has already resolved the `host`
+ *   sentinels and validated `port` against the schema).
+ */
+export function parseServerOptions(
+  opts: ServerCliOptions,
+  config: ServerConfigDefaults = {},
+): ParsedServerOptions {
+  const logLevel = opts.logLevel ?? config.logLevel ?? DEFAULT_FOREGROUND_LOG_LEVEL;
   return {
-    host: parseHost(opts.host),
-    port: parsePort(opts.port, '--port', DEFAULT_SERVER_PORT),
-    logLevel: parseLogLevel(opts.logLevel ?? DEFAULT_FOREGROUND_LOG_LEVEL),
-    debugEndpoints: opts.debugEndpoints === true,
-    insecureNoTls: opts.insecureNoTls !== false,
-    allowRemoteShutdown: opts.allowRemoteShutdown === true,
-    dangerousBypassAuth: opts.dangerousBypassAuth === true,
-    enableKimiOauth: opts.enableKimiOauth === true,
-    allowedHosts: parseAllowedHostArgs(opts.allowedHost),
-    webTitle: opts.webTitle,
+    host: parseHost(opts.host ?? config.host),
+    port: parsePort(
+      opts.port ?? config.port,
+      opts.port === undefined ? '[server].port' : '--port',
+      DEFAULT_SERVER_PORT,
+    ),
+    // A rejected value names the source that supplied it: `log_level` is a plain
+    // string in the schema, so `[server] log_level = "shout"` lands here.
+    logLevel: parseLogLevel(
+      logLevel,
+      opts.logLevel === undefined ? '[server].log_level' : '--log-level',
+    ),
+    debugEndpoints: opts.debugEndpoints ?? config.debugEndpoints ?? false,
+    insecureNoTls: opts.insecureNoTls ?? config.insecureNoTls ?? true,
+    allowRemoteShutdown: opts.allowRemoteShutdown ?? config.allowRemoteShutdown ?? false,
+    dangerousBypassAuth: opts.dangerousBypassAuth ?? config.dangerousBypassAuth ?? false,
+    enableKimiOauth: opts.enableKimiOauth ?? config.enableKimiOauth ?? false,
+    allowedHosts: parseAllowedHostArgs(opts.allowedHost ?? config.allowedHost),
+    webTitle: opts.webTitle ?? config.webTitle,
+    // `open` defaults to true: it is the behavior `kimi web` promises by name,
+    // and `[server] open = false` is what turns it off.
+    open: opts.open ?? config.open ?? true,
+    ipv6: opts.ipv6 ?? config.ipv6 ?? false,
+    remoteControl: opts.remoteControl ?? config.remoteControl ?? false,
   };
 }
 
@@ -98,22 +156,30 @@ function parseHost(raw: string | boolean | undefined): string {
   return raw;
 }
 
-export function parsePort(raw: string | undefined, label: string, fallback: number): number {
+/**
+ * Parse a port from either source: the CLI hands a raw string, `[server].port`
+ * arrives as a number. `label` names whichever one supplied the value.
+ */
+export function parsePort(
+  raw: string | number | undefined,
+  label: string,
+  fallback: number,
+): number {
   if (raw === undefined) return fallback;
-  const n = Number.parseInt(raw, 10);
+  const n = typeof raw === 'number' ? raw : Number.parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0 || n > 65535) {
     throw new Error(`error: invalid ${label} value: ${raw}`);
   }
   return n;
 }
 
-export function parseLogLevel(raw: string | undefined): ServerLogLevel {
+export function parseLogLevel(raw: string | undefined, label: string): ServerLogLevel {
   if (raw === undefined) return DEFAULT_LOG_LEVEL;
   if ((VALID_LOG_LEVELS as readonly string[]).includes(raw)) {
     return raw as ServerLogLevel;
   }
   throw new Error(
-    `error: invalid --log-level value: ${raw} (allowed: ${VALID_LOG_LEVELS.join(', ')})`,
+    `error: invalid ${label} value: ${raw} (allowed: ${VALID_LOG_LEVELS.join(', ')})`,
   );
 }
 
