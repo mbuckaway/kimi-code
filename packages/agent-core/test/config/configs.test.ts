@@ -291,7 +291,7 @@ socket = "/tmp/kimi-acp.sock"
 host = "127.0.0.1"
 port = 8080
 log_level = "info"
-allowed_host = ["tr.example.com", "www.example.com"]
+allowed_host = ["host.example.com", "www.example.com"]
 web_title = "Example Console"
 open = false
 ipv6 = true
@@ -309,7 +309,7 @@ remote_control = true
       host: '127.0.0.1',
       port: 8080,
       logLevel: 'info',
-      allowedHost: ['tr.example.com', 'www.example.com'],
+      allowedHost: ['host.example.com', 'www.example.com'],
       webTitle: 'Example Console',
       open: false,
       ipv6: true,
@@ -382,7 +382,7 @@ remote_control = true
 host = "127.0.0.1"
 port = 8080
 log_level = "info"
-allowed_host = ["tr.example.com"]
+allowed_host = ["host.example.com"]
 web_title = "Example Console"
 open = false
 ipv6 = true
@@ -399,7 +399,7 @@ remote_control = true
       host: '127.0.0.1',
       port: 8080,
       logLevel: 'info',
-      allowedHost: ['tr.example.com'],
+      allowedHost: ['host.example.com'],
       webTitle: 'Example Console',
       open: false,
       ipv6: true,

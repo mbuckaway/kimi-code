@@ -2414,7 +2414,7 @@ describe('readServerConfig', () => {
 host = "192.0.2.7"
 port = 8080
 log_level = "info"
-allowed_host = ["tr.example.com", "www.example.com"]
+allowed_host = ["host.example.com", "www.example.com"]
 web_title = "My Dev Box"
 open = false
 ipv6 = true
@@ -2432,7 +2432,7 @@ remote_control = true
         host: '192.0.2.7',
         port: 8080,
         logLevel: 'info',
-        allowedHost: ['tr.example.com', 'www.example.com'],
+        allowedHost: ['host.example.com', 'www.example.com'],
         webTitle: 'My Dev Box',
         open: false,
         ipv6: true,
