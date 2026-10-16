@@ -611,6 +611,7 @@ export class AgentTranscriptProjector {
     kind: 'assistant' | 'thinking',
     delta: string,
   ): TranscriptOperation[] {
+    if (kind === 'thinking' && delta === '' && this.openThinking === undefined) return [];
     const ops: TranscriptOperation[] = [];
     const turnId = `t${turnNumber}`;
     const step = this.ensureStep(turnId, ops);

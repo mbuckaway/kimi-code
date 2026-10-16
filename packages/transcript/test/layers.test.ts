@@ -443,6 +443,114 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
     expect(marker?.kind === 'marker' && marker.marker).toBe('compaction');
   });
 
+  it('coalesces per-delta text parts into one assistant text frame and skips empty thinks', () => {
+    const snapshot = groupMessagesIntoSnapshot([
+      { role: 'user', content: [{ type: 'text', text: 'go' }], toolCalls: [], origin: { kind: 'user' } },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'think', think: '' },
+          { type: 'text', text: 'a' },
+          { type: 'think', think: '' },
+          { type: 'text', text: 'b' },
+          { type: 'think', think: '' },
+          { type: 'text', text: 'c' },
+        ],
+        toolCalls: [],
+      },
+    ]);
+
+    const turn = snapshot.items[0];
+    if (turn?.kind !== 'turn') throw new Error('expected turn');
+    expect(turn.steps[0]?.frames).toEqual([
+      { kind: 'text', frameId: 't0.1.f1', role: 'assistant', text: 'abc' },
+    ]);
+  });
+
+  it('keeps separate text frames when a tool call splits the text runs', () => {
+    const snapshot = groupMessagesIntoSnapshot([
+      { role: 'user', content: [{ type: 'text', text: 'go' }], toolCalls: [], origin: { kind: 'user' } },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }],
+        toolCalls: [{ id: 'c1', name: 'Bash', arguments: '{"command":"ls"}' }],
+      },
+      { role: 'tool', content: [{ type: 'text', text: 'out' }], toolCallId: 'c1', toolCalls: [] },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'c' }, { type: 'text', text: 'd' }],
+        toolCalls: [],
+      },
+    ]);
+
+    const turn = snapshot.items[0];
+    if (turn?.kind !== 'turn') throw new Error('expected turn');
+    expect(turn.steps[0]?.frames.filter((f) => f.kind === 'text')).toHaveLength(1);
+    expect(turn.steps[1]?.frames).toEqual([
+      { kind: 'text', frameId: 't0.2.f1', role: 'assistant', text: 'cd' },
+    ]);
+    const firstText = turn.steps[0]?.frames.find((f) => f.kind === 'text');
+    expect(firstText?.kind === 'text' && firstText.text).toBe('ab');
+    expect(firstText?.kind === 'text' && firstText.frameId).toBe('t0.1.f1');
+  });
+
+  it('breaks the text run on a real thinking part and coalesces adjacent thinks', () => {
+    const snapshot = groupMessagesIntoSnapshot([
+      { role: 'user', content: [{ type: 'text', text: 'go' }], toolCalls: [], origin: { kind: 'user' } },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'a' },
+          { type: 'text', text: 'a2' },
+          { type: 'think', think: 'deep' },
+          { type: 'think', think: 'thought' },
+          { type: 'text', text: 'b' },
+          { type: 'text', text: 'c' },
+        ],
+        toolCalls: [],
+      },
+    ]);
+
+    const turn = snapshot.items[0];
+    if (turn?.kind !== 'turn') throw new Error('expected turn');
+    expect(turn.steps[0]?.frames).toEqual([
+      { kind: 'text', frameId: 't0.1.f1', role: 'assistant', text: 'aa2' },
+      { kind: 'thinking', frameId: 't0.1.f2', text: 'deepthought' },
+      { kind: 'text', frameId: 't0.1.f3', role: 'assistant', text: 'bc' },
+    ]);
+  });
+
+  it('does not merge assistant text into a leading user notification frame', () => {
+    const snapshot = groupMessagesIntoSnapshot([
+      { role: 'user', content: [{ type: 'text', text: 'run it' }], toolCalls: [], origin: { kind: 'user' } },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'starting' }],
+        toolCalls: [{ id: 'c1', name: 'Bash', arguments: '{"command":"ls"}' }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'text',
+          text: '<notification id="task:task-9:completed" category="task" type="task.completed" source_kind="background_task" source_id="task-9">\nTitle: Done\nSeverity: info\nbody text\n</notification>',
+        }],
+        toolCalls: [],
+        origin: { kind: 'task', taskId: 'task-9' } as { kind: string },
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }],
+        toolCalls: [],
+      },
+    ]);
+
+    const turn = snapshot.items[0];
+    if (turn?.kind !== 'turn') throw new Error('expected turn');
+    const frames = turn.steps[1]?.frames;
+    expect(frames?.[0]).toMatchObject({ kind: 'text', frameId: 't0.2.f1', role: 'user', text: 'Done\nbody text', taskId: 'task-9' });
+    expect(frames?.[1]).toEqual({ kind: 'text', frameId: 't0.2.f2', role: 'assistant', text: 'ab' });
+  });
+
   it('folds task-notification user messages into the current turn instead of opening their own', () => {
     const snapshot = groupMessagesIntoSnapshot(
       [
