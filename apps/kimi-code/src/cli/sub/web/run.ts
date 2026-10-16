@@ -157,7 +157,8 @@ function isSameResolvedValue(a: unknown, b: unknown): boolean {
 }
 
 /**
- * The `[server]` keys that a restart would actually change.
+ * The `[server]` keys that a restart would actually change, or why they could
+ * not be worked out.
  *
  * The question is "would restarting with the same flags pick up a different
  * value?", so the file is re-read and re-parsed with **the same CLI flags** the
@@ -166,20 +167,32 @@ function isSameResolvedValue(a: unknown, b: unknown): boolean {
  * user's own `--port` as drift on every reload, and it demands a restart for a
  * key the flag pins, which a restart could not change.
  *
- * Lenient on purpose — the server is already running on the values it parsed at
- * startup, so a typo introduced since then must not turn a working reload into a
- * failure. `tryReadServerConfig` has already put that warning on stderr.
+ * Lenient on purpose. The server already runs on the values parsed at startup,
+ * and this runs only after the engine applied a reload, so a value that turned
+ * invalid since startup must not come back as a reload failure: the parser's own
+ * message travels as a separate note. `tryReadServerConfig` has already put the
+ * reader's warning on stderr.
  */
-function restartKeysFor(
+function restartAdvisoryFor(
   runningOptions: ParsedServerOptions,
   cliOptions: ServerCliOptions,
-): string[] {
+): Pick<ConfigReloadReport, 'restartKeys' | 'restartAdvisoryError'> {
   const { defaults } = tryReadServerConfig();
-  const reparsed = parseServerOptions(cliOptions, defaults);
-  return (Object.keys(reparsed) as (keyof ParsedServerOptions)[])
-    .filter((key) => !isSameResolvedValue(runningOptions[key], reparsed[key]))
-    .map((key) => configKeyOf(key))
-    .toSorted();
+  let reparsed: ParsedServerOptions;
+  try {
+    reparsed = parseServerOptions(cliOptions, defaults);
+  } catch (error) {
+    return {
+      restartKeys: [],
+      restartAdvisoryError: error instanceof Error ? error.message : String(error),
+    };
+  }
+  return {
+    restartKeys: (Object.keys(reparsed) as (keyof ParsedServerOptions)[])
+      .filter((key) => !isSameResolvedValue(runningOptions[key], reparsed[key]))
+      .map((key) => configKeyOf(key))
+      .toSorted(),
+  };
 }
 
 export interface StartForegroundHooks {
@@ -503,8 +516,8 @@ const DEFAULT_LIFECYCLE_TARGETS: LifecycleTargets = {
  * `targets` is a test seam for the process and stdio the signal handlers arm
  * on; production callers leave it unset. `cliOptions` is the raw flag bag the
  * options were parsed from, needed to tell a config-file change apart from a
- * flag the user typed (see `restartKeysFor`); callers with no flags — the TUI's
- * `/web` and `/rc` — leave it empty.
+ * flag the user typed (see `restartAdvisoryFor`); callers with no flags — the
+ * TUI's `/web` and `/rc` — leave it empty.
  */
 export async function startServerForeground(
   options: ParsedServerOptions,
@@ -603,10 +616,12 @@ async function runServerInProcess(
     // port or host took effect, which it did not — the restart advisory below
     // is the honest signal, so the passthrough domain is dropped here.
     const appliedDomains = changedDomains.filter((domain) => domain !== SERVER_CONFIG_DOMAIN);
+    const advisory = restartAdvisoryFor(options, cliOptions);
     return {
       changedDomains: appliedDomains,
       error: undefined,
-      restartKeys: restartKeysFor(options, cliOptions),
+      restartKeys: advisory.restartKeys,
+      restartAdvisoryError: advisory.restartAdvisoryError,
     };
   }
 

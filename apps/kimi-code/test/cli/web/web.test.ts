@@ -152,6 +152,8 @@ function fakeProcess() {
     listeners.set(signal, listener);
   };
   return {
+    /** Mirrors `process.exitCode`: what Node exits with if the loop drains. */
+    exitCode: 0,
     once: vi.fn(register),
     on: vi.fn(register),
     off: vi.fn((signal: NodeJS.Signals, listener: () => Promise<void> | void) => {
@@ -885,6 +887,27 @@ describe('`kimi web` option threading', () => {
     );
 
     expect(calls.options).toMatchObject({ host: '0.0.0.0', insecureNoTls: true });
+  });
+
+  it('maps --host all and --host * to the default LAN host', async () => {
+    const { handleWebCommand } = await import('#/cli/sub/web/run');
+    const { stdout, stderr } = makeIo();
+    const binds: string[] = [];
+    const runner: ForegroundRunner = async (options) => {
+      binds.push(options.host);
+      return undefined as never;
+    };
+
+    await handleWebCommand(
+      { host: 'all', open: false },
+      { startServerForeground: runner, openUrl: vi.fn(), stdout, stderr },
+    );
+    await handleWebCommand(
+      { host: '*', open: false },
+      { startServerForeground: runner, openUrl: vi.fn(), stdout, stderr },
+    );
+
+    expect(binds).toEqual(['0.0.0.0', '0.0.0.0']);
   });
 
   it('passes --log-level through to the runner', async () => {
@@ -1755,6 +1778,54 @@ describe('`kimi web` termination controller', () => {
     expect(proc.exit).toHaveBeenCalledWith(143);
   });
 
+  it.each([
+    [143, 'SIGTERM' as NodeJS.Signals],
+    [130, 'SIGINT' as NodeJS.Signals],
+  ])('writes exit code %i to the process before awaiting a %s shutdown', async (code, signal) => {
+    expect.assertions(2);
+    const { installServerSignalHandlers } = await import('#/cli/sub/web/lifecycle');
+    const { proc, io, targets } = makeTermination();
+    const codesAtShutdown: (number | string | null | undefined)[] = [];
+    const shutdown = vi.fn(async () => {
+      codesAtShutdown.push(proc.exitCode);
+    });
+    installServerSignalHandlers({
+      shutdown,
+      reload: async () => ({ changedDomains: [], error: undefined, restartKeys: [] }),
+      ...targets,
+    });
+
+    void proc.listener(signal)?.();
+    await flushMicrotasks();
+
+    // A shutdown wedged on a promise that holds no ref'd handle lets the event
+    // loop drain, and Node then exits with `exitCode` — so the signal's code has
+    // to be committed while the shutdown is still in flight, not only at exit.
+    expect(codesAtShutdown).toEqual([code]);
+    expect(io.readStderr()).not.toContain('Force-exiting');
+  });
+
+  it('arms the shutdown deadline on a timer that keeps the event loop alive', async () => {
+    expect.assertions(2);
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const { proc, io } = await installController(vi.fn(() => new Promise<void>(() => {})));
+
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    const armedAt = setTimeoutSpy.mock.calls.findIndex(
+      (args) => args[1] === WEB_SHUTDOWN_FORCE_EXIT_MS,
+    );
+    const deadline = setTimeoutSpy.mock.results[armedAt]?.value;
+    // An unref'd deadline never fires in this shape: the wedged shutdown leaves
+    // nothing ref'd, the loop drains, and Node exits 0 before the deadline.
+    expect(deadline?.hasRef()).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(WEB_SHUTDOWN_FORCE_EXIT_MS);
+    expect(io.readStderr()).toContain(`Force-exiting after ${WEB_SHUTDOWN_FORCE_EXIT_MS}ms`);
+  });
+
   it('flushes telemetry exactly once, only when it force-exits', async () => {
     expect.assertions(2);
     vi.useFakeTimers();
@@ -1780,6 +1851,30 @@ describe('`kimi web` termination controller', () => {
     expect(io.readStderr()).not.toContain('Force-exiting');
     expect(webRunMocks.flushTelemetrySync).not.toHaveBeenCalled();
     expect(proc.exit).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a reload whose [server] re-parse failed as an applied reload', async () => {
+    expect.assertions(4);
+    const { proc, io } = await installController(
+      vi.fn(async () => {}),
+      async () => ({
+        changedDomains: ['providers'],
+        error: undefined,
+        restartKeys: [],
+        restartAdvisoryError: 'error: invalid [server].log_level value: shout',
+      }),
+    );
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    const out = io.readStdout();
+    expect(out).toContain('config reloaded: providers');
+    expect(out).toContain(
+      'restart advisory unavailable: error: invalid [server].log_level value: shout',
+    );
+    expect(out).not.toContain('config reload failed');
+    expect(out).not.toContain('kept previous values');
   });
 
   it('reports the reload on stdout and keeps running', async () => {
@@ -1814,6 +1909,20 @@ describe('`kimi web` termination controller', () => {
 
     expect(io.readStdout()).toContain('config reload failed');
     expect(io.readStdout()).toContain('failed to decode /config.toml as toml');
+    expect(proc.exit).not.toHaveBeenCalled();
+  });
+
+  it('reports a reload rejected with a non-Error value', async () => {
+    expect.assertions(2);
+    const reload = vi.fn((): Promise<ConfigReloadReport> => Promise.reject('engine exploded'));
+    const { proc, io } = await installController(vi.fn(async () => {}), reload);
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    // A rejection that is not an `Error` still has to be said out loud: at the
+    // default `silent` log level nothing else would report the reload at all.
+    expect(io.readStdout()).toContain('config reload failed: engine exploded');
     expect(proc.exit).not.toHaveBeenCalled();
   });
 
@@ -2225,6 +2334,30 @@ describe('`kimi web` config reload on SIGHUP', () => {
     void run;
   });
 
+  it('applies the reload when only the restart advisory could not be re-parsed', async () => {
+    expect.assertions(5);
+    // The state this pins: the file was valid at startup and an invalid
+    // `[server]` value was written afterwards. The engine reload succeeded, so
+    // reporting `config reload failed ... kept previous values; config writes
+    // are blocked` would be false on all three counts.
+    writeConfig('[server]\nport = 58627\n');
+    const { proc, io, run } = await runWithReload({ changedDomains: [], error: undefined });
+    writeConfig('[server]\nport = 58627\nlog_level = "shout"\n');
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    const out = io.readStdout();
+    expect(out).toContain('config reloaded: no changes');
+    expect(out).toContain(
+      'restart advisory unavailable: error: invalid [server].log_level value: shout',
+    );
+    expect(out).not.toContain('config reload failed');
+    expect(out).not.toContain('kept previous values');
+    expect(out).not.toContain('config writes are blocked');
+    void run;
+  });
+
   it('survives a reload that rejects', async () => {
     expect.assertions(3);
     const { proc, io, run } = await runWithReload(undefined, async () => {
@@ -2424,21 +2557,23 @@ remote_control = true
   });
 
   it.each([
-    ['"all"', '0.0.0.0'],
-    ['"ALL"', '0.0.0.0'],
-    ['"All"', '0.0.0.0'],
-    ['"*"', '0.0.0.0'],
-    ['""', '0.0.0.0'],
+    ['"all"', 'all'],
+    ['"ALL"', 'ALL'],
+    ['"*"', '*'],
+    ['""', ''],
     ['"192.0.2.7"', '192.0.2.7'],
-    ['"localhost"', 'localhost'],
-  ])('resolves the configured host %s to the bind address %s', async (written, expected) => {
-    // `parseHost` has no sentinel branch: an unresolved `all` would bind a
-    // hostname called "all" instead of every interface.
-    writeConfig(`[server]\nhost = ${written}\n`);
-    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+  ])(
+    'reads the configured host %s without rewriting it to a bind address',
+    async (written, expected) => {
+      // Exactly one place resolves the wildcards: `parseHost` in `./shared`. A
+      // second mapping here would let the flag and the file disagree about `all`,
+      // and the reader's contract stays "the section, as the file wrote it".
+      writeConfig(`[server]\nhost = ${written}\n`);
+      const { readServerConfig } = await import('#/cli/sub/web/server-config');
 
-    expect(readServerConfig().defaults).toEqual({ host: expected });
-  });
+      expect(readServerConfig().defaults).toEqual({ host: expected });
+    },
+  );
 
   it('surfaces loader warnings while keeping a valid [server] section', async () => {
     writeConfig('[acp]\nsocket = 5\n[server]\nport = 8080\n');
@@ -2682,6 +2817,31 @@ describe('`kimi web` [server] option precedence', () => {
     expect(parseServerOptions({ port: '65535' })).toMatchObject({ port: 65535 });
     expect(parseServerOptions({}, { port: 0 })).toMatchObject({ port: 0 });
     expect(parseServerOptions({}, { port: 65535 })).toMatchObject({ port: 65535 });
+  });
+
+  it.each([
+    ['all', '0.0.0.0'],
+    ['ALL', '0.0.0.0'],
+    ['All', '0.0.0.0'],
+    ['*', '0.0.0.0'],
+    ['', '0.0.0.0'],
+    ['0.0.0.0', '0.0.0.0'],
+    ['192.0.2.7', '192.0.2.7'],
+    ['localhost', 'localhost'],
+    ['::1', '::1'],
+  ])('binds the flag host %s to %s', (value, bind) => {
+    // `kimi web --host all` used to reach `server.listen` as the literal `all`
+    // and die with `getaddrinfo ENOTFOUND all`, while `[server] host = "all"`
+    // worked: the docs publish one spelling, so both sources must agree.
+    expect(parseServerOptions({ host: value })).toMatchObject({ host: bind });
+  });
+
+  it.each([
+    ['all', '0.0.0.0'],
+    ['*', '0.0.0.0'],
+    ['192.0.2.7', '192.0.2.7'],
+  ])('binds the [server] host %s to %s', (value, bind) => {
+    expect(parseServerOptions({}, { host: value })).toMatchObject({ host: bind });
   });
 
   it('still treats a bare --host as the wildcard bind over the file', () => {

@@ -7,11 +7,12 @@
  * before the server binds.
  *
  * Two rules shape this reader:
- *  - **It declares no built-in values.** Precedence is `CLI flag > [server] >
- *    built-in` and the built-ins live in `parseServerOptions` (`./shared`), so
- *    this returns exactly the keys the file set and an empty object when there
- *    is no section. `open: false` must stay distinguishable from "unset", or no
- *    flag could ever override it.
+ *  - **It decides nothing.** Precedence is `CLI flag > [server] > built-in` and
+ *    the built-ins live in `parseServerOptions` (`./shared`), so this returns
+ *    exactly the keys the file set and an empty object when there is no section.
+ *    `open: false` must stay distinguishable from "unset", or no flag could ever
+ *    override it. The `host` wildcards are resolved there too, so `--host all`
+ *    and `[server] host = "all"` cannot mean two different things.
  *  - **A key this module does not understand is an error, not a warning.** A
  *    silently dropped `prot = 9000` would start the server on the built-in port
  *    while the file read as authoritative. zod's non-strict section strips
@@ -27,8 +28,6 @@ import {
   type KimiConfig,
 } from '@moonshot-ai/kimi-code-sdk';
 
-import { DEFAULT_LAN_HOST } from './shared';
-
 /** The `[server]` section as the v1 schema types it: thirteen optional keys. */
 export type ServerConfigDefaults = NonNullable<KimiConfig['server']>;
 
@@ -41,12 +40,6 @@ export interface ServerConfigResult {
 /** Reference page for the valid keys, named instead of enumerated (no drift). */
 const SERVER_CONFIG_DOCS_URL =
   'https://moonshotai.github.io/kimi-code/en/configuration/config-files.html#server';
-
-/**
- * `[server].host` spellings that mean "bind every interface". Looked up after
- * lower-casing, so `ALL` and `All` count too.
- */
-const WILDCARD_HOST_VALUES: ReadonlySet<string> = new Set(['', 'all', '*']);
 
 /**
  * snake_case → camelCase, byte-identical to the v1 loader's rule
@@ -74,19 +67,6 @@ function unknownServerKeys(
   // `Object.hasOwn` rather than `in`: a key like `to_string` camelizes onto
   // `Object.prototype` and would otherwise look known.
   return Object.keys(rawSection).filter((key) => !Object.hasOwn(section, snakeToCamel(key)));
-}
-
-/**
- * Rewrites a sentinel `host` to the wildcard bind literal. This is the only
- * sentinel in the config system, so it is resolved here rather than
- * generalized: `parseHost` has no sentinel branch and returns an unknown string
- * verbatim, which would otherwise try to bind a hostname called `all`.
- */
-function withResolvedHost(defaults: ServerConfigDefaults): ServerConfigDefaults {
-  const host = defaults.host;
-  if (host === undefined) return defaults;
-  if (WILDCARD_HOST_VALUES.has(host.toLowerCase())) return { ...defaults, host: DEFAULT_LAN_HOST };
-  return defaults;
 }
 
 /**
@@ -128,7 +108,7 @@ export function readServerConfig(): ServerConfigResult {
     );
   }
 
-  return { defaults: withResolvedHost(config.server), warnings: fileWarnings };
+  return { defaults: config.server, warnings: fileWarnings };
 }
 
 /**

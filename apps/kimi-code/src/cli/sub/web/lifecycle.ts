@@ -7,11 +7,16 @@
  * wedged shutdown is indistinguishable from a hung terminal), a bounded wait
  * before force-exiting, the signal's own exit code (130/143) rather than
  * success, and a SIGHUP that reloads config without ever taking the server down.
+ *
+ * The exit code is committed to the process before the shutdown is awaited, and
+ * the force-exit deadline keeps the event loop alive. Both are needed because a
+ * teardown can wedge in two shapes: the awaited work holds no ref'd handle, so
+ * the loop drains and Node exits with whatever `exitCode` says; or handles stay
+ * open while the work never settles, so only a deadline ends the run.
  */
 
 import { flushTelemetrySync } from '@moonshot-ai/kimi-telemetry';
 
-import { scheduleHeadlessForceExit } from '#/cli/headless-exit';
 import { signalExitCode } from '#/cli/signals';
 import { WEB_SHUTDOWN_FORCE_EXIT_MS } from '#/constant/app';
 
@@ -28,6 +33,11 @@ export interface LifecycleProcess {
   on(signal: NodeJS.Signals, listener: () => void): unknown;
   off(signal: NodeJS.Signals, listener: () => void): unknown;
   exit(code?: number): void;
+  /**
+   * `process.exitCode`, typed as Node declares it: what the process exits with
+   * when the event loop drains instead of being exited by hand.
+   */
+  exitCode: number | string | null | undefined;
 }
 
 /** The process and output streams a foreground run reports through. */
@@ -55,6 +65,12 @@ export interface ConfigReloadReport {
   readonly error?: string;
   /** `[server]` keys that differ from the running values and need a restart. */
   readonly restartKeys: readonly string[];
+  /**
+   * The parser's own message when a `[server]` value written after startup could
+   * not be re-read. The engine reload succeeded in this case, so it is reported
+   * as a missing advisory — never as a reload that failed.
+   */
+  readonly restartAdvisoryError?: string;
 }
 
 const TERMINATION_SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
@@ -81,30 +97,39 @@ export function installServerSignalHandlers(deps: ServerSignalDeps): () => void 
     listeners.clear();
   };
 
-  const forceExitCode = (signal: NodeJS.Signals): number => {
+  function forceExit(code: number): void {
     deps.stderr.write(`Force-exiting after ${WEB_SHUTDOWN_FORCE_EXIT_MS}ms\n`);
     flushTelemetrySync();
-    return signalExitCode(signal);
-  };
+    deps.proc.exit(code);
+  }
 
   async function terminate(signal: NodeJS.Signals): Promise<void> {
+    const code = signalExitCode(signal);
     deps.stderr.write(`Shutting down (${signal})…\n`);
     // Stop intercepting before the first await: a second signal, of either
     // kind, means "stop waiting" and must reach Node's default disposition
     // instead of queueing a second shutdown behind the wedged first one.
     uninstall();
-    const forceExit = scheduleHeadlessForceExit(
-      deps.proc,
-      () => forceExitCode(signal),
-      WEB_SHUTDOWN_FORCE_EXIT_MS,
-    );
+    // Commit the code before awaiting `shutdown`. A teardown stalled on a promise
+    // with nothing ref'd behind it — a retirement drain that never finishes, a
+    // hung `onShutdown` hook — lets the event loop drain, and Node exits with
+    // this value. Leaving it unset reports a wedged shutdown as success.
+    deps.proc.exitCode = code;
+    // Ref'd on purpose, unlike the headless force-exit backstop, which must not
+    // keep a finished run alive: this deadline has to hold the loop open so it
+    // can fire for the other wedge shape — handles still ref'd, work never
+    // settling. `run-prompt.ts:raceWithTimeout` keeps its timer ref'd likewise.
+    const deadline = setTimeout(() => {
+      forceExit(code);
+    }, WEB_SHUTDOWN_FORCE_EXIT_MS);
     try {
       await deps.shutdown(signal);
     } finally {
-      // Either `shutdown` finished and this cancels a watchdog that is no
-      // longer needed, or the watchdog already fired and this is a no-op.
-      clearTimeout(forceExit);
-      deps.proc.exit(signalExitCode(signal));
+      // Either `shutdown` finished and this cancels a deadline no longer
+      // needed, or the deadline already exited the process and this is not
+      // reached.
+      clearTimeout(deadline);
+      deps.proc.exit(code);
     }
   }
 
@@ -130,6 +155,15 @@ export function installServerSignalHandlers(deps: ServerSignalDeps): () => void 
     deps.stdout.write(`config reloaded: ${changed}\n`);
     if (report.restartKeys.length > 0) {
       deps.stdout.write(`restart required for: ${report.restartKeys.join(', ')}\n`);
+    }
+    if (report.restartAdvisoryError !== undefined) {
+      // The engine applied the reload, so this is not a reload failure: only the
+      // `[server]` comparison could not run. Claiming the previous values were
+      // kept, or that config writes are blocked, would report a state the engine
+      // is not in.
+      deps.stdout.write(
+        `restart advisory unavailable: ${report.restartAdvisoryError} — fix the value to see which [server] keys need a restart\n`,
+      );
     }
   }
 

@@ -11,10 +11,11 @@ import type { ServerLogLevel } from '@moonshot-ai/kap-server';
 
 import { bracketIpv6Host } from './networks';
 
-// Type-only on purpose: `server-config.ts` reads this module for `DEFAULT_LAN_HOST`,
-// so a value import here would be an import cycle. `parseServerOptions` is the
-// single place where `CLI flag > [server] > built-in` is decided, and it declares
-// every built-in because the reader returns only the keys the file actually set.
+// Type-only on purpose: this module is the parser every `kimi web` caller uses,
+// so it must not pull in `server-config.ts`, which is the module that reads the
+// file through the SDK. `parseServerOptions` is the single place where
+// `CLI flag > [server] > built-in` is decided, and it declares every built-in
+// because the reader returns only the keys the file actually set.
 import type { ServerConfigDefaults } from './server-config';
 
 export const LOCAL_SERVER_HOST = '127.0.0.1';
@@ -108,8 +109,8 @@ export interface ServerCliOptions {
  * flag the user actually typed and outrank the file forever.
  *
  * @param config the `[server]` section as read by `readServerConfig`, which
- *   returns only the keys the file set (and has already resolved the `host`
- *   sentinels and validated `port` against the schema).
+ *   returns only the keys the file actually set, as written, and has validated
+ *   `port` against the schema.
  */
 export function parseServerOptions(
   opts: ServerCliOptions,
@@ -152,10 +153,18 @@ export function parseAllowedHostArgs(raw: readonly string[] | undefined): string
     .filter((entry) => entry.length > 0);
 }
 
+/**
+ * `--host` / `[server] host` spellings that mean "bind every interface". Looked
+ * up after lower-casing, so `ALL` and `All` count too. This is the one place the
+ * sentinels resolve, so the flag and the file cannot disagree about `all`; `''`
+ * is what `--host=` with an empty value reaches the parser as.
+ */
+const WILDCARD_HOST_VALUES: ReadonlySet<string> = new Set(['', 'all', '*']);
+
 function parseHost(raw: string | boolean | undefined): string {
   if (raw === undefined || raw === false) return DEFAULT_SERVER_HOST;
-  if (raw === true || raw === '') return DEFAULT_LAN_HOST;
-  return raw;
+  if (raw === true) return DEFAULT_LAN_HOST;
+  return WILDCARD_HOST_VALUES.has(raw.toLowerCase()) ? DEFAULT_LAN_HOST : raw;
 }
 
 /**
