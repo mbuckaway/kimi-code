@@ -15,6 +15,15 @@ Teardown order is load-bearing; `close()` is memoized on one shared in-flight pr
 - The post-`app.close()` drains share ONE absolute `CLOSE_DRAIN_TIMEOUT_MS` deadline for the whole group, not a per-await timeout (eight separately-raced awaits would multiply the budget by eight). Each awaitable drain is still started and then abandoned at the deadline, and the abandoned names are `logger.warn`ed. `fsWatchBridge.dispose()`, `core.dispose()`, and `appendLogStore.drainRetirements()` stay outside the race — that pair is the authoritative record flush with no rebuild path — and `drainRetirements()` is awaited once before and once after the raced group.
 - The process-level `unhandledRejection`/`uncaughtException` handlers are removed once the abandoned drains settle (immediately when there are none), off the awaited path, so a straggler's derived rejection is still logged instead of killing the process; `close()` itself resolves at the deadline.
 
+## Config reload
+
+`reloadConfig(core: Scope): Promise<ConfigReloadResult>` (`src/services/config/configReload.ts`, re-exported from `src/index.ts`) is the engine hot-reload reporter that `kimi web` calls on SIGHUP. It takes no options and re-reads `config.toml` on every call.
+
+- The caller owns the user-facing wording; this function only returns facts: `{ changedDomains, error? }`.
+- It awaits `config.ready`, subscribes to `onDidSectionChange`, awaits `config.reload()`, then calls `.dispose()` on the returned `IDisposable` (the subscription is not callable). A rejected reload still releases the subscription and still rejects, so the caller sees the failure instead of a silent "no changes".
+- `changedDomains` counts only events whose `source === 'reload'`, deduped and sorted. Treat the set as advisory: `reload()` queues behind `enqueueStateTransition`, while `revalidateDomain` and `reapplyOverlays` commit synchronously outside that chain, and the file watcher usually applies an external edit before an explicit reload runs (150 ms debounce) — then the honest answer is no changes.
+- `error` is the first `severity === 'error'` message from `config.diagnostics()`, read after the reload settles. Do not swap this for `onDidChangeDiagnostics` (it short-circuits on an unchanged snapshot, so a second reload of the same broken file never fires) and do not diff `getAll()`. A broken file returns from `load()` before any commit, so diagnostics are the only signal that separates a failed reload from "nothing changed"; while the file stays broken, config writes throw `CONFIG_PERSIST_BLOCKED`.
+
 ## Routes
 
 - Session create/resume/fork routes compose `ISessionIndex` → `IWorkspaceLifecycleService.handlerFor` → the handler's `ISessionLifecycleService`, and the fs routes resolve session → handler → the Workspace-scope fs services. One exception: `fs:search` also accepts a workspace reference (registered id or absolute root) in the `{session_id}` slot, so a not-yet-created draft session's `@` file mention resolves the workspace handler directly; the first-class session-less form is `POST /api/v1/workspace/fs:search` (the workspace reference travels in the body).
