@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setCapabilities } from '@moonshot-ai/pi-tui';
 
@@ -45,6 +49,24 @@ vi.mock('#/utils/open-url', async (importOriginal) => {
 vi.mock('#/utils/paths', async (importOriginal) => {
   const actual = await importOriginal<typeof import('#/utils/paths')>();
   return { ...actual, getDataDir: mocks.getDataDir };
+});
+
+// `/web` and `/rc` resolve `[server]` defaults through `tryReadServerConfig`,
+// which reads `<KIMI_CODE_HOME>/config.toml` at call time. Point it at a private
+// directory so a `[server]` key in the developer's own config cannot change (or
+// fail) these suites; the parity tests write their own file into it.
+const isolatedHome = mkdtempSync(join(tmpdir(), 'kimi-tui-web-home-'));
+const isolatedConfigPath = join(isolatedHome, 'config.toml');
+const realHome = process.env['KIMI_CODE_HOME'];
+process.env['KIMI_CODE_HOME'] = isolatedHome;
+
+afterAll(() => {
+  if (realHome === undefined) {
+    delete process.env['KIMI_CODE_HOME'];
+  } else {
+    process.env['KIMI_CODE_HOME'] = realHome;
+  }
+  rmSync(isolatedHome, { recursive: true, force: true });
 });
 
 const indentedQr = (url: string): string =>
@@ -142,6 +164,114 @@ describe('handleWebCommand', () => {
     expect(written).toContain('Ctrl+C');
     expect(written).toContain('/sessions/ses-1');
     writeSpy.mockRestore();
+  });
+
+  it('carries [server] ipv6 into the takeover banner hints', async () => {
+    // `/web` builds its own banner options, so the flag has to survive this hop
+    // too: without it the TUI prints a different link list than `kimi web`.
+    writeFileSync(isolatedConfigPath, '[server]\nhost = "0.0.0.0"\nipv6 = true\n', 'utf-8');
+    mocks.tryResolveServerToken.mockReturnValue('tok-1');
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    mocks.startServerForeground.mockImplementation(
+      async (_options: unknown, hooks: { onReady?: (origin: string) => void }) => {
+        hooks.onReady?.('http://0.0.0.0:58627');
+      },
+    );
+    const host = makeHost();
+
+    try {
+      await handleWebCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      const { listNetworkAddresses } = await import('#/cli/sub/web/networks');
+      const written = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      expect(
+        written
+          .split('\n')
+          .map((line) => line.match(/http:\/\/\[[^\]]+\]/)?.[0] ?? '')
+          .filter((origin) => origin !== ''),
+      ).toEqual(
+        listNetworkAddresses()
+          .filter((addr) => addr.family === 'IPv6')
+          .map((addr) => `http://[${addr.address}]`),
+      );
+    } finally {
+      writeSpy.mockRestore();
+      rmSync(isolatedConfigPath, { force: true });
+    }
+  });
+
+  it('hands the [server] defaults to the server it starts, as `kimi web` does', async () => {
+    writeFileSync(
+      isolatedConfigPath,
+      '[server]\nport = 58999\nweb_title = "From the file"\n',
+      'utf-8',
+    );
+    mocks.startServerForeground.mockResolvedValue(undefined);
+    const host = makeHost();
+
+    try {
+      await handleWebCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      expect(mocks.startServerForeground).toHaveBeenCalledWith(
+        expect.objectContaining({ port: 58999, webTitle: 'From the file' }),
+        expect.anything(),
+      );
+    } finally {
+      rmSync(isolatedConfigPath, { force: true });
+    }
+  });
+
+  it('prints a loader warning while keeping the configured values', async () => {
+    // `tryReadServerConfig` prints only its own rejection; the loader's
+    // `fileWarnings` come back in the result and would be dropped here, and a
+    // warn-and-continue path must not be silent.
+    writeFileSync(isolatedConfigPath, '[acp]\nsocket = 5\n[server]\nport = 58999\n', 'utf-8');
+    mocks.startServerForeground.mockResolvedValue(undefined);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const host = makeHost();
+
+    try {
+      await handleWebCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('Ignored invalid config in'));
+      expect(mocks.startServerForeground).toHaveBeenCalledWith(
+        expect.objectContaining({ port: 58999 }),
+        expect.anything(),
+      );
+    } finally {
+      errSpy.mockRestore();
+      rmSync(isolatedConfigPath, { force: true });
+    }
+  });
+
+  it('keeps working on a [server] typo instead of throwing after the TUI stopped', async () => {
+    // `/web` runs its takeover after `host.stop()`, so a throwing reader would
+    // escape into machinery no handler catches. The lenient reader warns instead.
+    writeFileSync(isolatedConfigPath, '[server]\nbost = "127.0.0.1"\n', 'utf-8');
+    mocks.startServerForeground.mockResolvedValue(undefined);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const host = makeHost();
+
+    try {
+      await handleWebCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      expect(mocks.startServerForeground).toHaveBeenCalledWith(
+        expect.objectContaining({ port: 58627 }),
+        expect.anything(),
+      );
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("unknown key 'bost'"));
+    } finally {
+      errSpy.mockRestore();
+      rmSync(isolatedConfigPath, { force: true });
+    }
   });
 });
 

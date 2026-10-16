@@ -155,7 +155,7 @@ kimi acp
 
 ### `kimi web`
 
-Run the local Kimi server in the foreground of the current terminal — a single process that exposes the REST + WebSocket API and serves the web UI from the same origin — and open the web UI in the default browser once it is ready. The command stays attached to the terminal and shuts down cleanly on `SIGINT` / `SIGTERM` (e.g. `Ctrl-C`).
+Run the local Kimi server in the foreground of the current terminal — a single process that exposes the REST + WebSocket API and serves the web UI from the same origin — and open the web UI in the default browser once it is ready. The command stays attached to the terminal. `SIGINT` / `SIGTERM` (e.g. `Ctrl-C`) stop it with a reported, bounded shutdown; `SIGHUP` reloads `config.toml` while the server keeps running — see [Signals and shutdown](#signals-and-shutdown).
 
 When the server is running, `GET /openapi.json` returns the REST OpenAPI document and `GET /asyncapi.json` returns the local WebSocket AsyncAPI document. For an end-to-end walkthrough of driving sessions over the API, see [Server API: Drive a session over the API](./server-api.md#drive-a-session-over-the-api); for the protocol details, see the [Server API](./server-api.md) reference.
 
@@ -169,29 +169,58 @@ Multiple instances can share one home directory: each registers itself under `~/
 
 | Option | Description |
 | --- | --- |
-| `--port <port>` | Bind port; defaults to `58627`; a busy port is retried with `+1` |
-| `--host [host]` | Bind host; omit for `127.0.0.1` (this machine only), pass a bare `--host` for `0.0.0.0` (all interfaces) |
+| `--port <port>` | Bind port; built-in default `58627`; a busy port is retried with `+1` |
+| `--host [host]` | Bind host; omit for `127.0.0.1` (this machine only), pass a bare `--host` for `0.0.0.0` (all interfaces), or `--host <host>` for one address |
 | `--allowed-host <host...>` | Extra Host header values allowed through the DNS-rebinding check; repeatable or comma-separated |
-| `--log-level <level>` | Enable server logs at the selected level; omitted by default |
-| `--debug-endpoints` | Mount `/api/v1/debug/*` routes (off by default) |
+| `--ipv6` | Also list the IPv6 interface hints for a wildcard bind; off by default. It changes what is printed, never what is bound |
+| `--no-ipv6` | Do not list the IPv6 interface hints (the default) |
+| `--insecure-no-tls` | Allow a non-loopback bind without a TLS-terminating reverse proxy; only relevant for non-loopback binds |
+| `--allow-remote-shutdown` | On a non-loopback bind, keep `POST /api/v1/shutdown` enabled; by default that route returns 404 |
+| `--no-allow-remote-shutdown` | Disable `POST /api/v1/shutdown` on a non-loopback bind |
 | `--dangerous-bypass-auth` | Disable bearer-token auth on all REST and WebSocket routes so the web UI connects without a token; only for trusted networks or behind an authenticating proxy |
+| `--no-dangerous-bypass-auth` | Keep bearer-token auth enabled |
 | `--enable-kimi-oauth` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI (disabled by default; token/apiKey auth remains the default) |
-| `--web-title <title>` | Custom browser tab title for the web UI; defaults to the workspace directory name |
+| `--no-enable-kimi-oauth` | Keep kimi.com/kimi.ai OAuth login disabled |
+| `--log-level <level>` | Enable server logs at the selected level (`fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`); omitted by default |
+| `--debug-endpoints` | Mount `/api/v1/debug/*` routes (off by default) |
+| `--no-debug-endpoints` | Do not mount the `/api/v1/debug/*` routes |
+| `--web-title <title>` | Custom browser tab title for the web UI; the web UI shows it as `<title> — Kimi Code Web`, and the built-in base title is `Kimi Code Web` |
+| `--rc`, `--remote-control` | Expose the web UI through Kimi Remote Control (experimental) |
+| `--no-rc`, `--no-remote-control` | Do not expose the web UI through Kimi Remote Control |
+| `--open` | Open the web UI in the default browser once the server is ready (the default) |
 | `--no-open` | Do not open the browser once the server is ready |
 
-`kimi web` binds to local loopback only by default and prints the bearer token in the startup banner; the web UI authenticates automatically via the `#token=` URL fragment.
+Every option above also reads from the `[server]` section of `config.toml`, and a value taken from the file is used as-is when no flag is passed. The precedence is `CLI flag` > `[server]` > built-in default. A key the command does not recognize under `[server]` is a startup error that names the key, not a warning. For the field list and types, see [`server`](../configuration/config-files.md#server).
+
+A security-relevant key that the file sets to `true` and the command line does not — `dangerous_bypass_auth`, `allow_remote_shutdown`, `debug_endpoints`, `enable_kimi_oauth` — is reported on stderr when the server starts, named with the file it came from.
+
+Remote Control is still experimental, so `[server] remote_control = true` cannot open it on its own: set `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1` (or `KIMI_CODE_EXPERIMENTAL_FLAG=1`) first, or the command exits with an error. The `--rc` flags are listed in `kimi web --help` only when that gate is open.
+
+Of the on/off flags in the table, `--insecure-no-tls` is the only one without a negated counterpart: it can only relax the TLS requirement. Write `insecure_no_tls = false` under `[server]` to require TLS again.
+
+`kimi web` binds to local loopback only by default and prints the bearer token in the startup banner; the web UI authenticates automatically via the `#token=` URL fragment. An IPv6 bind address is printed in brackets, so `--host ::1` gives `http://[::1]:<port>/`.
 
 ::: info
 The `kimi server` command tree is deprecated: any `kimi server …` invocation (including all legacy subcommands) only prints a deprecation notice and exits with code 1 — use `kimi web` instead. The one exception is `kimi server kill`, which stays functional for stopping servers started by a version before 0.28.0. The notice will be removed in the next major version of Kimi Code.
 :::
 
 ::: danger
-`--dangerous-bypass-auth` disables authentication entirely. Anyone who can reach the port gets full access to your sessions, filesystem, and shell. Only use it on a trusted network or behind your own authenticating reverse proxy, and stop the server with `Ctrl+C` when you are done.
+`--dangerous-bypass-auth` disables authentication entirely. Anyone who can reach the port gets full access to your sessions, filesystem, and shell. Only use it on a trusted network or behind your own authenticating reverse proxy, and stop the server with `Ctrl+C` when you are done — the process reports the shutdown and exits with code `130`.
 :::
+
+#### Signals and shutdown
+
+`SIGINT` and `SIGTERM` end the run. The server writes `Shutting down (SIGINT)…` (or `SIGTERM`) to stderr, closes the listening socket and its connections, flushes what it still owes, and exits with the signal's own code: `130` for `SIGINT`, `143` for `SIGTERM`. Those codes follow the POSIX `128 + signum` convention, so a supervisor can tell a stopped server apart from a crashed one. `Ctrl-C` raises `SIGINT` on Windows too, so `130` applies there; the rest of this section is macOS and Linux behavior, because Windows does not deliver `SIGTERM` and its `SIGHUP` means the console is closing — the process is killed about 10 seconds later regardless.
+
+The teardown is bounded. If the cleanup has not finished within 12 seconds, the process writes `Force-exiting after 12000ms` to stderr and exits with the same signal code. A second `SIGINT` or `SIGTERM` at any point stops waiting and kills the process immediately. A signal that arrives while the server is still starting is reported as `Startup aborted (SIGINT)` and exits with the same code.
+
+`SIGHUP` reloads `config.toml` in place; it does not restart the server. The command prints one line with what changed, for example `config reloaded: providers, thinking`, or `config reloaded: no changes`. When the edited file is invalid, it prints `config reload failed: <message> — kept previous values; config writes are blocked until the file is fixed` and keeps serving with the values it already loaded.
+
+The `[server]` keys themselves are not re-applied, because the server decides them when it binds the socket. After a reload the command re-reads the file and re-applies the same command-line flags on top of it. It compares that with the running values, so a key a flag pins is never listed. The keys a restart would change are named on a line such as `restart required for: port`. The engine also watches `config.toml` and applies an edit on its own shortly after you save, so a `SIGHUP` taken right after saving usually reports `no changes` followed by that line. An edit that only touches `[server]` always reads that way — it is the expected output, not a failure. See [`server`](../configuration/config-files.md#server).
 
 #### `kimi server kill`
 
-Deprecated — only stops a server started by a version before 0.28.0. Those versions could leave a background server behind, recorded in the legacy single-instance lock at `~/.kimi-code/server/lock`; the command first tries `POST /api/v1/shutdown` for a graceful exit, then signals the recorded pid with SIGTERM, escalating to SIGKILL when needed, and removes the lock file once the process is confirmed dead. Servers started by `kimi web` run in the foreground — stop them with `Ctrl+C` instead.
+Deprecated — only stops a server started by a version before 0.28.0. Those versions could leave a background server behind, recorded in the legacy single-instance lock at `~/.kimi-code/server/lock`; the command first tries `POST /api/v1/shutdown` for a graceful exit, then signals the recorded pid with SIGTERM, escalating to SIGKILL when needed, and removes the lock file once the process is confirmed dead. Servers started by `kimi web` run in the foreground and are not recorded in that lock — stop them with `Ctrl+C` instead.
 
 #### `kimi web rotate-token`
 

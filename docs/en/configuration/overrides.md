@@ -23,6 +23,8 @@ For ordinary runtime parameters such as model alias, Plan mode, yolo mode, and S
 1. **Command-line options** (`-m`, `--plan`, `--yolo`, etc.): apply only to the current startup
 2. **User config file** (`~/.kimi-code/config.toml`): stores long-term preferences
 
+The `kimi web` and `kimi rc` options add one tier to this chain. Each of them is resolved as `CLI flag` > the matching key under `[server]` in `config.toml` > the built-in default the command carries, so a flag still wins over the file and the file still wins over the built-in value. Passing no flag at all is what lets `[server]` decide. The keys are listed in [`server`](./config-files.md#server) and the flags in [`kimi web`](../reference/kimi-command.md#kimi-web).
+
 A small number of environment variables explicitly override specific config file fields — for example, `KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT` has higher priority than `[background].keep_alive_on_exit`. These exceptions are noted in [Environment variables](./env-vars.md) and in the relevant field descriptions in [Configuration files](./config-files.md).
 
 ::: warning
@@ -73,6 +75,8 @@ Mutual exclusion rules (startup fails if violated):
 ::: tip
 `--skills-dir` is a one-shot replacement that only affects the current startup. To persistently add search directories, write `extra_skill_dirs` in `config.toml` (see [Agent Skills](../customization/skills.md)).
 :::
+
+`kimi web` and `kimi rc` are the exception among the subcommands: every one of their options can also be written as a key under `[server]`, so a flag becomes a one-off change on top of a persisted setting, and the flag wins. Environment variables stay outside that chain — they are not a fallback for a `[server]` key, the same rule as [Priority for ordinary runtime parameters](#priority-for-ordinary-runtime-parameters).
 
 ## Common scenarios
 

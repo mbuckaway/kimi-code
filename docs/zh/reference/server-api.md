@@ -12,7 +12,7 @@
 
 ### 地址
 
-默认地址为 `http://127.0.0.1:58627`。端口被占用时，服务会用下一个端口重试（至多 100 次）；可用 `--port` / `--host` 修改绑定。同一 home 目录下可并存多个实例，运行中的实例登记在 `~/.kimi-code/server/instances/`。
+内置默认地址为 `http://127.0.0.1:58627`。`kimi web` 按 `CLI flag` > `config.toml` 的 `[server]` > 内置默认值来决定绑定，因此 `--port` / `--host` 与 `[server] port` / `[server] host` 都能改变它（见 [`server` 节](../configuration/config-files.md#server)）。端口被占用时，服务会用下一个端口重试（至多 100 次）；启动横幅打印实际绑定的地址。同一 home 目录下可并存多个实例，运行中的实例登记在 `~/.kimi-code/server/instances/`。
 
 ### 鉴权
 
@@ -148,7 +148,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | --- | --- |
 | `GET /api/v1/healthz` | 探活，免鉴权 |
 | `GET /api/v1/meta` | 服务版本、能力集、`server_id`、实验开关 |
-| `POST /api/v1/shutdown` | 优雅退出（先回 200 再关闭）；仅 loopback 绑定时挂载 |
+| `POST /api/v1/shutdown` | 优雅退出（先回 200，随后关闭在途请求与 WebSocket 连接）；仅 loopback 绑定时挂载 |
 
 #### `GET /api/v1/healthz`
 
@@ -177,7 +177,9 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 #### `POST /api/v1/shutdown`
 
-请求服务优雅退出。响应先发出，随后立即执行关闭，因此调用方可以信任收到的响应。该路由仅在 loopback 绑定时挂载——非 loopback 绑定时它根本不会被注册（请求得到 404），除非服务以 `--allow-remote-shutdown` 启动。
+请求服务优雅退出。响应先发出，只有该响应确实发出之后才开始关闭，因此调用方可以信任收到的响应——调用方在响应写出前断开连接，同样不会卡住关闭流程。该路由仅在 loopback 绑定时挂载——非 loopback 绑定时它根本不会被注册（请求得到 404），除非服务以 `--allow-remote-shutdown` 启动。
+
+关闭过程有上限，且会主动关掉仍未结束的东西而不是等它：在途的 HTTP 请求被直接终止而非等待其完成，每个 WebSocket 对端会先被要求关闭、迟迟不响应即被丢弃。因此客户端会看到连接在关闭期间结束；收到信号停止服务时走的是同一套关闭流程，见 [在网页中使用：信号与重载](../guides/web.md#信号与重载)。
 
 成功时 `data` 为 `{ "ok": true }`。
 

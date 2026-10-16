@@ -16,6 +16,7 @@ class FakeSocket {
   bufferedAmount = 0;
   sent: string[] = [];
   closeCalls: Array<{ code?: number; reason?: string }> = [];
+  terminated = 0;
   private readonly handlers = new Map<string, Array<(...a: unknown[]) => void>>();
 
   on(event: string, cb: (...a: unknown[]) => void): this {
@@ -36,6 +37,7 @@ class FakeSocket {
   }
 
   terminate(): void {
+    this.terminated += 1;
     this.readyState = this.CLOSED;
     this.emit('close');
   }
@@ -46,6 +48,17 @@ class FakeSocket {
 
   frames(): unknown[] {
     return this.sent.map((s) => JSON.parse(s));
+  }
+}
+
+class UnansweredSocket extends FakeSocket {
+  override close(code?: number, reason?: string): void {
+    this.closeCalls.push({ code, reason });
+  }
+
+  answerClose(): void {
+    this.readyState = this.CLOSED;
+    this.emit('close');
   }
 }
 
@@ -829,6 +842,69 @@ describe('WsConnectionV1 heartbeat', () => {
     vi.advanceTimersByTime(100);
     expect(sentTypes(socket)).toEqual(['ping']);
     expect(socket.closeCalls).toHaveLength(0);
+  });
+});
+
+describe('WsConnectionV1 close', () => {
+  const TERMINATE_GRACE_MS = 500;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('terminates a socket whose peer never answers the close frame', () => {
+    const socket = new UnansweredSocket();
+    const conn = makeConn(socket, { heartbeatIntervalMs: 10_000 });
+
+    conn.close(1001, 'server shutting down');
+
+    expect(socket.closeCalls).toEqual([{ code: 1001, reason: 'server shutting down' }]);
+    expect(socket.terminated).toBe(0);
+
+    vi.advanceTimersByTime(TERMINATE_GRACE_MS - 1);
+    expect(socket.terminated).toBe(0);
+
+    vi.advanceTimersByTime(1);
+    expect(socket.terminated).toBe(1);
+    expect(socket.readyState).toBe(socket.CLOSED);
+  });
+
+  it('leaves a socket that answers the close frame within the grace untouched', () => {
+    const socket = new UnansweredSocket();
+    const conn = makeConn(socket, { heartbeatIntervalMs: 10_000 });
+
+    conn.close(1001, 'server shutting down');
+    socket.answerClose();
+
+    vi.advanceTimersByTime(TERMINATE_GRACE_MS * 3);
+    expect(socket.terminated).toBe(0);
+  });
+
+  it('leaves a socket that closes synchronously without an armed fallback at all', () => {
+    const socket = new FakeSocket();
+    const conn = makeConn(socket, { heartbeatIntervalMs: 10_000 });
+
+    conn.close(1001, 'server shutting down');
+
+    vi.advanceTimersByTime(TERMINATE_GRACE_MS * 3);
+    expect(socket.terminated).toBe(0);
+    expect(socket.closeCalls).toEqual([{ code: 1001, reason: 'server shutting down' }]);
+  });
+
+  it('terminates once when close is requested twice on an unanswering socket', () => {
+    const socket = new UnansweredSocket();
+    const conn = makeConn(socket, { heartbeatIntervalMs: 10_000 });
+
+    conn.close(1001, 'server shutting down');
+    conn.close(1001, 'server shutting down again');
+
+    vi.advanceTimersByTime(TERMINATE_GRACE_MS);
+    vi.advanceTimersByTime(TERMINATE_GRACE_MS);
+    expect(socket.terminated).toBe(1);
+    expect(socket.closeCalls).toHaveLength(2);
   });
 });
 

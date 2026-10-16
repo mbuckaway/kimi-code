@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
-import { Worker } from 'node:worker_threads';
+import { threadId, Worker } from 'node:worker_threads';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { MiniDb } from '../src/index.js';
 import {
@@ -21,7 +21,12 @@ import {
 } from '../src/worker-runtime.js';
 import { buildTextArtifacts } from '../src/worker/text-build-core.js';
 import type { TextBuildCoreSpec } from '../src/worker/text-build-core.js';
-import { startWorkerTextBuild, WorkerTextBuildError, verifyFileCrcAsync } from '../src/worker/text-build.js';
+import {
+  startWorkerTextBuild,
+  textBuildWorkerSourceExecArgv,
+  WorkerTextBuildError,
+  verifyFileCrcAsync,
+} from '../src/worker/text-build.js';
 import { WorkerSlots, MaintenanceCancelledError, defaultWorkerSlots } from '../src/maintenance.js';
 import { tmpDir, rmrf, waitFor } from './helpers.js';
 
@@ -166,6 +171,29 @@ describe('worker orchestration (thread hosting)', () => {
     }
     await fs.rm(tmpA, { recursive: true });
     expect(fsSync.existsSync(tmpA)).toBe(false);
+    await db.close();
+  });
+
+  test('source entry spawns a real worker thread on the running node', async () => {
+    const dir = await openTmp('source-spawn');
+    const db = await MiniDb.open<Record<string, unknown>>({ dir, valueCodec: 'json' });
+    await seedTextDb(db, 1500);
+    const tmp = await openTmp('source-spawn-tmp');
+    const reasons: string[] = [];
+    const handle = startWorkerTextBuild(await specForLiveDb(db, dir, tmp), {
+      onFallback: (reason) => reasons.push(reason),
+    });
+    // The inline fallback would settle this same build happily, so the proof
+    // of hosting has to be the thread itself: a live Worker with its own id.
+    expect(handle.worker).toBeInstanceOf(Worker);
+    expect(handle.worker!.threadId).toBeGreaterThan(0);
+    expect(handle.worker!.threadId).not.toBe(threadId);
+    expect(handle.inline).toBe(false);
+    await expect(handle.promise).resolves.toMatchObject({ scannedLiveKeys: 1500 });
+    expect(reasons).toEqual([]);
+    expect(handle.inline).toBe(false);
+    expect(handle.fallbackReason).toBeNull();
+    await fs.rm(tmp, { recursive: true });
     await db.close();
   });
 
@@ -402,6 +430,61 @@ describe('worker orchestration (thread hosting)', () => {
     expect(fsSync.existsSync(tmp)).toBe(false);
     await db.close();
   }, 30000);
+});
+
+describe('source entry execArgv (runtime compatibility)', () => {
+  const SHIM = new URL('../src/worker/register-dev-transform.mjs', import.meta.url).href;
+  const WARNING_FLAG = '--disable-warning=ExperimentalWarning';
+
+  function withAllowedFlags(allowed: ReadonlySet<string> | undefined, probe: () => void): void {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'allowedNodeEnvironmentFlags');
+    Object.defineProperty(process, 'allowedNodeEnvironmentFlags', { value: allowed, configurable: true });
+    try {
+      probe();
+    } finally {
+      if (descriptor) Object.defineProperty(process, 'allowedNodeEnvironmentFlags', descriptor);
+    }
+  }
+
+  test('passes no execArgv flag the running node refuses', () => {
+    const refused = textBuildWorkerSourceExecArgv().filter(
+      (arg) => arg.startsWith('--') && !process.allowedNodeEnvironmentFlags.has(arg),
+    );
+    expect(refused).toEqual([]);
+  });
+
+  test.each([
+    {
+      name: 'accepting the transform flag keeps the native path',
+      allowed: new Set(['--experimental-transform-types', WARNING_FLAG, '--import']),
+      expected: ['--experimental-transform-types', WARNING_FLAG],
+    },
+    {
+      name: 'refusing it routes the source through the tsx shim',
+      allowed: new Set([WARNING_FLAG, '--import']),
+      expected: ['--import', SHIM, WARNING_FLAG],
+    },
+    {
+      name: 'treating an absent flag set as permissive',
+      allowed: undefined,
+      expected: ['--experimental-transform-types', WARNING_FLAG],
+    },
+    {
+      name: 'dropping a refused warning suppression too',
+      allowed: new Set(['--import']),
+      expected: ['--import', SHIM],
+    },
+  ])('$name', ({ allowed, expected }) => {
+    withAllowedFlags(allowed, () => {
+      expect(textBuildWorkerSourceExecArgv()).toEqual(expected);
+    });
+  });
+
+  test('the tsx fallback entry point ships next to the worker source', () => {
+    withAllowedFlags(new Set(['--import']), () => {
+      expect(fsSync.statSync(new URL(SHIM)).isFile()).toBe(true);
+    });
+  });
 });
 
 describe('build core (segmented external merge)', () => {

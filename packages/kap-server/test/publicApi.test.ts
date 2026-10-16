@@ -4,7 +4,15 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { classify, rotateServerToken, serverTokenPath } from '../src/index';
+import type { Scope } from '@moonshot-ai/agent-core-v2';
+
+import {
+  classify,
+  type ConfigReloadResult,
+  reloadConfig,
+  rotateServerToken,
+  serverTokenPath,
+} from '../src/index';
 
 let tmpDir: string | undefined;
 
@@ -26,5 +34,36 @@ describe('server-v2 public API', () => {
     expect(typeof token).toBe('string');
     expect(token.length).toBeGreaterThan(0);
     expect(serverTokenPath(tmpDir)).toBe(join(tmpDir, 'server.token'));
+  });
+
+  it('exports reloadConfig with a ConfigReloadResult shape', async () => {
+    const listeners = new Set<(event: { domain: string; source: string }) => void>();
+    const reloaded: string[] = [];
+    const result: Promise<ConfigReloadResult> = reloadConfig({
+      accessor: {
+        get: () => ({
+          ready: Promise.resolve(),
+          onDidSectionChange: (listener: (event: { domain: string; source: string }) => void) => {
+            listeners.add(listener);
+            return {
+              dispose: () => {
+                listeners.delete(listener);
+              },
+            };
+          },
+          reload: async () => {
+            reloaded.push('reload');
+            for (const listener of listeners) {
+              listener({ domain: 'providers', source: 'reload' });
+            }
+          },
+          diagnostics: () => [],
+        }),
+      },
+    } as unknown as Scope);
+
+    expect(await result).toEqual({ changedDomains: ['providers'] });
+    expect(reloaded).toEqual(['reload']);
+    expect(listeners.size).toBe(0);
   });
 });

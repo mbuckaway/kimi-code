@@ -366,6 +366,30 @@ type = "kimi"
     expect(out).toContain('Unknown top-level key ignored by the v2 engine: providrs.');
   });
 
+  it('does not warn about the [server] section the CLI reads itself', async () => {
+    // `[server]` is a v1-owned schema-less domain on the v2 route, exactly like
+    // `telemetry`: the CLI reads it, so doctor must not claim the key is ignored.
+    await writeFile(
+      join(dir, 'config.toml'),
+      `
+[server]
+host = "127.0.0.1"
+port = 8080
+log_level = "info"
+`,
+      'utf-8',
+    );
+    const { deps, stdout, stderr } = makeDeps();
+
+    const code = await handleDoctor(deps, { target: 'config' });
+
+    expect(code).toBe(0);
+    expect(stderr.join('')).toBe('');
+    const out = stdout.join('');
+    expect(out).toContain(`OK config.toml  ${join(dir, 'config.toml')}`);
+    expect(out).not.toContain('Unknown top-level key');
+  });
+
   it('reports TOML syntax errors with line and column', async () => {
     await writeFile(join(dir, 'config.toml'), '[providers.kimi\ntype = "kimi"\n', 'utf-8');
     const { deps, stderr } = makeDeps();

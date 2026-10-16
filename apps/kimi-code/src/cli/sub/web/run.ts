@@ -1,18 +1,30 @@
 /**
  * `kimi web` — run the local server in the foreground and open the web UI.
  *
- * The server always runs in the current process, attached to the terminal,
- * and shuts down cleanly on SIGINT/SIGTERM. `--no-open` skips the browser.
- * Multiple instances can share the home directory: each registers itself in
- * the instance registry and takes the next free port (see kap-server's
+ * The server always runs in the current process, attached to the terminal, and
+ * stops on SIGINT/SIGTERM: the shutdown is reported, bounded, and exits with
+ * the signal's own code — see `./lifecycle.ts`. `--no-open` skips the browser.
+ * Multiple instances can share the home directory: each registers itself in the
+ * instance registry and takes the next free port (see kap-server's
  * `startServer`).
  */
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { createServerLogger, startServer, type ServerLogger } from '@moonshot-ai/kap-server';
-import { shutdownTelemetry, track } from '@moonshot-ai/kimi-telemetry';
+import {
+  createServerLogger,
+  reloadConfig,
+  startServer,
+  type ConfigReloadResult,
+  type ServerLogger,
+} from '@moonshot-ai/kap-server';
+import { resolveConfigPath, resolveKimiHome } from '@moonshot-ai/kimi-code-sdk';
+import {
+  flushTelemetrySync,
+  shutdownTelemetry,
+  track,
+} from '@moonshot-ai/kimi-telemetry';
 import chalk from 'chalk';
 import { type Command, Option } from 'commander';
 
@@ -35,6 +47,11 @@ import {
   isLoopbackHost,
   splitTokenFragment,
 } from './access-urls';
+import {
+  installServerSignalHandlers,
+  type ConfigReloadReport,
+  type LifecycleTargets,
+} from './lifecycle';
 import { type NetworkAddress } from './networks';
 import {
   formatRemoteControlOutput,
@@ -47,11 +64,17 @@ import {
   type RemoteControlStatus,
 } from './remote-control';
 import {
+  readServerConfig,
+  tryReadServerConfig,
+  type ServerConfigDefaults,
+} from './server-config';
+import {
   DEFAULT_FOREGROUND_LOG_LEVEL,
   DEFAULT_LAN_HOST,
   DEFAULT_SERVER_HOST,
   DEFAULT_SERVER_PORT,
   parseServerOptions,
+  serverOrigin,
   tryResolveServerToken,
   VALID_LOG_LEVELS,
   type ParsedServerOptions,
@@ -59,6 +82,43 @@ import {
 } from './shared';
 
 const WEB_ASSETS_DIR = 'dist-web';
+
+/**
+ * The config domain this command owns. The engine passes it through on a reload
+ * without applying it, so the reload report filters it out (see `reload`).
+ */
+const SERVER_CONFIG_DOMAIN = 'server';
+
+/**
+ * The `[server]` keys that widen the server when the file sets them to `true`,
+ * because their built-in default is `false`. `insecure_no_tls` is not one of
+ * them: its default is already `true`, so a file that repeats it changes nothing
+ * and there is nothing to warn about.
+ */
+type SecurityConfigKey =
+  | 'dangerousBypassAuth'
+  | 'allowRemoteShutdown'
+  | 'debugEndpoints'
+  | 'enableKimiOauth';
+
+/** Key as the resolver reads it, and as the user wrote it in the file. */
+const SECURITY_CONFIG_KEYS: readonly (readonly [SecurityConfigKey, string])[] = [
+  ['dangerousBypassAuth', 'dangerous_bypass_auth'],
+  ['allowRemoteShutdown', 'allow_remote_shutdown'],
+  ['debugEndpoints', 'debug_endpoints'],
+  ['enableKimiOauth', 'enable_kimi_oauth'],
+];
+
+/**
+ * The config story, stated once instead of in eleven option descriptions. The
+ * options no longer carry commander defaults (that would outrank the file), so
+ * help has to say where a value comes from when no flag was passed.
+ */
+const SERVER_CONFIG_HELP = `
+Configuration: every option above also reads from the [server] section of
+<KIMI_CODE_HOME>/config.toml. Precedence is CLI > [server] > built-in default,
+and a security-relevant value taken from the file is reported when the server
+starts. A key this command does not know is a startup error, not a warning.`;
 
 /**
  * Minimal surface `runServerInProcess` needs from the server. kap-server's
@@ -69,11 +129,73 @@ interface RoutedServer {
   readonly address: string;
   readonly logger: ServerLogger;
   close(): Promise<void>;
+  reloadConfig(): Promise<ConfigReloadResult>;
 }
 
-export interface WebCliOptions extends ServerCliOptions {
-  open?: boolean;
-  remoteControl?: boolean;
+/**
+ * The `[server]` spelling of a resolved option, for the restart advisory.
+ * `allowedHosts` is the only key whose plural form does not survive the
+ * mechanical camelCase→snake_case conversion.
+ */
+const CONFIG_KEY_OVERRIDES: Readonly<Record<string, string>> = {
+  allowedHosts: 'allowed_host',
+};
+
+function configKeyOf(parsedKey: string): string {
+  return (
+    CONFIG_KEY_OVERRIDES[parsedKey] ?? parsedKey.replaceAll(/([A-Z])/g, '_$1').toLowerCase()
+  );
+}
+
+/**
+ * Compare two resolved option values. Every field of `ParsedServerOptions` is a
+ * primitive or a flat list of strings, so equality is element-wise.
+ */
+function isSameResolvedValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    return a.length === b.length && a.every((entry, index) => entry === b[index]);
+  }
+  return a === b;
+}
+
+/**
+ * The `[server]` keys that a restart would actually change, or why they could
+ * not be worked out.
+ *
+ * The question is "would restarting with the same flags pick up a different
+ * value?", so the file is re-read and re-parsed with **the same CLI flags** the
+ * server started with, then compared against what it is running on. Comparing
+ * the two file states instead gets it wrong in both directions: it reports the
+ * user's own `--port` as drift on every reload, and it demands a restart for a
+ * key the flag pins, which a restart could not change.
+ *
+ * Lenient on purpose. The server already runs on the values parsed at startup,
+ * and this runs only after the engine applied a reload, so a value that turned
+ * invalid since startup must not come back as a reload failure: the parser's own
+ * message travels as a separate note. `tryReadServerConfig` has already put the
+ * reader's warning on stderr.
+ */
+function restartAdvisoryFor(
+  runningOptions: ParsedServerOptions,
+  cliOptions: ServerCliOptions,
+): Pick<ConfigReloadReport, 'restartKeys' | 'restartAdvisoryError'> {
+  const { defaults } = tryReadServerConfig();
+  let reparsed: ParsedServerOptions;
+  try {
+    reparsed = parseServerOptions(cliOptions, defaults);
+  } catch (error) {
+    return {
+      restartKeys: [],
+      restartAdvisoryError: error instanceof Error ? error.message : String(error),
+    };
+  }
+  return {
+    restartKeys: (Object.keys(reparsed) as (keyof ParsedServerOptions)[])
+      .filter((key) => !isSameResolvedValue(runningOptions[key], reparsed[key]))
+      .map((key) => configKeyOf(key))
+      .toSorted(),
+  };
 }
 
 export interface StartForegroundHooks {
@@ -87,6 +209,8 @@ export interface WebCommandDeps {
   startServerForeground?: (
     options: ParsedServerOptions,
     hooks?: StartForegroundHooks,
+    targets?: LifecycleTargets,
+    cliOptions?: ServerCliOptions,
   ) => Promise<never>;
   startRemoteControl?: (options: RemoteControlOptions) => Promise<RemoteControlHandle>;
   openUrl(url: string): void;
@@ -118,18 +242,23 @@ export function buildWebUrl(origin: string, token: string): string {
   return buildOpenableUrl(origin, token);
 }
 
-/** Build the `web` command, mounting the runner action on `cmd` itself. */
+/**
+ * Build the `web` command, mounting the runner action on `cmd` itself.
+ *
+ * No option carries a commander default: a seeded default is indistinguishable
+ * from a flag the user typed, and it would outrank `[server]` forever. Each
+ * boolean that the file could turn on therefore needs its negated counterpart —
+ * registered AFTER the positive flag, which is what keeps "not passed" a state
+ * commander can express.
+ */
 export function buildWebCommand(
   cmd: Command,
   opts: { forceRemoteControl?: boolean } = {},
 ): Command {
   const forceRemoteControl = opts.forceRemoteControl === true;
+  const hideRemoteControlHelp = !isRemoteControlEnabled();
   const withServerOptions = cmd
-    .option(
-      '--port <port>',
-      `Bind port (default ${DEFAULT_SERVER_PORT})`,
-      String(DEFAULT_SERVER_PORT),
-    )
+    .option('--port <port>', `Bind port (default ${DEFAULT_SERVER_PORT})`)
     .option(
       '--host [host]',
       `Bind host. Omit to bind ${DEFAULT_SERVER_HOST} (this machine only); pass --host to bind ${DEFAULT_LAN_HOST} (all interfaces), or --host <host> for a specific host. The bearer token is printed at startup.`,
@@ -139,24 +268,40 @@ export function buildWebCommand(
       'Extra Host header value to allow through the DNS-rebinding check. Repeat or comma-separate; a leading dot matches a domain suffix (e.g. .example.com).',
     )
     .option(
+      '--ipv6',
+      'Also list the IPv6 interface hints for a wildcard bind. OFF by default; it changes what is printed, never what is bound.',
+    )
+    .option('--no-ipv6', 'Do not list the IPv6 interface hints (default).')
+    // The one security key with no negated counterpart: this flag can only ever
+    // turn the refusal off, and `[server] insecure_no_tls = false` is the way to
+    // require TLS again.
+    .option(
       '--insecure-no-tls',
       'Allow a non-loopback bind without a TLS-terminating reverse proxy. Defaults to true; only relevant for non-loopback binds.',
-      true,
     )
     .option(
       '--allow-remote-shutdown',
       'On a non-loopback bind, keep POST /api/v1/shutdown enabled (default: route is disabled → 404).',
-      false,
+    )
+    .option(
+      '--no-allow-remote-shutdown',
+      'Disable POST /api/v1/shutdown on a non-loopback bind, overriding [server] allow_remote_shutdown.',
     )
     .option(
       '--dangerous-bypass-auth',
       'Disable bearer-token auth on every REST and WebSocket route, and advertise it via /api/v1/meta so the web UI connects without a token. Only use on a trusted network or behind your own authenticating proxy.',
-      false,
+    )
+    .option(
+      '--no-dangerous-bypass-auth',
+      'Keep bearer-token auth enabled, overriding [server] dangerous_bypass_auth.',
     )
     .option(
       '--enable-kimi-oauth',
       'Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI. Disabled by default; token/apiKey auth remains the default.',
-      false,
+    )
+    .option(
+      '--no-enable-kimi-oauth',
+      'Keep kimi.com/kimi.ai OAuth login disabled, overriding [server] enable_kimi_oauth.',
     )
     .option(
       '--log-level <level>',
@@ -165,25 +310,40 @@ export function buildWebCommand(
     .option(
       '--debug-endpoints',
       'Mount /api/v1/debug/* routes for test introspection. OFF by default; production callers leave this unset.',
-      false,
+    )
+    .option(
+      '--no-debug-endpoints',
+      'Do not mount the /api/v1/debug/* routes, overriding [server] debug_endpoints.',
     )
     .option(
       '--web-title <title>',
-      'Set a custom browser tab title for this web UI instance (default: "<workspace dir> | Kimi Code").',
+      'Set a custom browser tab title for this web UI instance. The web UI shows "<title> — Kimi Code Web", and the built-in base title is "Kimi Code Web".',
     );
   if (!forceRemoteControl) {
-    withServerOptions.addOption(
-      new Option(
-        '--rc, --remote-control',
-        'Expose the web UI through Kimi Remote Control (experimental).',
+    const remoteControlOffDescription =
+      'Do not expose the web UI through Kimi Remote Control, overriding [server] remote_control.';
+    withServerOptions
+      .addOption(
+        new Option(
+          '--rc, --remote-control',
+          'Expose the web UI through Kimi Remote Control (experimental).',
+        ).hideHelp(hideRemoteControlHelp),
       )
-        .default(false)
-        .hideHelp(!isRemoteControlEnabled()),
-    );
+      // Both flags are spelled out: a lone `--no-rc` would take its key from
+      // the long form and write `rc`, so the value would never reach the runner.
+      // `hideHelp` is per-Option, so it is applied to each polarity.
+      .addOption(
+        new Option(
+          '--no-rc, --no-remote-control',
+          remoteControlOffDescription,
+        ).hideHelp(hideRemoteControlHelp),
+      );
   }
   return withServerOptions
-    .option('--no-open', 'Do not open the web UI in the default browser.', true)
-    .action(async (opts: WebCliOptions) => {
+    .option('--open', 'Open the web UI in the default browser once the server is ready (default).')
+    .option('--no-open', 'Do not open the web UI in the default browser.')
+    .addHelpText('after', SERVER_CONFIG_HELP)
+    .action(async (opts: ServerCliOptions) => {
       try {
         await handleWebCommand(
           forceRemoteControl ? { ...opts, remoteControl: true } : opts,
@@ -195,20 +355,35 @@ export function buildWebCommand(
     });
 }
 
+/**
+ * `kimi web` — parse, merge with `[server]`, warn about what the file decided,
+ * and run the server. The `[server]` section is read here (once), because the
+ * options the runner consumes are decided once too: a `[server]` typo is a hard
+ * error, and the action's `catch` turns it into exit 1.
+ */
 export async function handleWebCommand(
-  opts: WebCliOptions,
+  opts: ServerCliOptions,
   deps: WebCommandDeps = DEFAULT_WEB_COMMAND_DEPS,
 ): Promise<void> {
-  const parsed = parseServerOptions(opts);
-  if (opts.remoteControl === true && !isRemoteControlEnabled()) {
+  const serverConfig = readServerConfig();
+  // The reader hands these over instead of printing them, so this is the only
+  // place they get said — printing the reader's own rejection too would
+  // report one problem twice.
+  for (const warning of serverConfig.warnings) deps.stderr.write(`warning: ${warning}\n`);
+  const parsed = parseServerOptions(opts, serverConfig.defaults);
+  for (const line of formatConfigProvenanceLines(opts, serverConfig.defaults)) {
+    deps.stderr.write(`${line}\n`);
+  }
+  if (parsed.remoteControl && !isRemoteControlEnabled()) {
     throw new Error(
-      `--remote-control is experimental: set ${REMOTE_CONTROL_FLAG_ENV}=1 (or KIMI_CODE_EXPERIMENTAL_FLAG=1) to enable it.`,
+      `--remote-control is experimental: set ${REMOTE_CONTROL_FLAG_ENV}=1 (or KIMI_CODE_EXPERIMENTAL_FLAG=1) to enable it; ` +
+        'the env gate also covers [server] remote_control, which cannot enable it on its own.',
     );
   }
-  if (opts.remoteControl === true && parsed.dangerousBypassAuth) {
+  if (parsed.remoteControl && parsed.dangerousBypassAuth) {
     throw new Error('--remote-control cannot be combined with --dangerous-bypass-auth.');
   }
-  if (opts.remoteControl === true && !isLoopbackHost(parsed.host)) {
+  if (parsed.remoteControl && !isLoopbackHost(parsed.host)) {
     throw new Error('--remote-control requires a loopback host.');
   }
   const run = deps.startServerForeground ?? startServerForeground;
@@ -223,7 +398,7 @@ export async function handleWebCommand(
       // token line when unavailable. When auth is bypassed, the token is
       // meaningless and is intentionally NOT shown or carried in the URL.
       const token = parsed.dangerousBypassAuth ? undefined : deps.resolveToken?.();
-      if (opts.remoteControl === true) {
+      if (parsed.remoteControl) {
         if (token === undefined) throw new Error('Unable to read the local server token.');
         const dataDir = getDataDir();
         let outputReady = false;
@@ -252,7 +427,7 @@ export async function handleWebCommand(
         );
         outputReady = true;
         for (const line of pendingStatuses) deps.stdout.write(line);
-        if (opts.open === true) deps.openUrl(remoteControl.url);
+        if (parsed.open) deps.openUrl(remoteControl.url);
         return;
       }
       deps.stdout.write(
@@ -261,17 +436,18 @@ export async function handleWebCommand(
               token,
               networkAddresses: deps.networkAddresses,
               dangerousBypassAuth: parsed.dangerousBypassAuth,
+              includeIpv6: parsed.ipv6,
             })
           : formatReadyLine(origin, token, parsed.dangerousBypassAuth),
       );
-      if (opts.open === true) {
+      if (parsed.open) {
         deps.openUrl(token !== undefined ? buildWebUrl(origin, token) : origin);
       }
     },
     onShutdown: async () => {
       await remoteControl?.close();
     },
-  });
+  }, undefined, opts);
 }
 
 function formatReadyLine(
@@ -301,14 +477,58 @@ function formatDangerNoticeLines(): string[] {
 }
 
 /**
+ * One red line per security-relevant `[server]` key the file set to `true` and
+ * the command line did not. A value the user never typed still widens the
+ * server, so it is named with the file it came from — that is the line to find
+ * and delete.
+ */
+function formatConfigProvenanceLines(
+  opts: ServerCliOptions,
+  defaults: ServerConfigDefaults,
+): string[] {
+  const configSourced = SECURITY_CONFIG_KEYS.filter(
+    ([key]) => opts[key] === undefined && defaults[key] === true,
+  ).map(([, tomlKey]) => tomlKey);
+  if (configSourced.length === 0) return [];
+
+  // The same resolution `readServerConfig` used, so the notice names the file
+  // that was actually read.
+  const configPath = resolveConfigPath({ homeDir: resolveKimiHome() });
+  const danger = (text: string): string => chalk.hex(darkColors.error)(text);
+  const dangerBold = (text: string): string => chalk.bold.hex(darkColors.error)(text);
+  return configSourced.map(
+    (tomlKey) =>
+      `  ${dangerBold('⚠ security setting from config:')} ${danger(
+        `[server] ${tomlKey} = true comes from ${configPath}, not from the command line.`,
+      )}`,
+  );
+}
+
+/** The process and stdio a real foreground run reports termination through. */
+const DEFAULT_LIFECYCLE_TARGETS: LifecycleTargets = {
+  proc: process,
+  stdout: process.stdout,
+  stderr: process.stderr,
+};
+
+/**
  * `kimi web` — runs the local server in-process, attached to the current
- * terminal. Resolves only via `process.exit` (SIGINT/SIGTERM).
+ * terminal. It settles only by exiting: the termination handler ends a healthy
+ * run with the signal's code, and a failed startup rethrows.
+ *
+ * `targets` is a test seam for the process and stdio the signal handlers arm
+ * on; production callers leave it unset. `cliOptions` is the raw flag bag the
+ * options were parsed from, needed to tell a config-file change apart from a
+ * flag the user typed (see `restartAdvisoryFor`); callers with no flags — the
+ * TUI's `/web` and `/rc` — leave it empty.
  */
 export async function startServerForeground(
   options: ParsedServerOptions,
   hooks: StartForegroundHooks = {},
+  targets: LifecycleTargets = DEFAULT_LIFECYCLE_TARGETS,
+  cliOptions: ServerCliOptions = {},
 ): Promise<never> {
-  return runServerInProcess(options, hooks);
+  return runServerInProcess(options, hooks, targets, cliOptions);
 }
 
 /**
@@ -318,6 +538,8 @@ export async function startServerForeground(
 async function runServerInProcess(
   options: ParsedServerOptions,
   hooks: StartForegroundHooks,
+  targets: LifecycleTargets,
+  cliOptions: ServerCliOptions,
 ): Promise<never> {
   const version = getVersion();
   // Registers the telemetry provider for `track` / `shutdownTelemetry`; the
@@ -325,31 +547,90 @@ async function runServerInProcess(
   initializeServerTelemetry({ version });
 
   let running: RoutedServer | undefined;
-  let stopping = false;
+  // The reason of the first shutdown request, and the guard that keeps a second
+  // one from starting a competing teardown. `undefined` while the server runs.
+  let stopReason: string | undefined;
+  // A SIGHUP can land while `startServer` is still in flight. Rather than
+  // report a reload that did not happen, the handler waits for the engine
+  // handle: startup either produces one or ends the process, so this cannot
+  // outlive the run.
+  let resolveRunningServer!: (server: RoutedServer) => void;
+  const runningServer = new Promise<RoutedServer>((resolve) => {
+    resolveRunningServer = resolve;
+  });
 
-  async function shutdown(reason: string): Promise<void> {
-    if (stopping) return;
-    stopping = true;
-    running?.logger.info({ reason }, 'server shutting down');
+  /** Closes the server and flushes what it still owes. Never rethrows. */
+  async function closeRunningServer(server: RoutedServer, reason: string): Promise<void> {
+    server.logger.info({ reason }, 'server shutting down');
     try {
       await hooks.onShutdown?.(reason);
     } catch (error) {
-      running?.logger.error(
+      server.logger.error(
         { err: error instanceof Error ? error : new Error(String(error)) },
         'foreground shutdown hook error',
       );
     }
     try {
-      await running?.close();
+      await server.close();
       await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS });
     } catch (error) {
-      running?.logger.error(
+      server.logger.error(
         { err: error instanceof Error ? error : new Error(String(error)) },
         'server shutdown error',
       );
     }
-    process.exit(0);
   }
+
+  async function shutdown(reason: string): Promise<void> {
+    if (stopReason !== undefined) return;
+    stopReason = reason;
+    if (running === undefined) {
+      // The signal landed while `startServer` was still in flight: nothing is
+      // listening yet, so there is no connection to drain, and neither telemetry
+      // flush is reachable on this path — `closeRunningServer`'s never runs and
+      // the `onReady` failure path is not in play. Report it, flush by hand, and
+      // let the handler exit; the check after `startServer` closes the server if
+      // the startup still completes.
+      targets.stderr.write(`Startup aborted (${reason})\n`);
+      flushTelemetrySync();
+      return;
+    }
+    await closeRunningServer(running, reason);
+  }
+
+  /**
+   * Ask the running engine to re-read `config.toml`, then work out which of the
+   * server's own options would need a restart to take effect.
+   *
+   * The two halves are separate because they come from separate config systems:
+   * the engine owns every section it registers, while `[server]` is read by this
+   * CLI before the socket binds and never reaches the engine. So a `[server]`-only
+   * edit honestly reports no changed domains and still needs the advisory below.
+   */
+  async function reload(): Promise<ConfigReloadReport> {
+    const server = await runningServer;
+    const { changedDomains, error } = await server.reloadConfig();
+    if (error !== undefined) {
+      return { changedDomains, error, restartKeys: [] };
+    }
+    // The engine reports `server` as a changed domain because it passes the
+    // section through, but it never applies it: `[server]` is read by this CLI
+    // before the socket binds. Listing it as "reloaded" would imply the new
+    // port or host took effect, which it did not — the restart advisory below
+    // is the honest signal, so the passthrough domain is dropped here.
+    const appliedDomains = changedDomains.filter((domain) => domain !== SERVER_CONFIG_DOMAIN);
+    const advisory = restartAdvisoryFor(options, cliOptions);
+    return {
+      changedDomains: appliedDomains,
+      error: undefined,
+      restartKeys: advisory.restartKeys,
+      restartAdvisoryError: advisory.restartAdvisoryError,
+    };
+  }
+
+  // Armed before `startServer` so a Ctrl+C during bootstrap is reported and
+  // flushed instead of dying by Node's default disposition.
+  installServerSignalHandlers({ ...targets, shutdown, reload });
 
   // kap-server (the DI × Scope engine server) is the only server flavor. Its
   // `startServer` returns `{ host, port, close }` rather than `{ address,
@@ -394,19 +675,27 @@ async function runServerInProcess(
   });
   logger.info('serving the REST/WS API and the bundled web UI');
   running = {
-    address: `http://${v2.host}:${v2.port}`,
+    address: serverOrigin(v2.host, v2.port),
     logger,
     close: () => v2.close(),
+    reloadConfig: () => reloadConfig(v2.core),
   };
+  resolveRunningServer(running);
+
+  // A signal that arrived during bootstrap had no server to close, so its
+  // handler only reported the abort. Close the server that just finished
+  // starting instead of serving a port the process is already leaving. Getting
+  // here with `stopReason` set proves the abort branch ran: a shutdown that
+  // found a server in hand never leaves this stretch of code pending.
+  if (stopReason !== undefined) {
+    await closeRunningServer(running, stopReason);
+    return new Promise<never>(() => {
+      // The termination handler exits the process in production; this keeps the
+      // runner's `never` contract for a host that stubs the exit out.
+    });
+  }
 
   track('server_started', { daemon: false });
-
-  process.once('SIGINT', () => {
-    void shutdown('SIGINT');
-  });
-  process.once('SIGTERM', () => {
-    void shutdown('SIGTERM');
-  });
 
   running.logger.info({ address: running.address }, 'server ready');
 
@@ -423,7 +712,7 @@ async function runServerInProcess(
   }
 
   return new Promise<never>(() => {
-    // Keeps the event loop alive; the process ends via shutdown()/process.exit.
+    // Keeps the event loop alive; the process ends via a termination signal.
   });
 }
 
@@ -459,6 +748,8 @@ interface FormatReadyBannerOptions {
   networkAddresses?: NetworkAddress[];
   /** When true, render a red danger notice (auth is disabled). */
   dangerousBypassAuth?: boolean;
+  /** List the IPv6 interface hints for a wildcard bind. */
+  includeIpv6?: boolean;
 }
 
 export function formatReadyBanner(
@@ -502,6 +793,7 @@ export function formatReadyBanner(
     port,
     opts.token,
     opts.networkAddresses,
+    opts.includeIpv6,
   )) {
     lines.push(`  ${label(text)}${urlWithDimToken(href)}`);
   }
@@ -519,7 +811,9 @@ export function formatReadyBanner(
 
   // Auxiliary controls last.
   lines.push(`  ${label('Logs:     ')}${muted('off')}${dim('  use --log-level info to enable')}`);
-  // The server always runs in the foreground attached to this terminal.
+  // Ctrl+C is the documented stop: the termination handler reports it, bounds
+  // the teardown, and exits with the signal's code. The banner text itself stays
+  // as short as the terminal width allows.
   lines.push(`  ${label('Stop:     ')}${muted('Ctrl+C')}`);
   lines.push('');
   return lines.join('\n');
