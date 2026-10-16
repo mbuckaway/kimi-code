@@ -166,6 +166,42 @@ describe('handleWebCommand', () => {
     writeSpy.mockRestore();
   });
 
+  it('carries [server] ipv6 into the takeover banner hints', async () => {
+    // `/web` builds its own banner options, so the flag has to survive this hop
+    // too: without it the TUI prints a different link list than `kimi web`.
+    writeFileSync(isolatedConfigPath, '[server]\nhost = "0.0.0.0"\nipv6 = true\n', 'utf-8');
+    mocks.tryResolveServerToken.mockReturnValue('tok-1');
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    mocks.startServerForeground.mockImplementation(
+      async (_options: unknown, hooks: { onReady?: (origin: string) => void }) => {
+        hooks.onReady?.('http://0.0.0.0:58627');
+      },
+    );
+    const host = makeHost();
+
+    try {
+      await handleWebCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      const { listNetworkAddresses } = await import('#/cli/sub/web/networks');
+      const written = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      expect(
+        written
+          .split('\n')
+          .map((line) => line.match(/http:\/\/\[[^\]]+\]/)?.[0] ?? '')
+          .filter((origin) => origin !== ''),
+      ).toEqual(
+        listNetworkAddresses()
+          .filter((addr) => addr.family === 'IPv6')
+          .map((addr) => `http://[${addr.address}]`),
+      );
+    } finally {
+      writeSpy.mockRestore();
+      rmSync(isolatedConfigPath, { force: true });
+    }
+  });
+
   it('hands the [server] defaults to the server it starts, as `kimi web` does', async () => {
     writeFileSync(
       isolatedConfigPath,

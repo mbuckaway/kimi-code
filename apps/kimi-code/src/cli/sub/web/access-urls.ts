@@ -7,7 +7,8 @@
  * user open the link on another device and be authenticated automatically.
  */
 
-import { formatHostForUrl, listNetworkAddresses, type NetworkAddress } from './networks';
+import { listNetworkAddresses, type NetworkAddress } from './networks';
+import { serverOrigin } from './shared';
 
 /**
  * Build a directly-openable server URL. When the token is known it is appended
@@ -46,11 +47,6 @@ export function isLoopbackHost(host: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
-function hostOrigin(host: string, port: number): string {
-  const family = host.includes(':') ? 'IPv6' : 'IPv4';
-  return `http://${formatHostForUrl(host, family)}:${port}`;
-}
-
 /**
  * Compute the access-URL lines for a bind host/port.
  *
@@ -58,28 +54,34 @@ function hostOrigin(host: string, port: number): string {
  *   `Network:` line per non-loopback interface.
  * - loopback: a single `Local:` line.
  * - specific host: a single `URL:` line.
+ *
+ * `includeIpv6` gates the interface hints only: an IPv6 bind chosen with
+ * `--host` is printed either way, because that is where the server listens.
  */
 export function accessUrlLines(
   host: string,
   port: number,
   token: string | undefined,
   networkAddresses?: NetworkAddress[],
+  includeIpv6 = false,
 ): AccessUrlLine[] {
   if (isWildcard(host)) {
     const lines: AccessUrlLine[] = [
-      { label: 'Local:    ', url: buildOpenableUrl(`http://localhost:${port}`, token) },
+      { label: 'Local:    ', url: buildOpenableUrl(serverOrigin('localhost', port), token) },
     ];
-    const addrs = networkAddresses ?? listNetworkAddresses();
+    const addrs = (networkAddresses ?? listNetworkAddresses()).filter(
+      (addr) => includeIpv6 || addr.family === 'IPv4',
+    );
     for (const addr of addrs) {
       lines.push({
         label: 'Network:  ',
-        url: buildOpenableUrl(`http://${formatHostForUrl(addr.address, addr.family)}:${port}`, token),
+        url: buildOpenableUrl(serverOrigin(addr.address, port), token),
       });
     }
     return lines;
   }
   if (isLoopbackHost(host)) {
-    return [{ label: 'Local:    ', url: buildOpenableUrl(hostOrigin(host, port), token) }];
+    return [{ label: 'Local:    ', url: buildOpenableUrl(serverOrigin(host, port), token) }];
   }
-  return [{ label: 'URL:      ', url: buildOpenableUrl(hostOrigin(host, port), token) }];
+  return [{ label: 'URL:      ', url: buildOpenableUrl(serverOrigin(host, port), token) }];
 }

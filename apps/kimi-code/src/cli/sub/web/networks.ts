@@ -76,9 +76,11 @@ function isLinkLocalV6(address: string): boolean {
 }
 
 /**
- * Format an address for use as a URL host: bracket-wrap IPv6 per RFC 3986,
- * return IPv4 as-is.
+ * Wrap an IPv6 literal in brackets so it is a valid URL host (RFC 3986 §3.2.2):
+ * `http://::1:58627` is not a URL, `http://[::1]:58627` is. Hostnames and IPv4
+ * addresses are returned unchanged, and an already-bracketed literal stays as
+ * written, so applying this twice equals applying it once.
  */
-export function formatHostForUrl(address: string, family: NetworkAddress['family']): string {
-  return family === 'IPv6' ? `[${address}]` : address;
+export function bracketIpv6Host(host: string): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
 }

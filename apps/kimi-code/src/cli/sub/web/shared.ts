@@ -9,6 +9,8 @@ import { join } from 'node:path';
 
 import type { ServerLogLevel } from '@moonshot-ai/kap-server';
 
+import { bracketIpv6Host } from './networks';
+
 // Type-only on purpose: `server-config.ts` reads this module for `DEFAULT_LAN_HOST`,
 // so a value import here would be an import cycle. `parseServerOptions` is the
 // single place where `CLI flag > [server] > built-in` is decided, and it declares
@@ -183,8 +185,12 @@ export function parseLogLevel(raw: string | undefined, label: string): ServerLog
   );
 }
 
+/**
+ * The one producer of a server origin. Every URL the CLI prints or opens is
+ * built here, so an IPv6 bind cannot reach a consumer unbracketed.
+ */
 export function serverOrigin(host: string, port: number): string {
-  return `http://${host}:${port}`;
+  return `http://${bracketIpv6Host(host)}:${port}`;
 }
 
 /** Strip `/api/v1` and trailing slashes so user-supplied origins are uniform. */

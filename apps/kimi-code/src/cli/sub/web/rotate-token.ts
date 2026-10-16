@@ -14,6 +14,7 @@ import { darkColors } from '#/tui/theme/colors';
 import { getDataDir } from '#/utils/paths';
 
 import { accessUrlLines, splitTokenFragment } from './access-urls';
+import { tryReadServerConfig } from './server-config';
 
 export function registerRotateTokenCommand(server: Command): void {
   server
@@ -38,7 +39,18 @@ export function registerRotateTokenCommand(server: Command): void {
         // connect to yet.
         const instance = await getLiveServerInstance();
         if (instance !== undefined) {
-          for (const { label, url: href } of accessUrlLines(instance.host, instance.port, token)) {
+          // The same `[server] ipv6` gate as the ready banner, so the two
+          // outputs cannot disagree about which links exist. The lenient reader
+          // is the point: a `[server]` typo must not fail rotation, whose catch
+          // exits 1, and that reader already put the warning on stderr.
+          const includeIpv6 = tryReadServerConfig().defaults.ipv6;
+          for (const { label, url: href } of accessUrlLines(
+            instance.host,
+            instance.port,
+            token,
+            undefined,
+            includeIpv6,
+          )) {
             // De-emphasize the `#token=…` fragment so the host/port stands out.
             const [base, frag] = splitTokenFragment(href);
             const rendered =
