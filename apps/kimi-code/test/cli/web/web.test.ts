@@ -3085,6 +3085,9 @@ describe('`kimi web` against a [server] config file', () => {
     expect(calls.options?.ipv6).toBe(true);
   });
 
+  // Every key here has a built-in default of `false`, so a `true` from the file
+  // is a widening the user never typed. `insecure_no_tls` is not one of them:
+  // its built-in default is already `true`, so the file decides nothing.
   const dangerKeys: readonly {
     readonly toml: string;
     readonly cli: ServerCliOptions;
@@ -3102,34 +3105,48 @@ describe('`kimi web` against a [server] config file', () => {
     },
     { toml: 'debug_endpoints', cli: { debugEndpoints: true }, key: 'debugEndpoints' },
     { toml: 'enable_kimi_oauth', cli: { enableKimiOauth: true }, key: 'enableKimiOauth' },
-    { toml: 'insecure_no_tls', cli: { insecureNoTls: true }, key: 'insecureNoTls' },
   ];
 
   it.each(dangerKeys)(
     'reports config-sourced [server] $toml with the file path',
     async ({ toml }) => {
-    writeConfig(`[server]\n${toml} = true\n`);
-    const { io } = await run();
-    const plain = stripAnsi(io.readStderr());
+      writeConfig(`[server]\n${toml} = true\n`);
+      const { io } = await run();
+      const plain = stripAnsi(io.readStderr());
 
-    expect(plain).toContain(`${toml} = true`);
-    expect(plain).toContain(configPath);
-  });
+      expect(plain).toContain(`${toml} = true`);
+      expect(plain).toContain(configPath);
+    },
+  );
 
-  it.each(dangerKeys)('stays silent about $toml when the flag supplied it', async ({ toml, cli }) => {
-    writeConfig(`[server]\n${toml} = true\n`);
-    const { io } = await run(cli);
+  it.each(dangerKeys)(
+    'stays silent about $toml when the flag supplied it',
+    async ({ toml, cli }) => {
+      writeConfig(`[server]\n${toml} = true\n`);
+      const { io } = await run(cli);
 
-    expect(stripAnsi(io.readStderr())).not.toContain(configPath);
-  });
+      expect(stripAnsi(io.readStderr())).not.toContain(configPath);
+    },
+  );
 
   it.each(dangerKeys)(
     'does not report a $toml the file left at its safe value',
     async ({ toml, key }) => {
-    writeConfig(`[server]\n${toml} = false\n`);
+      writeConfig(`[server]\n${toml} = false\n`);
+      const { calls, io } = await run();
+
+      expect(calls.options?.[key]).toBe(false);
+      expect(stripAnsi(io.readStderr())).not.toContain(configPath);
+    },
+  );
+
+  it('keeps [server] insecure_no_tls out of the provenance notice', async () => {
+    // The notice exists for a file value that widens the server. This key's
+    // built-in default is already `true`, so the line would be noise.
+    writeConfig('[server]\ninsecure_no_tls = true\n');
     const { calls, io } = await run();
 
-    expect(calls.options?.[key]).toBe(false);
+    expect(calls.options?.insecureNoTls).toBe(true);
     expect(stripAnsi(io.readStderr())).not.toContain(configPath);
   });
 

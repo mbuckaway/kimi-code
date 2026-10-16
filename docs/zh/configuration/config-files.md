@@ -502,7 +502,7 @@ reply_language = "en"     # 可选 — 默认值为 "en"
 | `port` | `integer` | `58627` | 监听端口；`0` 表示向操作系统申请空闲端口。端口被占用时按 `port + 1` 重试 |
 | `log_level` | `string` | `silent` | 服务日志级别：`fatal`、`error`、`warn`、`info`、`debug`、`trace`、`silent`。只要不是 `silent`，完整的就绪横幅就会改为日志加一行就绪提示 |
 | `allowed_host` | `array<string>` | — | 允许通过 DNS 重绑定检查的额外 `Host` 请求头值；以 `.` 开头匹配域名后缀（例如 `.example.com`）。`KIMI_CODE_ALLOWED_HOSTS` 与本列表合并，而非覆盖它 |
-| `web_title` | `string` | — | 本 web UI 实例的浏览器标签页标题；不设置时回退为 `<workspace dir> \| Kimi Code` |
+| `web_title` | `string` | — | 本 web UI 实例的浏览器标签页标题；web UI 显示为 `<title> — Kimi Code Web`，内置基础标题为 `Kimi Code Web` |
 | `open` | `boolean` | `true` | 服务就绪后是否在默认浏览器中打开 web UI |
 | `ipv6` | `boolean` | `false` | 通配绑定时列出 IPv6 网卡提示。该开关只改变打印内容，绝不改变实际绑定的地址 |
 | `insecure_no_tls` | `boolean` | `true` | 允许在非本机回环绑定上不使用终结 TLS 的反向代理；仅对非回环绑定有意义。设为 `false` 即要求 TLS——`--insecure-no-tls` 标志没有取反形式，只能放宽此项 |
@@ -522,7 +522,7 @@ allowed_host = [".example.com"]
 
 上表没有的键是启动错误，而不是警告。错误会点出键名和文件路径，服务不会启动——`prot = 9000` 绝不会悄悄退回默认端口。改用宽松读取的有四处：`kimi web rotate-token`、TUI 的 `/web` 与 `/rc` 命令，以及 `SIGHUP` 重载时的重启提示。它们都把同一条信息作为 stderr 警告打印出来，并用内置默认值继续运行。
 
-文件中被设为 `true` 的安全相关键会在服务启动时打印一行红色 stderr 信息，点出该键和文件路径，让你看清文件自行决定了什么。这些键是 `insecure_no_tls`、`allow_remote_shutdown`、`dangerous_bypass_auth`、`enable_kimi_oauth` 和 `debug_endpoints`。
+文件中被设为 `true` 的安全相关键会在服务启动时打印一行红色 stderr 信息，点出该键和文件路径，让你看清文件自行决定了什么。这些键是 `allow_remote_shutdown`、`dangerous_bypass_auth`、`enable_kimi_oauth` 和 `debug_endpoints`。
 
 已鉴权的 `POST /api/v1/config`（[服务 API：配置](../reference/server-api.md#配置)）也能写入这些键。该路由会把请求体的每个顶层键当作一个配置域持久化，所以请求体里的 `server` 表会落到 `$KIMI_CODE_HOME/config.toml`（默认就是 `~/.kimi-code/config.toml`）的 `[server]` 节下。它不会把请求体对照上文的键列表做校验。通过 API 存下的拼错的键，会在下次启动时变成上面那个启动错误。下次启动前请在该文件里改正或删除该键。
 

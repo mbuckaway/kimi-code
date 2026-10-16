@@ -184,7 +184,7 @@ Multiple instances can share one home directory: each registers itself under `~/
 | `--log-level <level>` | Enable server logs at the selected level (`fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`); omitted by default |
 | `--debug-endpoints` | Mount `/api/v1/debug/*` routes (off by default) |
 | `--no-debug-endpoints` | Do not mount the `/api/v1/debug/*` routes |
-| `--web-title <title>` | Custom browser tab title for the web UI; unset falls back to `<workspace dir> \| Kimi Code` |
+| `--web-title <title>` | Custom browser tab title for the web UI; the web UI shows it as `<title> — Kimi Code Web`, and the built-in base title is `Kimi Code Web` |
 | `--rc`, `--remote-control` | Expose the web UI through Kimi Remote Control (experimental) |
 | `--no-rc`, `--no-remote-control` | Do not expose the web UI through Kimi Remote Control |
 | `--open` | Open the web UI in the default browser once the server is ready (the default) |
@@ -192,7 +192,7 @@ Multiple instances can share one home directory: each registers itself under `~/
 
 Every option above also reads from the `[server]` section of `config.toml`, and a value taken from the file is used as-is when no flag is passed. The precedence is `CLI flag` > `[server]` > built-in default. A key the command does not recognize under `[server]` is a startup error that names the key, not a warning. For the field list and types, see [`server`](../configuration/config-files.md#server).
 
-A security-relevant key that the file sets to `true` and the command line does not — `dangerous_bypass_auth`, `allow_remote_shutdown`, `debug_endpoints`, `enable_kimi_oauth`, `insecure_no_tls` — is reported on stderr when the server starts, named with the file it came from.
+A security-relevant key that the file sets to `true` and the command line does not — `dangerous_bypass_auth`, `allow_remote_shutdown`, `debug_endpoints`, `enable_kimi_oauth` — is reported on stderr when the server starts, named with the file it came from.
 
 Remote Control is still experimental, so `[server] remote_control = true` cannot open it on its own: set `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1` (or `KIMI_CODE_EXPERIMENTAL_FLAG=1`) first, or the command exits with an error. The `--rc` flags are listed in `kimi web --help` only when that gate is open.
 

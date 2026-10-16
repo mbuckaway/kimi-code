@@ -503,7 +503,7 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 | `port` | `integer` | `58627` | Listen port; `0` asks the operating system for a free port. A busy port is retried with `port + 1` |
 | `log_level` | `string` | `silent` | Server log level: `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`. Any level other than `silent` replaces the full ready banner with logs plus a one-line ready message |
 | `allowed_host` | `array<string>` | — | Extra `Host` header values allowed through the DNS-rebinding check; a leading dot matches a domain suffix (for example `.example.com`). `KIMI_CODE_ALLOWED_HOSTS` is merged with this list rather than replacing it |
-| `web_title` | `string` | — | Browser tab title for this web UI instance; unset falls back to `<workspace dir> \| Kimi Code` |
+| `web_title` | `string` | — | Browser tab title for this web UI instance; the web UI shows it as `<title> — Kimi Code Web`, and the built-in base title is `Kimi Code Web` |
 | `open` | `boolean` | `true` | Open the web UI in the default browser once the server is ready |
 | `ipv6` | `boolean` | `false` | List the IPv6 interface hints for a wildcard bind. The switch changes what is printed, never what is bound |
 | `insecure_no_tls` | `boolean` | `true` | Allow a non-loopback bind without a TLS-terminating reverse proxy; only relevant for a non-loopback bind. Set it to `false` to require TLS — the `--insecure-no-tls` flag has no negated form and can only loosen this |
@@ -523,7 +523,7 @@ allowed_host = [".example.com"]
 
 A key the list above does not contain is a startup error, not a warning. The error names the key and the file, and the server does not start — `prot = 9000` never falls silently to the default port. Four callers read the section leniently instead: `kimi web rotate-token`, the TUI `/web` and `/rc` commands, and the `SIGHUP` restart advisory. Each prints the same message as a stderr warning and continues with the built-in defaults.
 
-A security-relevant key set to `true` in the file prints a red line on stderr when the server starts. The line names the key and the file path, so you can see what the file decided on its own. The keys are `insecure_no_tls`, `allow_remote_shutdown`, `dangerous_bypass_auth`, `enable_kimi_oauth`, and `debug_endpoints`.
+A security-relevant key set to `true` in the file prints a red line on stderr when the server starts. The line names the key and the file path, so you can see what the file decided on its own. The keys are `allow_remote_shutdown`, `dangerous_bypass_auth`, `enable_kimi_oauth`, and `debug_endpoints`.
 
 An authenticated `POST /api/v1/config` ([Server API: Config](../reference/server-api.md#config)) can also write these keys. The route persists each top-level body key as a config domain, so a `server` object in the request body lands under `[server]` in `$KIMI_CODE_HOME/config.toml` (`~/.kimi-code/config.toml` by default). It does not check the request body against the key list above. A mistyped key saved through the API surfaces later as the startup error above. Fix or remove the key in that file before the next start.
 

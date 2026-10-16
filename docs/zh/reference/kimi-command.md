@@ -184,7 +184,7 @@ kimi web --port 58628    # 指定绑定端口
 | `--log-level <level>` | 按所选级别开启服务日志（`fatal`、`error`、`warn`、`info`、`debug`、`trace`、`silent`）；默认不输出 |
 | `--debug-endpoints` | 挂载 `/api/v1/debug/*` 调试路由（默认关闭） |
 | `--no-debug-endpoints` | 不挂载 `/api/v1/debug/*` 路由 |
-| `--web-title <title>` | 自定义 web UI 的浏览器标签页标题；不设置时回退为 `<workspace dir> \| Kimi Code` |
+| `--web-title <title>` | 自定义 web UI 的浏览器标签页标题；web UI 显示为 `<title> — Kimi Code Web`，内置基础标题为 `Kimi Code Web` |
 | `--rc`、`--remote-control` | 通过 Kimi Remote Control 暴露 web UI（实验功能） |
 | `--no-rc`、`--no-remote-control` | 不通过 Kimi Remote Control 暴露 web UI |
 | `--open` | 服务就绪后用默认浏览器打开 web UI（默认） |
@@ -192,7 +192,7 @@ kimi web --port 58628    # 指定绑定端口
 
 上表的每个选项同时从 `config.toml` 的 `[server]` 段落读取；没有传对应 flag 时，直接采用文件里的值。优先级为 `CLI flag` > `[server]` > 内置默认。`[server]` 下出现本命令不认识的键，会在启动时按键名报错，而不是给出警告。字段列表与类型见 [`server`](../configuration/config-files.md#server)。
 
-当文件把某个安全相关的键设为 `true`、而命令行没有传对应 flag 时——`dangerous_bypass_auth`、`allow_remote_shutdown`、`debug_endpoints`、`enable_kimi_oauth`、`insecure_no_tls`——服务启动时会打印到 stderr，并点名这个键来自哪个文件。
+当文件把某个安全相关的键设为 `true`、而命令行没有传对应 flag 时——`dangerous_bypass_auth`、`allow_remote_shutdown`、`debug_endpoints`、`enable_kimi_oauth`——服务启动时会打印到 stderr，并点名这个键来自哪个文件。
 
 Remote Control 仍是实验功能，`[server] remote_control = true` 无法单独开启它：需要先设置 `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1`（或 `KIMI_CODE_EXPERIMENTAL_FLAG=1`），否则命令会报错退出。只有该开关打开时，`kimi web --help` 才会列出 `--rc` 这组 flag。
 

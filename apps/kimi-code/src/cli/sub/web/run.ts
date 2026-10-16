@@ -89,13 +89,17 @@ const WEB_ASSETS_DIR = 'dist-web';
  */
 const SERVER_CONFIG_DOMAIN = 'server';
 
-/** The `[server]` keys that are security-relevant when their value is `true`. */
+/**
+ * The `[server]` keys that widen the server when the file sets them to `true`,
+ * because their built-in default is `false`. `insecure_no_tls` is not one of
+ * them: its default is already `true`, so a file that repeats it changes nothing
+ * and there is nothing to warn about.
+ */
 type SecurityConfigKey =
   | 'dangerousBypassAuth'
   | 'allowRemoteShutdown'
   | 'debugEndpoints'
-  | 'enableKimiOauth'
-  | 'insecureNoTls';
+  | 'enableKimiOauth';
 
 /** Key as the resolver reads it, and as the user wrote it in the file. */
 const SECURITY_CONFIG_KEYS: readonly (readonly [SecurityConfigKey, string])[] = [
@@ -103,7 +107,6 @@ const SECURITY_CONFIG_KEYS: readonly (readonly [SecurityConfigKey, string])[] = 
   ['allowRemoteShutdown', 'allow_remote_shutdown'],
   ['debugEndpoints', 'debug_endpoints'],
   ['enableKimiOauth', 'enable_kimi_oauth'],
-  ['insecureNoTls', 'insecure_no_tls'],
 ];
 
 /**
@@ -314,7 +317,7 @@ export function buildWebCommand(
     )
     .option(
       '--web-title <title>',
-      'Set a custom browser tab title for this web UI instance (default: "<workspace dir> | Kimi Code").',
+      'Set a custom browser tab title for this web UI instance. The web UI shows "<title> — Kimi Code Web", and the built-in base title is "Kimi Code Web".',
     );
   if (!forceRemoteControl) {
     const remoteControlOffDescription =
