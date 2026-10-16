@@ -132,6 +132,10 @@ export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessag
   return false;
 }
 
+export function isVacuousThinkPart(part: ThinkPart): boolean {
+  return part.encrypted === undefined && part.think.trim().length === 0;
+}
+
 export function extractText(message: Message, sep: string = ''): string {
   return message.content
     .filter((part): part is TextPart => part.type === 'text')
