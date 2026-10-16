@@ -12,7 +12,13 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { createServerLogger, startServer, type ServerLogger } from '@moonshot-ai/kap-server';
+import {
+  createServerLogger,
+  reloadConfig,
+  startServer,
+  type ConfigReloadResult,
+  type ServerLogger,
+} from '@moonshot-ai/kap-server';
 import { resolveConfigPath, resolveKimiHome } from '@moonshot-ai/kimi-code-sdk';
 import {
   flushTelemetrySync,
@@ -42,7 +48,8 @@ import {
   splitTokenFragment,
 } from './access-urls';
 import {
-  installServerTerminationHandlers,
+  installServerSignalHandlers,
+  type ConfigReloadReport,
   type LifecycleTargets,
 } from './lifecycle';
 import { type NetworkAddress } from './networks';
@@ -56,7 +63,11 @@ import {
   type RemoteControlOptions,
   type RemoteControlStatus,
 } from './remote-control';
-import { readServerConfig, type ServerConfigDefaults } from './server-config';
+import {
+  readServerConfig,
+  tryReadServerConfig,
+  type ServerConfigDefaults,
+} from './server-config';
 import {
   DEFAULT_FOREGROUND_LOG_LEVEL,
   DEFAULT_LAN_HOST,
@@ -71,6 +82,12 @@ import {
 } from './shared';
 
 const WEB_ASSETS_DIR = 'dist-web';
+
+/**
+ * The config domain this command owns. The engine passes it through on a reload
+ * without applying it, so the reload report filters it out (see `reload`).
+ */
+const SERVER_CONFIG_DOMAIN = 'server';
 
 /** The `[server]` keys that are security-relevant when their value is `true`. */
 type SecurityConfigKey =
@@ -109,6 +126,60 @@ interface RoutedServer {
   readonly address: string;
   readonly logger: ServerLogger;
   close(): Promise<void>;
+  reloadConfig(): Promise<ConfigReloadResult>;
+}
+
+/**
+ * The `[server]` spelling of a resolved option, for the restart advisory.
+ * `allowedHosts` is the only key whose plural form does not survive the
+ * mechanical camelCase→snake_case conversion.
+ */
+const CONFIG_KEY_OVERRIDES: Readonly<Record<string, string>> = {
+  allowedHosts: 'allowed_host',
+};
+
+function configKeyOf(parsedKey: string): string {
+  return (
+    CONFIG_KEY_OVERRIDES[parsedKey] ?? parsedKey.replaceAll(/([A-Z])/g, '_$1').toLowerCase()
+  );
+}
+
+/**
+ * Compare two resolved option values. Every field of `ParsedServerOptions` is a
+ * primitive or a flat list of strings, so equality is element-wise.
+ */
+function isSameResolvedValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    return a.length === b.length && a.every((entry, index) => entry === b[index]);
+  }
+  return a === b;
+}
+
+/**
+ * The `[server]` keys that a restart would actually change.
+ *
+ * The question is "would restarting with the same flags pick up a different
+ * value?", so the file is re-read and re-parsed with **the same CLI flags** the
+ * server started with, then compared against what it is running on. Comparing
+ * the two file states instead gets it wrong in both directions: it reports the
+ * user's own `--port` as drift on every reload, and it demands a restart for a
+ * key the flag pins, which a restart could not change.
+ *
+ * Lenient on purpose — the server is already running on the values it parsed at
+ * startup, so a typo introduced since then must not turn a working reload into a
+ * failure. `tryReadServerConfig` has already put that warning on stderr.
+ */
+function restartKeysFor(
+  runningOptions: ParsedServerOptions,
+  cliOptions: ServerCliOptions,
+): string[] {
+  const { defaults } = tryReadServerConfig();
+  const reparsed = parseServerOptions(cliOptions, defaults);
+  return (Object.keys(reparsed) as (keyof ParsedServerOptions)[])
+    .filter((key) => !isSameResolvedValue(runningOptions[key], reparsed[key]))
+    .map((key) => configKeyOf(key))
+    .toSorted();
 }
 
 export interface StartForegroundHooks {
@@ -123,6 +194,7 @@ export interface WebCommandDeps {
     options: ParsedServerOptions,
     hooks?: StartForegroundHooks,
     targets?: LifecycleTargets,
+    cliOptions?: ServerCliOptions,
   ) => Promise<never>;
   startRemoteControl?: (options: RemoteControlOptions) => Promise<RemoteControlHandle>;
   openUrl(url: string): void;
@@ -359,7 +431,7 @@ export async function handleWebCommand(
     onShutdown: async () => {
       await remoteControl?.close();
     },
-  });
+  }, undefined, opts);
 }
 
 function formatReadyLine(
@@ -429,14 +501,18 @@ const DEFAULT_LIFECYCLE_TARGETS: LifecycleTargets = {
  * run with the signal's code, and a failed startup rethrows.
  *
  * `targets` is a test seam for the process and stdio the signal handlers arm
- * on; production callers leave it unset.
+ * on; production callers leave it unset. `cliOptions` is the raw flag bag the
+ * options were parsed from, needed to tell a config-file change apart from a
+ * flag the user typed (see `restartKeysFor`); callers with no flags — the TUI's
+ * `/web` and `/rc` — leave it empty.
  */
 export async function startServerForeground(
   options: ParsedServerOptions,
   hooks: StartForegroundHooks = {},
   targets: LifecycleTargets = DEFAULT_LIFECYCLE_TARGETS,
+  cliOptions: ServerCliOptions = {},
 ): Promise<never> {
-  return runServerInProcess(options, hooks, targets);
+  return runServerInProcess(options, hooks, targets, cliOptions);
 }
 
 /**
@@ -447,6 +523,7 @@ async function runServerInProcess(
   options: ParsedServerOptions,
   hooks: StartForegroundHooks,
   targets: LifecycleTargets,
+  cliOptions: ServerCliOptions,
 ): Promise<never> {
   const version = getVersion();
   // Registers the telemetry provider for `track` / `shutdownTelemetry`; the
@@ -457,6 +534,14 @@ async function runServerInProcess(
   // The reason of the first shutdown request, and the guard that keeps a second
   // one from starting a competing teardown. `undefined` while the server runs.
   let stopReason: string | undefined;
+  // A SIGHUP can land while `startServer` is still in flight. Rather than
+  // report a reload that did not happen, the handler waits for the engine
+  // handle: startup either produces one or ends the process, so this cannot
+  // outlive the run.
+  let resolveRunningServer!: (server: RoutedServer) => void;
+  const runningServer = new Promise<RoutedServer>((resolve) => {
+    resolveRunningServer = resolve;
+  });
 
   /** Closes the server and flushes what it still owes. Never rethrows. */
   async function closeRunningServer(server: RoutedServer, reason: string): Promise<void> {
@@ -497,9 +582,37 @@ async function runServerInProcess(
     await closeRunningServer(running, reason);
   }
 
+  /**
+   * Ask the running engine to re-read `config.toml`, then work out which of the
+   * server's own options would need a restart to take effect.
+   *
+   * The two halves are separate because they come from separate config systems:
+   * the engine owns every section it registers, while `[server]` is read by this
+   * CLI before the socket binds and never reaches the engine. So a `[server]`-only
+   * edit honestly reports no changed domains and still needs the advisory below.
+   */
+  async function reload(): Promise<ConfigReloadReport> {
+    const server = await runningServer;
+    const { changedDomains, error } = await server.reloadConfig();
+    if (error !== undefined) {
+      return { changedDomains, error, restartKeys: [] };
+    }
+    // The engine reports `server` as a changed domain because it passes the
+    // section through, but it never applies it: `[server]` is read by this CLI
+    // before the socket binds. Listing it as "reloaded" would imply the new
+    // port or host took effect, which it did not — the restart advisory below
+    // is the honest signal, so the passthrough domain is dropped here.
+    const appliedDomains = changedDomains.filter((domain) => domain !== SERVER_CONFIG_DOMAIN);
+    return {
+      changedDomains: appliedDomains,
+      error: undefined,
+      restartKeys: restartKeysFor(options, cliOptions),
+    };
+  }
+
   // Armed before `startServer` so a Ctrl+C during bootstrap is reported and
   // flushed instead of dying by Node's default disposition.
-  installServerTerminationHandlers({ ...targets, shutdown });
+  installServerSignalHandlers({ ...targets, shutdown, reload });
 
   // kap-server (the DI × Scope engine server) is the only server flavor. Its
   // `startServer` returns `{ host, port, close }` rather than `{ address,
@@ -547,7 +660,9 @@ async function runServerInProcess(
     address: serverOrigin(v2.host, v2.port),
     logger,
     close: () => v2.close(),
+    reloadConfig: () => reloadConfig(v2.core),
   };
+  resolveRunningServer(running);
 
   // A signal that arrived during bootstrap had no server to close, so its
   // handler only reported the abort. Close the server that just finished

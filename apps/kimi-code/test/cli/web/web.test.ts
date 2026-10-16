@@ -22,6 +22,7 @@ import { resetCapabilitiesCache, setCapabilities } from '@moonshot-ai/pi-tui';
 import { CLI_SHUTDOWN_TIMEOUT_MS, WEB_SHUTDOWN_FORCE_EXIT_MS } from '#/constant/app';
 import { registerWebCommand } from '#/cli/sub/web';
 import type { LegacyKillDeps } from '#/cli/sub/web/legacy-kill';
+import type { ConfigReloadReport } from '#/cli/sub/web/lifecycle';
 import type { WebCommandDeps } from '#/cli/sub/web/run';
 import type { ServerConfigDefaults } from '#/cli/sub/web/server-config';
 import {
@@ -42,6 +43,7 @@ import { darkColors } from '#/tui/theme/colors';
 const webRunMocks = vi.hoisted(() => ({
   flushTelemetrySync: vi.fn(),
   initializeTelemetry: vi.fn(),
+  reloadConfig: vi.fn(),
   shutdownTelemetry: vi.fn(async () => {}),
   startServer: vi.fn(),
   track: vi.fn(),
@@ -146,10 +148,12 @@ function makeIo(): {
  */
 function fakeProcess() {
   const listeners = new Map<NodeJS.Signals, () => Promise<void> | void>();
+  const register = (signal: NodeJS.Signals, listener: () => Promise<void> | void): void => {
+    listeners.set(signal, listener);
+  };
   return {
-    once: vi.fn((signal: NodeJS.Signals, listener: () => Promise<void> | void) => {
-      listeners.set(signal, listener);
-    }),
+    once: vi.fn(register),
+    on: vi.fn(register),
     off: vi.fn((signal: NodeJS.Signals, listener: () => Promise<void> | void) => {
       if (listeners.get(signal) === listener) {
         listeners.delete(signal);
@@ -191,7 +195,14 @@ afterAll(() => {
 
 /** A `RunningServer` surface with only what `runServerInProcess` consumes. */
 function startedServer(close?: () => Promise<unknown>) {
-  return { host: '127.0.0.1', port: 58627, close: vi.fn(close ?? (async () => {})) };
+  return {
+    host: '127.0.0.1',
+    port: 58627,
+    // `reloadConfig(core)` is mocked at the module boundary, so the handle only
+    // has to exist for the adapter to pass it through.
+    core: {},
+    close: vi.fn(close ?? (async () => {})),
+  };
 }
 
 /** A promise plus its resolver, so a test can hold `startServer` in flight. */
@@ -1608,20 +1619,48 @@ describe('`kimi web` termination controller', () => {
   });
 
   /** Wire the controller against a fake process and a captured stdio pair. */
-  async function installController(shutdown: (reason: string) => Promise<void>) {
-    const { installServerTerminationHandlers } = await import('#/cli/sub/web/lifecycle');
+  async function installController(
+    shutdown: (reason: string) => Promise<void>,
+    reload: () => Promise<ConfigReloadReport> = async () => ({
+      changedDomains: [],
+      error: undefined,
+      restartKeys: [],
+    }),
+  ) {
+    const { installServerSignalHandlers } = await import('#/cli/sub/web/lifecycle');
     const { proc, io, targets } = makeTermination();
-    const uninstall = installServerTerminationHandlers({ shutdown, ...targets });
+    const uninstall = installServerSignalHandlers({ shutdown, reload, ...targets });
     return { proc, io, uninstall };
   }
 
-  it('arms SIGINT and SIGTERM once each', async () => {
-    expect.assertions(3);
+  it('arms SIGINT and SIGTERM once each, plus a persistent SIGHUP on POSIX', async () => {
+    expect.assertions(5);
     const { proc } = await installController(vi.fn(async () => {}));
 
     expect(proc.once).toHaveBeenCalledWith('SIGINT', expect.any(Function));
     expect(proc.once).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
-    expect(proc.listenerCount()).toBe(2);
+    // A reload leaves the server running, so SIGHUP is registered persistently
+    // rather than consumed by the first delivery.
+    expect(proc.on).toHaveBeenCalledWith('SIGHUP', expect.any(Function));
+    expect(proc.once).not.toHaveBeenCalledWith('SIGHUP', expect.any(Function));
+    expect(proc.listenerCount()).toBe(3);
+  });
+
+  it('leaves SIGHUP to the default disposition on Windows', async () => {
+    expect.assertions(2);
+    // On Windows SIGHUP means "the console is closing" and Node is terminated
+    // about ten seconds later regardless, so reloading on it is meaningless and
+    // nothing can send it. The termination signals stay registered.
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const { proc } = await installController(vi.fn(async () => {}));
+
+      expect(proc.listener('SIGHUP')).toBeUndefined();
+      expect(proc.listenerCount()).toBe(2);
+    } finally {
+      Object.defineProperty(process, 'platform', platform!);
+    }
   });
 
   it('reports SIGTERM on stderr and exits 143, never 0', async () => {
@@ -1742,6 +1781,62 @@ describe('`kimi web` termination controller', () => {
     expect(webRunMocks.flushTelemetrySync).not.toHaveBeenCalled();
     expect(proc.exit).toHaveBeenCalledTimes(1);
   });
+
+  it('reports the reload on stdout and keeps running', async () => {
+    expect.assertions(4);
+    const reload = vi.fn(async (): Promise<ConfigReloadReport> => ({
+      changedDomains: ['providers', 'thinking'],
+      error: undefined,
+      restartKeys: [],
+    }));
+    const { proc, io } = await installController(vi.fn(async () => {}), reload);
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(io.readStdout()).toContain('config reloaded: providers, thinking');
+    // A reload is not a shutdown: no exit, and the handler stays armed so the
+    // next SIGHUP works too.
+    expect(proc.exit).not.toHaveBeenCalled();
+    expect(proc.listener('SIGHUP')).toBeDefined();
+  });
+
+  it('reports a failed reload instead of exiting', async () => {
+    expect.assertions(3);
+    const reload = vi.fn(async (): Promise<ConfigReloadReport> => {
+      throw new Error('failed to decode /config.toml as toml');
+    });
+    const { proc, io } = await installController(vi.fn(async () => {}), reload);
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(io.readStdout()).toContain('config reload failed');
+    expect(io.readStdout()).toContain('failed to decode /config.toml as toml');
+    expect(proc.exit).not.toHaveBeenCalled();
+  });
+
+  it('ignores a SIGHUP that arrives while a reload is in flight', async () => {
+    expect.assertions(2);
+    const gate = deferred<ConfigReloadReport>();
+    const reload = vi.fn(() => gate.promise);
+    const { proc } = await installController(vi.fn(async () => {}), reload);
+
+    void proc.listener('SIGHUP')?.();
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    // A reload re-walks every config subscriber, so a storm must not stack.
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    gate.resolve({ changedDomains: [], error: undefined, restartKeys: [] });
+    await flushMicrotasks();
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('`kimi web` foreground shutdown', () => {
@@ -1754,9 +1849,14 @@ describe('`kimi web` foreground shutdown', () => {
     await mockTelemetryBoundary();
     vi.doMock('@moonshot-ai/kap-server', async (importOriginal) => {
       const actual = await importOriginal<typeof import('@moonshot-ai/kap-server')>();
-      return { ...actual, startServer: webRunMocks.startServer };
+      return {
+        ...actual,
+        reloadConfig: webRunMocks.reloadConfig,
+        startServer: webRunMocks.startServer,
+      };
     });
     webRunMocks.startServer.mockReset();
+    webRunMocks.reloadConfig.mockReset();
     webRunMocks.initializeTelemetry.mockReset();
     webRunMocks.flushTelemetrySync.mockReset();
     webRunMocks.track.mockReset();
@@ -1918,6 +2018,225 @@ describe('`kimi web` foreground shutdown', () => {
     expect(io.readStderr()).toContain(`Force-exiting after ${WEB_SHUTDOWN_FORCE_EXIT_MS}ms`);
     expect(webRunMocks.flushTelemetrySync).toHaveBeenCalledTimes(1);
     expect(proc.exit).toHaveBeenCalledWith(143);
+    void run;
+  });
+});
+
+describe('`kimi web` config reload on SIGHUP', () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = mkdtempSync(join(tmpdir(), 'kimi-web-sighup-'));
+    vi.stubEnv('KIMI_CODE_HOME', home);
+    vi.resetModules();
+    await mockTelemetryBoundary();
+    vi.doMock('@moonshot-ai/kap-server', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@moonshot-ai/kap-server')>();
+      return {
+        ...actual,
+        reloadConfig: webRunMocks.reloadConfig,
+        startServer: webRunMocks.startServer,
+      };
+    });
+    webRunMocks.startServer.mockReset();
+    webRunMocks.reloadConfig.mockReset();
+    webRunMocks.flushTelemetrySync.mockReset();
+    webRunMocks.shutdownTelemetry.mockReset();
+    webRunMocks.shutdownTelemetry.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+    vi.clearAllMocks();
+    vi.doUnmock('@moonshot-ai/kap-server');
+    vi.doUnmock('@moonshot-ai/kimi-telemetry');
+  });
+
+  function writeConfig(body: string): void {
+    writeFileSync(join(home, 'config.toml'), body, 'utf8');
+  }
+
+  /** Boot the real foreground runner with a stubbed engine and a fake process. */
+  async function runWithReload(
+    result: unknown,
+    reloadImpl?: () => Promise<unknown>,
+    cliOptions: ServerCliOptions = {},
+  ) {
+    const { startServerForeground } = await import('#/cli/sub/web/run');
+    const { readServerConfig } = await import('#/cli/sub/web/server-config');
+    const { proc, io, targets } = makeTermination();
+    webRunMocks.startServer.mockResolvedValue(startedServer());
+    webRunMocks.reloadConfig.mockImplementation(
+      reloadImpl ?? (async () => result),
+    );
+    // Mirror production: `handleWebCommand` parses with the same flags AND the
+    // same `[server]` file it hands the runner, so the running values and the
+    // SIGHUP re-parse agree unless the file genuinely changed afterwards.
+    const startup = parseServerOptions(cliOptions, readServerConfig().defaults);
+    const run = startServerForeground(startup, {}, targets, cliOptions);
+    await flushMicrotasks();
+    return { proc, io, run };
+  }
+
+  it('hands the engine scope to reloadConfig and prints what changed', async () => {
+    expect.assertions(3);
+    const server = startedServer();
+    const { startServerForeground } = await import('#/cli/sub/web/run');
+    const { proc, io, targets } = makeTermination();
+    webRunMocks.startServer.mockResolvedValue(server);
+    webRunMocks.reloadConfig.mockResolvedValue({ changedDomains: ['providers'], error: undefined });
+
+    const run = startServerForeground(parseServerOptions({}), {}, targets);
+    await flushMicrotasks();
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(webRunMocks.reloadConfig).toHaveBeenCalledWith(server.core);
+    expect(io.readStdout()).toContain('config reloaded: providers');
+    expect(proc.exit).not.toHaveBeenCalled();
+    void run;
+  });
+
+  it('says so when nothing changed', async () => {
+    expect.assertions(2);
+    const { proc, io, run } = await runWithReload({
+      changedDomains: [],
+      error: undefined,
+    });
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(io.readStdout()).toContain('config reloaded: no changes');
+    expect(proc.exit).not.toHaveBeenCalled();
+    void run;
+  });
+
+  it('reports a broken file as a failure and keeps serving', async () => {
+    expect.assertions(4);
+    const { proc, io, run } = await runWithReload({
+      changedDomains: [],
+      error: 'failed to decode /config.toml as toml',
+    });
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    const out = io.readStdout();
+    expect(out).toContain('config reload failed: failed to decode /config.toml as toml');
+    expect(out).toContain('kept previous values');
+    expect(out).toContain('config writes are blocked until the file is fixed');
+    expect(proc.exit).not.toHaveBeenCalled();
+    void run;
+  });
+
+  it('names the [server] keys that need a restart', async () => {
+    expect.assertions(4);
+    // The server starts on the built-in port, then the file asks for another
+    // one. `[server]` is read by the CLI, not applied by the engine — but the
+    // engine still reports the passthrough `server` domain as changed, so the
+    // runner must filter it out. Otherwise a `[server]`-only edit would print
+    // "config reloaded: server", implying the new port took effect when it did
+    // not; the honest report is `no changes` plus the restart advisory.
+    const { proc, io, run } = await runWithReload({
+      changedDomains: ['server'],
+      error: undefined,
+    });
+    writeConfig('[server]\nport = 59999\n');
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    const out = io.readStdout();
+    expect(out).toContain('config reloaded: no changes');
+    expect(out).not.toContain('config reloaded: server');
+    expect(out).toContain('restart required for: port');
+    expect(proc.exit).not.toHaveBeenCalled();
+    void run;
+  });
+
+  it('omits the restart advisory when [server] still matches the running values', async () => {
+    expect.assertions(2);
+    writeConfig('[server]\nport = 58627\n');
+    const { proc, io, run } = await runWithReload({ changedDomains: [], error: undefined });
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(io.readStdout()).toContain('config reloaded: no changes');
+    expect(io.readStdout()).not.toContain('restart required for');
+    void run;
+  });
+
+  it('does not report CLI-pinned keys as drift when the file never set them', async () => {
+    expect.assertions(2);
+    // The regression this pins: the server runs on `--port`/`--no-open`, the
+    // file has no `[server]` at all, so a re-parse that ignores the flags would
+    // compare 58921 against the 58627 built-in and cry "restart required" on a
+    // reload that changed nothing.
+    const { proc, io, run } = await runWithReload(
+      { changedDomains: [], error: undefined },
+      undefined,
+      { port: '58921', open: false },
+    );
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(io.readStdout()).toContain('config reloaded: no changes');
+    expect(io.readStdout()).not.toContain('restart required for');
+    void run;
+  });
+
+  it('does not demand a restart for a key the CLI flag pins over the file', async () => {
+    expect.assertions(3);
+    // `--port 58999` outranks `[server] port`, before and after a reload, so a
+    // restart could not change the bound port — reporting one would be a lie.
+    writeConfig('[server]\nport = 59999\n');
+    const { proc, io, run } = await runWithReload(
+      { changedDomains: [], error: undefined },
+      undefined,
+      { port: '58999' },
+    );
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(io.readStdout()).toContain('config reloaded: no changes');
+    expect(io.readStdout()).not.toContain('restart required for: port');
+    expect(io.readStdout()).not.toContain('restart required for');
+    void run;
+  });
+
+  it('reports a config-sourced key the file changed since startup', async () => {
+    expect.assertions(2);
+    // No CLI flag pins `web_title`, so the file is the only source and a change
+    // to it is exactly the drift a restart would pick up.
+    writeConfig('[server]\nweb_title = "before"\n');
+    const { proc, io, run } = await runWithReload({ changedDomains: [], error: undefined });
+    writeConfig('[server]\nweb_title = "after"\n');
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(io.readStdout()).toContain('config reloaded: no changes');
+    expect(io.readStdout()).toContain('restart required for: web_title');
+    void run;
+  });
+
+  it('survives a reload that rejects', async () => {
+    expect.assertions(3);
+    const { proc, io, run } = await runWithReload(undefined, async () => {
+      throw new Error('engine reload threw');
+    });
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    expect(io.readStdout()).toContain('config reload failed: engine reload threw');
+    expect(io.readStdout()).toContain('kept previous values');
+    expect(proc.exit).not.toHaveBeenCalled();
     void run;
   });
 });
