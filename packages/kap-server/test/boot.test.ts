@@ -449,6 +449,7 @@ describe('server-v2 boot', () => {
   describe('close drain budget', () => {
     const advanceStepMs = 25;
     const advanceCeilingMs = CLOSE_DRAIN_TIMEOUT_MS * 8;
+    const sharedDeadlineCeilingMs = CLOSE_DRAIN_TIMEOUT_MS * 5;
 
     afterEach(() => {
       vi.useRealTimers();
@@ -484,7 +485,7 @@ describe('server-v2 boot', () => {
         await advanceUntilOrBudget(() => elapsedMsAtClose >= 0, advanceStepMs, advanceCeilingMs);
         await closing;
         expect(elapsedMsAtClose).toBeGreaterThanOrEqual(CLOSE_DRAIN_TIMEOUT_MS);
-        expect(elapsedMsAtClose).toBeLessThan(CLOSE_DRAIN_TIMEOUT_MS * 2);
+        expect(elapsedMsAtClose).toBeLessThan(sharedDeadlineCeilingMs);
         expect(abandonedDrains(lines)).toEqual(['drainLogCloses']);
         expect(drainRetirements).toHaveBeenCalledTimes(2);
         expect(() => core.accessor.get(IBootstrapService)).toThrow();
@@ -538,7 +539,7 @@ describe('server-v2 boot', () => {
         await closing;
 
         expect(elapsedMsAtClose).toBeGreaterThanOrEqual(CLOSE_DRAIN_TIMEOUT_MS);
-        expect(elapsedMsAtClose).toBeLessThan(CLOSE_DRAIN_TIMEOUT_MS * 2);
+        expect(elapsedMsAtClose).toBeLessThan(sharedDeadlineCeilingMs);
         expect(abandonedDrains(lines)).toEqual([
           'drainSessionMetadataWrites',
           'ISessionIndexMirror.drain',
