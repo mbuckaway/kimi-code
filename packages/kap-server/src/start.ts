@@ -335,16 +335,26 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
         ),
       );
     };
+    const startDrain = (drain: () => Promise<unknown>): Promise<unknown> => {
+      try {
+        return drain();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
     const drainWithinCloseBudget = async (
       name: string,
       drain: () => Promise<unknown>,
     ): Promise<void> => {
-      const pending = drain();
+      const pending = startDrain(drain);
       const outcome = await Promise.race([
-        pending.then(() => 'drained' as const),
+        pending.then(
+          () => 'drained' as const,
+          () => 'failed' as const,
+        ),
         closeDrainBudget,
       ]);
-      if (outcome === 'spent') abandonDrain(name, pending);
+      if (outcome !== 'drained') abandonDrain(name, pending);
     };
     const removeProcessErrorHandlers = (): void => {
       process.off('unhandledRejection', onUnhandledRejection);

@@ -15,6 +15,7 @@ import {
   IHostRequestHeaders,
   InMemoryStorageService,
   IOAuthToolkit,
+  ISessionIndexMirror,
   ITelemetryService,
   noopTelemetryService,
 } from '@moonshot-ai/agent-core-v2';
@@ -559,6 +560,72 @@ describe('server-v2 boot', () => {
         }
         server = undefined;
       }
+    });
+
+    it('runs the whole close sequence when a drain throws synchronously', async () => {
+      home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-drain-sync-throw-'));
+      const { logger, lines } = recordingLogger();
+      server = await startServer({
+        hostIdentity: TEST_HOST_IDENTITY,
+        host: '127.0.0.1',
+        port: 0,
+        homeDir: home,
+        logger,
+      });
+      const closingServer = server;
+      const core = closingServer.core;
+      server = undefined;
+      const drainRetirements = vi.spyOn(core.accessor.get(IAppendLogStore), 'drainRetirements');
+      const resolveRegisteredService = core.accessor.get;
+      let thrownMirrorLookups = 0;
+      vi.spyOn(core.accessor, 'get').mockImplementation((serviceId) => {
+        if (serviceId === ISessionIndexMirror && thrownMirrorLookups === 0) {
+          thrownMirrorLookups += 1;
+          throw new Error('session index mirror lookup failed after dispose');
+        }
+        return resolveRegisteredService(serviceId);
+      });
+
+      await expect(closingServer.close()).resolves.toBeUndefined();
+
+      expect(thrownMirrorLookups).toBe(1);
+      expect(drainRetirements).toHaveBeenCalledTimes(2);
+      expect(abandonedDrains(lines)).toEqual(['ISessionIndexMirror.drain']);
+      expect(
+        warnRecords(lines).find((record) => record.drain === 'ISessionIndexMirror.drain')?.err,
+      ).toContain('session index mirror lookup failed after dispose');
+      expect(() => core.accessor.get(IBootstrapService)).toThrow();
+      expect(() => resolveRegisteredService(ISessionIndexMirror)).toThrow();
+      expect(await listLiveServerInstances(home)).toEqual([]);
+    });
+
+    it('runs the whole close sequence when a drain rejects before the budget', async () => {
+      home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-drain-reject-'));
+      const { logger, lines } = recordingLogger();
+      server = await startServer({
+        hostIdentity: TEST_HOST_IDENTITY,
+        host: '127.0.0.1',
+        port: 0,
+        homeDir: home,
+        logger,
+      });
+      const closingServer = server;
+      const core = closingServer.core;
+      server = undefined;
+      const drainRetirements = vi.spyOn(core.accessor.get(IAppendLogStore), 'drainRetirements');
+      closeDrainSeams.logCloses.mockImplementationOnce(() =>
+        Promise.reject(new Error('log close failed on disposed worker')),
+      );
+
+      await expect(closingServer.close()).resolves.toBeUndefined();
+
+      expect(drainRetirements).toHaveBeenCalledTimes(2);
+      expect(abandonedDrains(lines)).toEqual(['drainLogCloses']);
+      expect(
+        warnRecords(lines).find((record) => record.drain === 'drainLogCloses')?.err,
+      ).toContain('log close failed on disposed worker');
+      expect(() => core.accessor.get(IBootstrapService)).toThrow();
+      expect(await listLiveServerInstances(home)).toEqual([]);
     });
   });
 
