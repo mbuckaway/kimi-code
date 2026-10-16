@@ -2683,6 +2683,32 @@ describe('search worker host (stage 4)', () => {
     expect(page.items.length).toBeGreaterThan(0);
     expect(page.indexState.state).toBe('ready');
   });
+
+  it('hands the worker execArgv the running node accepts', { timeout: 30_000 }, async () => {
+    const spawnArgs: string[][] = [];
+    const entryUrls: URL[] = [];
+    const host = new SearchWorkerHost({
+      dir: join(home!, 'search-index'),
+      log: noopLog,
+      workerFactory: ({ url, data, execArgv }) => {
+        entryUrls.push(url);
+        spawnArgs.push([...execArgv]);
+        return new Worker(url, { workerData: data, execArgv });
+      },
+    });
+    hosts.push(host);
+
+    await host.ensureOpen();
+
+    expect(entryUrls).toHaveLength(1);
+    expect(entryUrls[0]?.pathname).toMatch(/\/src\/search\/worker\/entry\.ts$/);
+    const flags = (spawnArgs[0] ?? []).filter((arg) => arg.startsWith('--'));
+    expect(flags).toContain('--import');
+    expect(flags.filter((flag) => !process.allowedNodeEnvironmentFlags.has(flag))).toEqual([]);
+    expect((spawnArgs[0] ?? []).some((arg) => arg.endsWith('register-dev-hooks.mjs'))).toBe(true);
+    const status = await host.status();
+    expect(status.readOnly).toBe(false);
+  });
 });
 
 describe('search lifecycle diagnostics (stage 5)', () => {

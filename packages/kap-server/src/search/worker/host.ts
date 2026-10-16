@@ -77,6 +77,29 @@ const BACKOFF_CAP_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_SYNC_TIMEOUT_MS = 30 * 60_000;
 const ORPHAN_LOCK_GRACE_MS = 250;
+const DEV_TYPE_TRANSFORM_FLAG = '--experimental-transform-types';
+const DEV_SUPPRESSED_WARNING_FLAG = '--disable-warning=ExperimentalWarning';
+const DEV_MODULE_IMPORT_FLAG = '--import';
+
+function runtimeAcceptsWorkerFlag(flag: string): boolean {
+  const accepted = process.allowedNodeEnvironmentFlags as ReadonlySet<string> | undefined;
+  return accepted === undefined || accepted.has(flag);
+}
+
+function devSourceExecArgv(): string[] {
+  const typeTransform = runtimeAcceptsWorkerFlag(DEV_TYPE_TRANSFORM_FLAG)
+    ? [DEV_TYPE_TRANSFORM_FLAG]
+    : [DEV_MODULE_IMPORT_FLAG, new URL('./register-dev-transform.mjs', import.meta.url).href];
+  const warningSuppression = runtimeAcceptsWorkerFlag(DEV_SUPPRESSED_WARNING_FLAG)
+    ? [DEV_SUPPRESSED_WARNING_FLAG]
+    : [];
+  return [
+    ...typeTransform,
+    ...warningSuppression,
+    DEV_MODULE_IMPORT_FLAG,
+    new URL('./register-dev-hooks.mjs', import.meta.url).href,
+  ];
+}
 
 const liveLockTokens = new Set<string>();
 
@@ -292,15 +315,7 @@ export class SearchWorkerHost {
     const source = new URL('./entry.ts', import.meta.url);
     try {
       if (fsSync.statSync(source).isFile()) {
-        return {
-          url: source,
-          execArgv: [
-            '--experimental-transform-types',
-            '--disable-warning=ExperimentalWarning',
-            '--import',
-            new URL('./register-dev-hooks.mjs', import.meta.url).href,
-          ],
-        };
+        return { url: source, execArgv: devSourceExecArgv() };
       }
     } catch {
     }
