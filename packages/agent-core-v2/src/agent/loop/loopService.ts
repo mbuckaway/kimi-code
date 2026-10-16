@@ -1126,6 +1126,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     let forceContentPartBoundary = false;
     const accumulate = (part: ContentPart): void => {
       const last = partialContent.at(-1);
+      if (part.type === 'think' && last?.type === 'text' && isVacuousContentPart(part)) return;
       if (!forceContentPartBoundary && last !== undefined && mergeInPlace(last, part)) return;
       forceContentPartBoundary = false;
       partialContent.push({ ...part });

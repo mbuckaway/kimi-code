@@ -100,7 +100,72 @@ describe('generate() stream normalization', () => {
     expect(result.finishReason).toBe('completed');
     expect(result.usage).toBe(USAGE);
     expect(result.id).toBe('gen-1');
+
+    const vacuousThinkInterleaved = new FakeStreamedMessage([
+      { type: 'think', think: '' },
+      { type: 'text', text: 'hel' },
+      { type: 'think', think: '' },
+      { type: 'text', text: 'lo' },
+    ]);
+    const repeated = await generate(
+      createFakeProvider(vacuousThinkInterleaved).provider,
+      SYSTEM_PROMPT,
+      NO_TOOLS,
+      HISTORY,
+    );
+    expect(repeated.message.content).toEqual([
+      { type: 'think', think: '' },
+      { type: 'text', text: 'hello' },
+    ]);
+
+    const trailingVacuousThink = new FakeStreamedMessage([
+      { type: 'text', text: 'hi' },
+      { type: 'think', think: '' },
+    ]);
+    const trailing = await generate(
+      createFakeProvider(trailingVacuousThink).provider,
+      SYSTEM_PROMPT,
+      NO_TOOLS,
+      HISTORY,
+    );
+    expect(trailing.message.content).toEqual([
+      { type: 'text', text: 'hi' },
+      { type: 'think', think: '' },
+    ]);
   });
+
+  it('keeps a stashed vacuous think part ahead of the parts that follow it', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'text', text: 'hi' },
+      { type: 'think', think: '' },
+      { type: 'think', think: 'real' },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      { type: 'text', text: 'hi' },
+      { type: 'think', think: '' },
+      { type: 'think', think: 'real' },
+    ]);
+  });
+
+  it.each(['', '   '])(
+    'drops a stashed vacuous think part (%j) when the text stream resumes',
+    async (think) => {
+      const stream = new FakeStreamedMessage([
+        { type: 'text', text: 'hi' },
+        { type: 'think', think },
+        { type: 'text', text: ' there' },
+      ]);
+      const { provider } = createFakeProvider(stream);
+
+      const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+      expect(result.message.content).toEqual([{ type: 'text', text: 'hi there' }]);
+    },
+  );
 
   it('assembles tool calls from streamed argument deltas by stream index', async () => {
     const callA: ToolCall = {
