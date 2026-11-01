@@ -57,11 +57,18 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     c.onRequest('terminal/release', () => ({}));
   }
 
-  async function boot(clientCapabilities: Record<string, unknown> = {}): Promise<TestClient> {
+  async function boot(
+    clientCapabilities: Record<string, unknown> = {},
+    options: { promptDeadlineMs?: number } = {},
+  ): Promise<TestClient> {
     homeDir = await mkdtemp(join(tmpdir(), 'acp-e2e-turn-'));
     await writeFakeModelConfig(homeDir);
     scripted = createScriptedProvider();
-    client = await createTestClient({ homeDir, extraSeeds: [scripted.seed] });
+    client = await createTestClient({
+      homeDir,
+      extraSeeds: [scripted.seed],
+      promptDeadlineMs: options.promptDeadlineMs,
+    });
     await client.send('initialize', { protocolVersion: 1, clientCapabilities });
     if (clientCapabilities['terminal'] === true) installTerminalClient(client);
     return client;
@@ -323,6 +330,46 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
 
     const result = (await promptPromise) as { stopReason: string };
     expect(result.stopReason).toBe('cancelled');
+  }, 30_000);
+
+  it('settles a parked turn as cancelled once the prompt deadline elapses', async () => {
+    // Tiny server-side deadline: the turn below parks forever at an approval
+    // the client never answers, so only the deadline can settle the prompt.
+    const c = await boot({}, { promptDeadlineMs: 1_000 });
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_deadline',
+      name: 'Bash',
+      arguments: '{"command":"echo deadline_probe"}',
+    });
+    scripted!.mockNextText('should not run');
+    // Publish the approval request so the test knows the turn is genuinely
+    // parked, then never answer it.
+    const permissionSeen = new Promise<void>((seen) => {
+      c.onRequest('session/request_permission', () => {
+        seen();
+        return new Promise(() => {
+          // Never settles — the turn stays parked until the deadline fires.
+        });
+      });
+    });
+
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'run echo' }],
+    });
+    await permissionSeen;
+
+    // Without the deadline this promise would stay pending forever.
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('cancelled');
+    // The follow-up model call never ran: the turn was cancelled mid-approval.
+    expect(scripted!.callCount()).toBe(1);
   }, 30_000);
 
   it('attaches locations to a file tool call and its terminal update', async () => {

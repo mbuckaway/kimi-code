@@ -145,6 +145,14 @@ export interface AcpServerOptions {
    * value.
    */
   readonly resolvePermissionMode?: (sessionId: string) => PermissionMode | undefined;
+  /**
+   * Wall-clock deadline for a single `session/prompt`, in milliseconds. A turn
+   * that has not settled within this window is cancelled and force-settled as
+   * `cancelled`, so a hung turn cannot park the JSON-RPC request forever.
+   * Defaults to two hours (the driver-side deadline); tests inject a tiny
+   * value. See `AcpSession`'s `DEFAULT_PROMPT_DEADLINE_MS`.
+   */
+  readonly promptDeadlineMs?: number;
   readonly bindSessionRuntime?: (sessionId: string) => Promise<void>;
   readonly unbindSessionRuntime?: (sessionId: string) => Promise<void>;
   /** Static or per-session host command palette, compatible with acp-adapter. */
@@ -159,6 +167,7 @@ export class AcpServer {
   private readonly terminalAuthLegacyCommand: string | undefined;
   private readonly resolveOriginalsDir: ((sessionId: string) => string | undefined) | undefined;
   private readonly resolvePermissionMode: ((sessionId: string) => PermissionMode | undefined) | undefined;
+  private readonly promptDeadlineMs: number | undefined;
   private readonly bindSessionRuntime: ((sessionId: string) => Promise<void>) | undefined;
   private readonly unbindSessionRuntime: ((sessionId: string) => Promise<void>) | undefined;
   private readonly resolveSlashCommands: (
@@ -183,6 +192,7 @@ export class AcpServer {
     this.terminalAuthLegacyCommand = opts.terminalAuthLegacyCommand;
     this.resolveOriginalsDir = opts.resolveOriginalsDir;
     this.resolvePermissionMode = opts.resolvePermissionMode;
+    this.promptDeadlineMs = opts.promptDeadlineMs;
     this.bindSessionRuntime = opts.bindSessionRuntime;
     this.unbindSessionRuntime = opts.unbindSessionRuntime;
     const slashCommands = opts.slashCommands;
@@ -578,6 +588,7 @@ export class AcpServer {
       this.resolveOriginalsDir,
       this.resolvePermissionMode,
       hostCommands,
+      this.promptDeadlineMs,
     );
     await acpSession.init();
     return acpSession;

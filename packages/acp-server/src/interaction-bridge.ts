@@ -14,9 +14,11 @@
  * settles the parked request via `session.interactions.respond(id, ...)`.
  */
 
+import type { PermissionOption } from '@agentclientprotocol/sdk';
 import type {
   Interaction,
   QuestionAnswers,
+  QuestionItem,
   QuestionRequest,
   SessionApprovalRequest as ApprovalRequest,
   SessionApprovalResponse as ApprovalResponse,
@@ -39,6 +41,70 @@ import {
   questionItemToPermissionOptions,
   questionRequestToElicitationParams,
 } from './question';
+
+/**
+ * Deadline applied to every reverse-RPC the bridge issues to the ACP client.
+ *
+ * Without a deadline a client that never answers parks the engine's interaction
+ * forever. On expiry the approval path fails closed (`rejected`) while the
+ * question paths resolve with their default (first) option.
+ */
+export const INTERACTION_TIMEOUT_MS = 60_000;
+
+/** Raised when a reverse-RPC does not settle within {@link INTERACTION_TIMEOUT_MS}. */
+class InteractionTimeoutError extends Error {
+  constructor(operation: string, timeoutMs: number) {
+    super(`acp interaction timeout: ${operation} did not settle within ${timeoutMs}ms`);
+    this.name = 'InteractionTimeoutError';
+  }
+}
+
+/**
+ * Reject `promise` with an {@link InteractionTimeoutError} when it does not
+ * settle within `timeoutMs`. The timer is always cleared once either side
+ * settles, so a promptly answered request leaves no pending timer behind.
+ */
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new InteractionTimeoutError(operation, timeoutMs));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/**
+ * Default answers for a question set whose client never answered: the FIRST
+ * declared option of every question (questions without options are skipped).
+ * Returns `null` when no question has an option to default to.
+ */
+function defaultQuestionAnswers(questions: readonly QuestionItem[]): QuestionAnswers | null {
+  const answers: QuestionAnswers = {};
+  for (const question of questions) {
+    const firstOption = question.options[0];
+    if (firstOption !== undefined) answers[question.question] = firstOption.label;
+  }
+  return Object.keys(answers).length > 0 ? answers : null;
+}
+
+/**
+ * Default answer for the single-select permission bridge: the first option that
+ * is not the trailing dismiss/skip (`reject_once`) entry, mapped through the
+ * same response mapper as a real client answer.
+ */
+function defaultPermissionQuestionAnswer(
+  question: QuestionItem,
+  options: readonly PermissionOption[],
+): QuestionAnswers | null {
+  const defaultOption = options.find((option) => option.kind !== 'reject_once');
+  if (defaultOption === undefined) return null;
+  return outcomeToQuestionAnswer(question, {
+    outcome: { outcome: 'selected', optionId: defaultOption.optionId },
+  });
+}
 
 export class AcpInteractionBridge {
   /** Ids the bridge has already begun handling — guards against re-entry. */
@@ -132,18 +198,24 @@ export class AcpInteractionBridge {
 
   /**
    * Bridge an engine {@link ApprovalRequest} to the ACP client and back. Any
-   * RPC failure resolves with `decision: 'rejected'` — rejecting on failure is
-   * strictly safer than approving when the client cannot confirm intent.
+   * RPC failure — including a client that never answers within
+   * {@link INTERACTION_TIMEOUT_MS} — resolves with `decision: 'rejected'`;
+   * rejecting on failure is strictly safer than approving when the client
+   * cannot confirm intent.
    */
   private async handleApproval(req: ApprovalRequest): Promise<ApprovalResponse> {
     const toolCall = buildPermissionToolCallUpdate(req);
     const options = approvalRequestToPermissionOptions(req);
     try {
-      const response = await this.conn.requestPermission({
-        sessionId: this.sessionId,
-        options: [...options],
-        toolCall,
-      });
+      const response = await withDeadline(
+        this.conn.requestPermission({
+          sessionId: this.sessionId,
+          options: [...options],
+          toolCall,
+        }),
+        INTERACTION_TIMEOUT_MS,
+        'session/request_permission (approval)',
+      );
       return attachSelectedLabel(
         response,
         permissionResponseToApprovalResponse(req, response),
@@ -172,9 +244,11 @@ export class AcpInteractionBridge {
    *
    * An `elicitation/create` RPC failure (e.g. a client that advertises the
    * capability but rejects the method) falls back to the permission bridge
-   * for the same request. Any failure of the final attempt resolves with
-   * `null` so the tool takes its canonical "user dismissed" branch —
-   * strictly safer than fabricating an answer.
+   * for the same request. A client that never answers within
+   * {@link INTERACTION_TIMEOUT_MS} resolves with the default (first) option
+   * instead of parking the engine forever. Any other failure of the final
+   * attempt resolves with `null` so the tool takes its canonical "user
+   * dismissed" branch — strictly safer than fabricating an answer.
    */
   private async handleQuestion(req: QuestionRequest): Promise<QuestionAnswers | null> {
     const questions = req.questions;
@@ -189,11 +263,22 @@ export class AcpInteractionBridge {
       req.turnId !== undefined ? acpToolCallId(req.turnId, rawToolCallId) : rawToolCallId;
     if (this.elicitationForm) {
       try {
-        const response = await this.conn.createElicitation(
-          questionRequestToElicitationParams(questions, this.sessionId, toolCallId),
+        const response = await withDeadline(
+          this.conn.createElicitation(
+            questionRequestToElicitationParams(questions, this.sessionId, toolCallId),
+          ),
+          INTERACTION_TIMEOUT_MS,
+          'elicitation/create',
         );
         return elicitationResponseToQuestionAnswers(questions, response);
       } catch (error) {
+        if (error instanceof InteractionTimeoutError) {
+          log.warn('acp: elicitation/create timed out; answering with default options', {
+            sessionId: this.sessionId,
+            toolCallId: req.toolCallId,
+          });
+          return defaultQuestionAnswers(questions);
+        }
         log.warn('acp: elicitation/create failed; falling back to request_permission', {
           sessionId: this.sessionId,
           toolCallId: req.toolCallId,
@@ -210,17 +295,28 @@ export class AcpInteractionBridge {
     const q = questions[0]!;
     const options = questionItemToPermissionOptions(q, 0);
     try {
-      const response = await this.conn.requestPermission({
-        sessionId: this.sessionId,
-        options: [...options],
-        toolCall: {
-          toolCallId,
-          title: 'AskUserQuestion',
-          content: [{ type: 'content', content: { type: 'text', text: q.question } }],
-        },
-      });
+      const response = await withDeadline(
+        this.conn.requestPermission({
+          sessionId: this.sessionId,
+          options: [...options],
+          toolCall: {
+            toolCallId,
+            title: 'AskUserQuestion',
+            content: [{ type: 'content', content: { type: 'text', text: q.question } }],
+          },
+        }),
+        INTERACTION_TIMEOUT_MS,
+        'session/request_permission (question)',
+      );
       return outcomeToQuestionAnswer(q, response);
     } catch (error) {
+      if (error instanceof InteractionTimeoutError) {
+        log.warn('acp: requestPermission (question) timed out; answering with default option', {
+          sessionId: this.sessionId,
+          toolCallId: req.toolCallId,
+        });
+        return defaultPermissionQuestionAnswer(q, options);
+      }
       log.warn('acp: requestPermission (question) failed; dismissing', {
         sessionId: this.sessionId,
         toolCallId: req.toolCallId,
