@@ -43,7 +43,7 @@ export const MoonshotServiceConfigSchema = z.object({
 export type MoonshotServiceConfig = z.infer<typeof MoonshotServiceConfigSchema>;
 
 export const SearchServiceConfigSchema = z.object({
-  provider: z.enum(['kimi', 'zai', 'qwen', 'disabled']).optional(),
+  provider: z.enum(['kimi', 'zai', 'qwen', 'deepseek', 'disabled']).optional(),
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
   model: z.string().optional(),
