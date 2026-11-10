@@ -62,6 +62,8 @@ describe('DefaultToolApprovePermissionPolicyService', () => {
     ],
     ['AskUserQuestion', { questions: [] }],
     ['Skill', { name: 'test-skill' }],
+    ['SendMessage', { to: 'main', message: 'status?' }],
+    ['ListAgents', {}],
     ['EnterPlanMode', {}],
     ['ExitPlanMode', {}],
     ['CreateGoal', { title: 'ship it' }],

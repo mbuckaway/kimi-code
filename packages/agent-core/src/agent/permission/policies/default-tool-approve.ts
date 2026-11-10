@@ -15,6 +15,10 @@ const DEFAULT_APPROVE_TOOLS = new Set([
   'Agent',
   'AskUserQuestion',
   'Skill',
+  // Agent messaging has no side effects on the world: delivery only appends
+  // context to another agent, and listing agents reads session metadata.
+  'SendMessage',
+  'ListAgents',
   // Goal control tools have no side effects on the world: GetGoal reads, and
   // mutation tools only record the goal's own runtime state.
   'GetGoal',

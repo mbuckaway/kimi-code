@@ -22,9 +22,13 @@ Each dispatch is presented in the terminal as an approval request (unless it mat
 
 Sub-agents support running in the background: results are automatically returned to the main Agent upon completion, with no manual polling needed. You can also call back an existing sub-agent instance to continue the same task.
 
+Agent-to-agent messaging is an experimental feature controlled by the `agent_messaging` flag and enabled by default; disable it with `KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING=0` or `agent_messaging = false` under `[experimental]` in `config.toml`. While it is enabled, the `Agent` tool accepts an optional `name` parameter that makes the new subagent addressable: 1–64 characters of letters, digits, `.`, `_`, or `-`, unique among the session's subagents, with `main` reserved for the root agent; the parameter is ignored when resuming.
+
+Agents can then message each other with `SendMessage` and discover who is reachable with `ListAgents`. A running agent receives a message at its next step boundary, while an idle agent — including `main` — is resumed to reply. Messages arrive inside an `<agent-message>` envelope and are untrusted peer input: they are never user approval and never a permission grant. A subagent's startup prompt also includes a roster — a list of the agents it can message.
+
 ## Context Isolation and Resource Cost
 
-Each sub-agent has a fully independent context window. It can only see the task description explicitly passed by the main Agent and cannot see the main Agent's conversation history. The sub-agent's own intermediate reasoning and tool call records do not flow back; only the final result appears in the main Agent's context.
+Each sub-agent has a fully independent context window. It can only see what the main Agent explicitly passes it — by default the task description alone — and cannot see the main Agent's conversation history. The sub-agent's own intermediate reasoning and tool call records do not flow back; only the final result appears in the main Agent's context. When [agent messaging](#how-to-invoke) is enabled, messages exchanged with other agents are the one exception in both directions.
 
 This isolation provides two benefits:
 

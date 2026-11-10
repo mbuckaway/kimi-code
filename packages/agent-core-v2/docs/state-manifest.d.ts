@@ -787,6 +787,10 @@ export interface AgentStateSnapshot {
       } | /* RetryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'retry';
         readonly trigger?: string;
+      } | /* AgentMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+        readonly kind: 'agent_message';
+        readonly from: string;
+        readonly replyTo?: string;
       };
       readonly phase: /* TurnPhase — packages/agent-core-v2/src/agent/activityView/activityView.ts */ 'running' | 'streaming' | 'tool_call' | 'retrying';
       readonly stream?: 'tool_call' | 'assistant' | 'thinking';
@@ -932,6 +936,10 @@ export interface AgentStateSnapshot {
     } | /* RetryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'retry';
       readonly trigger?: string;
+    } | /* AgentMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+      readonly kind: 'agent_message';
+      readonly from: string;
+      readonly replyTo?: string;
     };
     snapshot: () => /* ActivityTurnState — packages/agent-core-v2/src/agent/activityView/activityView.ts */ {
       readonly turnId: number;
@@ -1009,6 +1017,10 @@ export interface AgentStateSnapshot {
       } | /* RetryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'retry';
         readonly trigger?: string;
+      } | /* AgentMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+        readonly kind: 'agent_message';
+        readonly from: string;
+        readonly replyTo?: string;
       };
       readonly phase: /* TurnPhase — packages/agent-core-v2/src/agent/activityView/activityView.ts */ 'running' | 'streaming' | 'tool_call' | 'retrying';
       readonly stream?: 'tool_call' | 'assistant' | 'thinking';
@@ -1168,6 +1180,10 @@ export interface AgentStateSnapshot {
     } | /* RetryOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'retry';
       readonly trigger?: string;
+    } | /* AgentMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+      readonly kind: 'agent_message';
+      readonly from: string;
+      readonly replyTo?: string;
     };
     readonly isError?: boolean;
     readonly note?: string;
@@ -1251,6 +1267,7 @@ export interface AgentStateSnapshot {
       readonly turnId: number;
       readonly reason: 'completed' | 'cancelled' | 'failed' | 'blocked';
       readonly durationMs?: number;
+      readonly interruptReason?: 'error' | 'aborted' | 'max_steps' | 'blocked' | 'user_cancelled' | 'filtered';
     };
   };
   // src/agent/mcp/mcpDiscoveryOps.ts
@@ -1383,6 +1400,7 @@ export interface AgentStateSnapshot {
     readonly terminalNotificationSuppressed?: boolean;
     readonly resumeReminded?: boolean;
     readonly timeoutMs?: number;
+    readonly messageDelivery?: boolean;
   } | /* SubagentTaskInfo — packages/agent-core-v2/src/agent/tools/agent/subagent-task.ts */ {
     readonly kind: 'agent';
     readonly agentId?: string;
@@ -1400,6 +1418,7 @@ export interface AgentStateSnapshot {
     readonly terminalNotificationSuppressed?: boolean;
     readonly resumeReminded?: boolean;
     readonly timeoutMs?: number;
+    readonly messageDelivery?: boolean;
   } | /* ProcessTaskInfo — packages/agent-core-v2/src/agent/tools/os/bash/process-task.ts */ {
     readonly kind: 'process';
     readonly command: string;
@@ -1416,6 +1435,7 @@ export interface AgentStateSnapshot {
     readonly terminalNotificationSuppressed?: boolean;
     readonly resumeReminded?: boolean;
     readonly timeoutMs?: number;
+    readonly messageDelivery?: boolean;
   }>;
   // src/agent/task/taskService.ts
   'task.activeTaskReminderPending': boolean;
@@ -1434,6 +1454,7 @@ export interface AgentStateSnapshot {
     readonly terminalNotificationSuppressed?: boolean;
     readonly resumeReminded?: boolean;
     readonly timeoutMs?: number;
+    readonly messageDelivery?: boolean;
   } | /* SubagentTaskInfo — packages/agent-core-v2/src/agent/tools/agent/subagent-task.ts */ {
     readonly kind: 'agent';
     readonly agentId?: string;
@@ -1451,6 +1472,7 @@ export interface AgentStateSnapshot {
     readonly terminalNotificationSuppressed?: boolean;
     readonly resumeReminded?: boolean;
     readonly timeoutMs?: number;
+    readonly messageDelivery?: boolean;
   } | /* ProcessTaskInfo — packages/agent-core-v2/src/agent/tools/os/bash/process-task.ts */ {
     readonly kind: 'process';
     readonly command: string;
@@ -1467,6 +1489,7 @@ export interface AgentStateSnapshot {
     readonly terminalNotificationSuppressed?: boolean;
     readonly resumeReminded?: boolean;
     readonly timeoutMs?: number;
+    readonly messageDelivery?: boolean;
   }>;
   // replayable · durable · undoable — folds: ContextAppendMessage, TaskWaitDelivered
   'task.notificationDelivery': readonly string[];

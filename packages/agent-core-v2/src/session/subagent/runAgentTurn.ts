@@ -184,7 +184,7 @@ function providerRateLimitErrorFromPayload(error: KimiErrorPayload): APIProvider
   return new APIProviderRateLimitError(error.message, requestId);
 }
 
-function latestAssistantText(messages: readonly ContextMessage[]): string {
+export function latestAssistantText(messages: readonly ContextMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!;
     if (message.role !== 'assistant') continue;

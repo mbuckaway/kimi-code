@@ -207,6 +207,7 @@ class FakeLoopService implements IAgentLoopService {
   readonly hooks: IAgentLoopService['hooks'] = {
     onWillBeginStep: new OrderedHookSlot<BeforeStepContext>(),
     onDidFinishStep: new OrderedHookSlot<AfterStepContext>(),
+    onWillCancelTurn: new OrderedHookSlot(),
   };
 
   cancelFromUser(): void {}

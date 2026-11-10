@@ -209,6 +209,10 @@ export function groupMessagesIntoSnapshot(
     if (!isTaskOrigin) prevNonTaskRole = message.role;
 
     if (message.role === 'user') {
+      if (originKind === 'agent_message') {
+        startTurn(mapOrigin(message));
+        continue;
+      }
       if (originKind !== undefined && HIDDEN_USER_ORIGINS.has(originKind)) {
         if (opensOwnTurn(message)) {
           const opening =
@@ -434,6 +438,8 @@ function mapOrigin(message: HistoryMessage): TurnOrigin {
     }
     case 'hook_result':
       return { kind: 'hook', payload: origin };
+    case 'agent_message':
+      return { kind: 'other', payload: origin };
     case 'shell_command':
       return { kind: 'user', payload: origin };
     case 'user':

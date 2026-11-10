@@ -159,6 +159,31 @@ describe('AgentTranscriptProjector', () => {
     });
   });
 
+  it('maps a peer agent_message turn to the existing other origin instead of a new contract kind', () => {
+    const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
+    const tx = new AgentTranscript('main');
+    const feed = (event: ProjectorBusEvent): void => {
+      tx.apply(projector.map(event));
+    };
+
+    feed(
+      ev({
+        type: 'turn.started',
+        turnId: 0,
+        origin: { kind: 'agent_message', from: 'agent-b', replyTo: 'Builder' },
+      }),
+    );
+    feed(ev({ type: 'assistant.delta', turnId: 0, delta: 'ack from peer' }));
+    feed(ev({ type: 'turn.ended', turnId: 0, reason: 'completed' }));
+
+    const turn = turnOps('t0', tx.getItems());
+    expect(turn.origin).toEqual({
+      kind: 'other',
+      payload: { kind: 'agent_message', from: 'agent-b', replyTo: 'Builder' },
+    });
+    expect(turn.prompt).toBeUndefined();
+  });
+
   it('projects the live prompt from turn.started and keeps it through turn.ended', () => {
     const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
     const tx = new AgentTranscript('main');

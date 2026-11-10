@@ -41,6 +41,7 @@ import {
 import { ILogService } from '#/_base/log/log';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
+import { AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { isSubagentMeta, subagentLabels, subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
@@ -57,11 +58,13 @@ import {
   resolveSubagentTimeoutMs,
   stripSubagentForkParameter,
   stripSubagentModelParameter,
+  stripSubagentNameParameter,
 } from '#/session/subagent/configSection';
 import {
   BACKGROUND_AGENT_UNAVAILABLE,
   DEFAULT_PROFILE_NAME,
   ISubagentTool,
+  NAME_EXPERIMENTAL_UNAVAILABLE,
   RESUME_WITH_TYPE_UNAVAILABLE,
   RESUMED_LABEL,
   SUBAGENT_STOPPED_MESSAGE,
@@ -75,6 +78,7 @@ import AGENT_BACKGROUND_DISABLED_DESCRIPTION from './agent-background-disabled.m
 import AGENT_BACKGROUND_DESCRIPTION from './agent-background-enabled.md?raw';
 import AGENT_DESCRIPTION_BASE from './agent.md?raw';
 import AGENT_FORK_DESCRIPTION from './agent-fork.md?raw';
+import AGENT_MESSAGING_DESCRIPTION from './agent-messaging.md?raw';
 
 const SUBAGENT_TOOL_PARAMETERS = toInputJsonSchema(SubagentToolInputSchema);
 const SUBAGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(SUBAGENT_TOOL_PARAMETERS);
@@ -87,9 +91,12 @@ export class SubagentTool implements ISubagentTool {
     const parameters = exposesSubagentModelChoice(this.config, this.flags)
       ? SUBAGENT_TOOL_PARAMETERS
       : SUBAGENT_TOOL_PARAMETERS_NO_MODEL;
-    return this.flags.enabled(SUBAGENT_FORK_FLAG_ID)
+    const withFork = this.flags.enabled(SUBAGENT_FORK_FLAG_ID)
       ? parameters
       : stripSubagentForkParameter(parameters);
+    return this.flags.enabled(AGENT_MESSAGING_FLAG_ID)
+      ? withFork
+      : stripSubagentNameParameter(withFork);
   }
 
   private readonly callerAgentId: string;
@@ -126,7 +133,11 @@ export class SubagentTool implements ISubagentTool {
     const backgroundDescription = this.canRunInBackground()
       ? AGENT_BACKGROUND_DESCRIPTION
       : AGENT_BACKGROUND_DISABLED_DESCRIPTION;
-    let description = `${AGENT_DESCRIPTION_BASE}\n\n${backgroundDescription}`;
+    let description = AGENT_DESCRIPTION_BASE;
+    if (this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
+      description += `\n\n${AGENT_MESSAGING_DESCRIPTION}`;
+    }
+    description += `\n\n${backgroundDescription}`;
     if (this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
       description += `\n\n${AGENT_FORK_DESCRIPTION}`;
     }
@@ -142,6 +153,7 @@ export class SubagentTool implements ISubagentTool {
       this.knownToolReferences(),
       (profile, name, source) =>
         this.toolPolicy.isToolActiveForProfile(profile, name, source),
+      this.hiddenToolNames(),
     );
     if (typeLines) {
       description += `\n\nAvailable agent types (pass via subagent_type):\n${typeLines}`;
@@ -189,6 +201,12 @@ export class SubagentTool implements ISubagentTool {
     );
     if (allowlist === undefined || own.subagents !== undefined) return allowlist;
     return withoutDelegatingTargets(this.catalog, allowlist);
+  }
+
+  private hiddenToolNames(): ReadonlySet<string> {
+    return this.flags.enabled(AGENT_MESSAGING_FLAG_ID)
+      ? new Set()
+      : new Set(['SendMessage', 'ListAgents']);
   }
 
   private knownToolReferences(): ToolReference[] {
@@ -301,6 +319,7 @@ export class SubagentTool implements ISubagentTool {
         plan,
         labels: subagentLabels(this.callerAgentId),
         prompt: args.prompt,
+        name: args.name,
       });
       agentId = spawned.agentId;
       profileName = spawned.profileName;
@@ -375,6 +394,10 @@ export class SubagentTool implements ISubagentTool {
 
       if (isResume && requestedProfileName !== undefined) {
         return { output: RESUME_WITH_TYPE_UNAVAILABLE, isError: true };
+      }
+
+      if (args.name !== undefined && !this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
+        return { output: NAME_EXPERIMENTAL_UNAVAILABLE, isError: true };
       }
 
       if (args.fork === true) {
@@ -519,7 +542,10 @@ function buildProfileDescriptions(
     name: string,
     source: ToolReference['source'],
   ) => boolean,
+  hiddenTools: ReadonlySet<string> = new Set(),
 ): string {
+  const visible = (names: readonly string[]): readonly string[] =>
+    hiddenTools.size === 0 ? names : names.filter((name) => !hiddenTools.has(name));
   return profiles
     .map((profile) => {
       const details = [profile.description, profile.whenToUse].filter(
@@ -533,24 +559,28 @@ function buildProfileDescriptions(
           !isToolActive(profile, tool.name, tool.source),
       );
       if (externallyRestricted) {
-        const effectiveTools = tools
-          .filter((tool) => isToolActive(profile, tool.name, tool.source))
-          .map((tool) => tool.name);
+        const effectiveTools = visible(
+          tools
+            .filter((tool) => isToolActive(profile, tool.name, tool.source))
+            .map((tool) => tool.name),
+        );
         if (effectiveTools.length === 0) {
           return `${header}\n  Tools: none`;
         }
         return `${header}\n  Tools: ${effectiveTools.join(', ')}`;
       }
       if (activeTools === undefined) {
-        if ((profile.disallowedTools?.length ?? 0) > 0) {
-          return `${header}\n  Tools: all except ${profile.disallowedTools!.join(', ')}`;
+        const disallowed = visible(profile.disallowedTools ?? []);
+        if (disallowed.length > 0) {
+          return `${header}\n  Tools: all except ${disallowed.join(', ')}`;
         }
         return `${header}\n  Tools: all`;
       }
-      if (activeTools.length === 0) {
+      const listed = visible(activeTools);
+      if (listed.length === 0) {
         return `${header}\n  Tools: none`;
       }
-      return `${header}\n  Tools: ${activeTools.join(', ')}`;
+      return `${header}\n  Tools: ${listed.join(', ')}`;
     })
     .join('\n');
 }

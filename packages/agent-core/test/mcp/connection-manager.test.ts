@@ -1235,6 +1235,12 @@ describe('Session MCP startup', () => {
       id: 'test-mcp-slow',
       kaos: testKaos.withCwd(tmp),
       homedir: join(tmp, 'session'),
+      // Keep profile/skill discovery inside the temp dir: scanning the real
+      // user home adds environment-dependent startup latency unrelated to the
+      // MCP-startup behavior under test.
+      kimiHomeDir: join(tmp, 'kimi-home'),
+      skills: { userHomeDir: tmp, brandHomeDir: join(tmp, 'kimi-home') },
+      agents: { userHomeDir: tmp },
       rpc: sessionRpc(),
       mcpConfig: {
         servers: {

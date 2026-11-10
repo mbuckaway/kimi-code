@@ -38,7 +38,7 @@ import {
 import type { AgentEvent, TurnEndedEvent, TurnEndReason } from '../../rpc';
 import type { TelemetryPropertyValue } from '../../telemetry';
 import { gateImageFormatParts } from '../../tools/support/image-compress';
-import { abortable, isUserCancellation, userCancellationReason } from '../../utils/abort';
+import { abortReason, abortable, isUserCancellation, userCancellationReason } from '../../utils/abort';
 import { USER_PROMPT_ORIGIN, type PromptOrigin } from '../context';
 import {
   captureMediaStripSnapshot,
@@ -140,6 +140,7 @@ export class TurnFlow {
   private steerBuffer: BufferedSteer[] = [];
   private turnId = -1;
   private activeTurn: 'resuming' | ActiveTurn | null = null;
+  private lastTurnEndedByUser = false;
   private readonly toolCallStartedAt = new Map<
     string,
     { name: string; startedAt: number; traceId: string | undefined }
@@ -225,6 +226,67 @@ export class TurnFlow {
     return this.launch(gated, origin);
   }
 
+  /**
+   * True when the most recent turn ended because the user cancelled it. Agent
+   * messaging uses this to refuse reviving an agent the user stopped.
+   */
+  get lastTurnWasUserInterrupted(): boolean {
+    return this.lastTurnEndedByUser;
+  }
+
+  /** Buffered agent-to-agent messages awaiting the next step boundary. */
+  get bufferedAgentMessageCount(): number {
+    return this.steerBuffer.filter((steer) => steer.origin.kind === 'agent_message').length;
+  }
+
+  private readonly turnStartWaiters = new Set<() => void>();
+
+  /**
+   * Resolve once a turn is active (immediately when one already is). Agent
+   * messaging uses this to wait out another host's pre-prompt launch instead
+   * of starting a competing turn. When `signal` aborts, the waiter is removed.
+   */
+  waitForTurnStart(signal?: AbortSignal): Promise<void> {
+    if (this.hasActiveTurn) return Promise.resolve();
+    if (signal === undefined) {
+      return new Promise((resolve) => {
+        const waiter = (): void => {
+          this.turnStartWaiters.delete(waiter);
+          resolve();
+        };
+        this.turnStartWaiters.add(waiter);
+      });
+    }
+    signal.throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        this.turnStartWaiters.delete(waiter);
+        signal.removeEventListener('abort', onAbort);
+      };
+      const waiter = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onAbort = (): void => {
+        cleanup();
+        reject(abortReason(signal));
+      };
+      this.turnStartWaiters.add(waiter);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  /** Pending {@link waitForTurnStart} waiters (diagnostics / tests). */
+  get turnStartWaiterCount(): number {
+    return this.turnStartWaiters.size;
+  }
+
+  private notifyTurnStarted(): void {
+    if (this.turnStartWaiters.size === 0) return;
+    for (const resolve of this.turnStartWaiters) resolve();
+    this.turnStartWaiters.clear();
+  }
+
   retry(trigger?: string): number | null {
     return this.prompt([], { kind: 'retry', trigger });
   }
@@ -257,6 +319,7 @@ export class TurnFlow {
     // Per-turn setup (telemetry, usage window, `turn.started`, appending the
     // prompt) now lives in `runOneTurn`, so a goal-driven run emits a clean
     // start/end pair per continuation turn rather than one mega-turn.
+    this.lastTurnEndedByUser = false;
     const turnId = this.allocateTurnId();
     const controller = new AbortController();
     const promise = this.turnWorker(turnId, input, origin, controller.signal);
@@ -269,7 +332,19 @@ export class TurnFlow {
     };
 
     void firstRequest.catch(() => undefined);
-    void promise.then(firstRequest.reject, firstRequest.reject);
+    void promise.then(
+      () => {
+        // The turn ended before any loop event resolved firstRequest. Reject
+        // with a real Error so callers never surface a raw turn result object.
+        firstRequest.reject(
+          new Error(`Turn ${String(turnId)} ended before its first request`),
+        );
+      },
+      (error: unknown) => {
+        firstRequest.reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+    this.notifyTurnStarted();
 
     return turnId;
   }
@@ -366,6 +441,13 @@ export class TurnFlow {
   }
 
   private abortTurn(reason: unknown) {
+    // Decide the user-interruption flag at cancel time, not when the aborted
+    // worker unwinds: `activeTurn` clears synchronously here, so a concurrent
+    // reader must already see the turn as user-stopped. A cancel with no turn
+    // running must not retroactively mark the last completed turn.
+    if (this.activeTurn !== null) {
+      this.lastTurnEndedByUser = isUserCancellation(reason);
+    }
     if (this.activeTurn !== 'resuming') {
       // The reason (a user cancellation by default, or the originating signal's
       // reason when propagated) travels as signal.reason so tools settling on
@@ -479,6 +561,7 @@ export class TurnFlow {
     } finally {
       if (ownsActiveTurn()) {
         this.activeTurn = null;
+        this.flushSteerBuffer();
       }
     }
   }
@@ -713,7 +796,9 @@ export class TurnFlow {
     // Gate on isUserCancellation: a `cancelled` turn can also come from a
     // programmatic abort (e.g. a subagent deadline timeout, which shares this
     // hook engine), and those must not be misreported as a user interrupt.
-    if (ended.reason === 'cancelled' && isUserCancellation(signal.reason)) {
+    this.lastTurnEndedByUser =
+      ended.reason === 'cancelled' && isUserCancellation(signal.reason);
+    if (this.lastTurnEndedByUser) {
       void this.agent.hooks?.fireAndForgetTrigger('Interrupt', {
         inputData: { turnId, reason: 'cancelled' },
       });
@@ -747,6 +832,10 @@ export class TurnFlow {
       this.agent.goal.getGoal().goal?.status !== 'active'
     ) {
       this.activeTurn = null;
+      // A steer that arrived after the last stop-boundary flush has no
+      // successor turn to carry it; append it now so a reply landing in the
+      // turn-end window is not lost when the agent goes idle.
+      this.flushSteerBuffer();
     }
     if (this.agent.swarmMode.shouldAutoExit) {
       this.agent.swarmMode.exit();

@@ -29,6 +29,8 @@ const AGENT_TOOLS = [
   'WebSearch',
   'Agent',
   'AgentSwarm',
+  'ListAgents',
+  'SendMessage',
   'FetchURL',
   'AskUserQuestion',
   'EnterPlanMode',
@@ -60,8 +62,10 @@ const CODER_TOOLS = [
   'ExitSupermoonMode',
   'Glob',
   'Grep',
+  'ListAgents',
   'Read',
   'ReadMediaFile',
+  'SendMessage',
   'Skill',
   'TaskList',
   'TaskOutput',
@@ -80,13 +84,15 @@ const EXPLORE_TOOLS = [
   'ReadMediaFile',
   'Glob',
   'Grep',
+  'ListAgents',
+  'SendMessage',
   'WebSearch',
   'FetchURL',
 ] as const;
 
 const CODER_ROLE =
   `${TASK_AGENT_ROLE_PREFIX}\n\n` +
-  'Your final message is the entire handoff — the parent sees nothing else from your run. ' +
+  'Your final message is the entire handoff — no other output from your run reaches the parent automatically. ' +
   'Make it technically complete: what you changed and why, the path of every file you touched, ' +
   'how you verified the change (tests or commands run, with results), and anything left undone ' +
   'or worth follow-up. A final message of only a sentence or two is treated as too brief and ' +

@@ -24,6 +24,7 @@ import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMo
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import { ToolAccesses, type ExecutableTool } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentUserToolService, type UserToolRegistration } from '#/agent/userTool/userTool';
@@ -44,6 +45,7 @@ import {
 } from '#/session/subagent/spawn';
 import { DEFAULT_SUBAGENT_TIMEOUT_MS, SECONDARY_MODEL_SECTION, SUBAGENT_SECTION } from '#/session/subagent/configSection';
 import { SECONDARY_MODEL_FLAG_ID, SUBAGENT_FORK_FLAG_ID } from '#/session/subagent/flag';
+import { AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
 import { Error2, ErrorCodes } from '#/errors';
 import { runAgentTurn } from '#/session/subagent/runAgentTurn';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
@@ -119,6 +121,13 @@ function forkFlags(enabled = true): TestAgentServiceOverride {
   return appService(
     IFlagService,
     stubFlag((id) => enabled && id === SUBAGENT_FORK_FLAG_ID),
+  );
+}
+
+function messagingFlags(enabled = true): TestAgentServiceOverride {
+  return appService(
+    IFlagService,
+    stubFlag((id) => enabled && id === AGENT_MESSAGING_FLAG_ID),
   );
 }
 
@@ -301,6 +310,7 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
           return {
             _serviceBrand: undefined,
             status: () => ({ state: 'idle', pendingTurnIds: [], hasPendingRequests: false }),
+            hooks: { onWillCancelTurn: hookSlot() },
           } as never;
         }
         if (serviceId === IAgentPermissionModeService) {
@@ -584,6 +594,7 @@ function sessionMetadataStub(agents: Readonly<Record<string, AgentMeta>>): ISess
     setGeneratedTitleIfUncustomized: async () => false,
     setArchived: async () => {},
     registerAgent: async () => {},
+    unregisterAgent: async () => {},
   };
 }
 
@@ -732,7 +743,9 @@ describe('Agent tool description', () => {
 
     const description = agentDescription();
 
-    expect(description).toContain('Tools: Bash, Read, ReadMediaFile, Glob, Grep, WebSearch, FetchURL');
+    expect(description).toContain(
+      'Tools: Bash, Read, ReadMediaFile, Glob, Grep, WebSearch, FetchURL',
+    );
     expect(description).toContain('Tools: Bash, CronCreate, CronDelete, CronList, Edit');
   });
 
@@ -757,6 +770,54 @@ describe('Agent tool description', () => {
     const properties = (tool!.parameters as { properties?: Record<string, unknown> } | undefined)
       ?.properties;
     expect(properties).toHaveProperty('fork');
+  });
+
+  it('omits the name parameter and the messaging tools while the agent_messaging flag is off', () => {
+    ctx = createTestAgent(messagingFlags(false));
+
+    const tool = ctx.toolsData().find((entry) => entry.name === 'Agent');
+    expect(tool).toBeDefined();
+    const properties = (tool!.parameters as { properties?: Record<string, unknown> } | undefined)
+      ?.properties;
+    expect(properties).not.toHaveProperty('name');
+    const names = ctx.toolsData().map((entry) => entry.name);
+    expect(names).not.toContain('SendMessage');
+    expect(names).not.toContain('ListAgents');
+    expect(tool!.description).not.toContain('SendMessage');
+    expect(tool!.description).not.toContain('ListAgents');
+  });
+
+  it('hides the messaging tools from a restricted profile while the flag is off', () => {
+    ctx = createTestAgent(messagingFlags(false), {
+      initialConfig: { tools: { disabled: ['Bash'] } },
+    });
+
+    const tool = ctx.toolsData().find((entry) => entry.name === 'Agent');
+    expect(tool).toBeDefined();
+    const lines = tool!.description.split('\n');
+    const header = lines.findIndex((line) => line.startsWith('- coder:'));
+    expect(header).toBeGreaterThanOrEqual(0);
+    const toolsLine = lines[header + 1] ?? '';
+    expect(toolsLine).not.toContain('Bash');
+    expect(toolsLine).not.toContain('SendMessage');
+    expect(toolsLine).not.toContain('ListAgents');
+  });
+
+  it('exposes the name parameter and the messaging tools when the agent_messaging flag is on', () => {
+    ctx = createTestAgent(messagingFlags());
+
+    const tool = ctx.toolsData().find((entry) => entry.name === 'Agent');
+    expect(tool).toBeDefined();
+    const properties = (tool!.parameters as { properties?: Record<string, unknown> } | undefined)
+      ?.properties;
+    expect(properties).toHaveProperty('name');
+    const names = ctx.toolsData().map((entry) => entry.name);
+    expect(names).toContain('SendMessage');
+    expect(names).toContain('ListAgents');
+    expect(tool!.description).toContain('SendMessage');
+    expect(tool!.description).toContain('ListAgents');
+    expect(ctx.get(IAgentToolPolicyService).isToolActive('SendMessage')).toBe(true);
+    expect(ctx.get(IAgentToolPolicyService).isToolActive('ListAgents')).toBe(true);
   });
 
   it('does not offer the default agent type to the builtin default caller', () => {

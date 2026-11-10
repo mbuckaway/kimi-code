@@ -103,6 +103,9 @@ const INTERNAL_ORIGINS = new Set<PromptOrigin['kind']>([
   // protocol XML leaks into the user-facing export.
   'cron_job',
   'cron_missed',
+  // Peer agent messages are model-facing `<agent-message ...>` records, never
+  // user-typed turns, so they stay out of the user-facing export.
+  'agent_message',
 ]);
 
 export function isInternalMessage(msg: ContextMessage): boolean {

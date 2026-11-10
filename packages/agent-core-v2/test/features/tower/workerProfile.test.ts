@@ -19,7 +19,9 @@ describe('tower-worker profile', () => {
       if (
         name === 'AgentSwarm' ||
         name === 'EnterSupermoonMode' ||
-        name === 'ExitSupermoonMode'
+        name === 'ExitSupermoonMode' ||
+        name === 'SendMessage' ||
+        name === 'ListAgents'
       ) {
         continue;
       }
@@ -28,6 +30,8 @@ describe('tower-worker profile', () => {
     expect(tools).not.toContain('AgentSwarm');
     expect(tools).not.toContain('EnterSupermoonMode');
     expect(tools).not.toContain('ExitSupermoonMode');
+    expect(tools).not.toContain('SendMessage');
+    expect(tools).not.toContain('ListAgents');
     expect(TOWER_WORKER_PROFILE_DEF.subagents).toEqual(['explore', 'plan']);
     for (const name of [
       'TowerSend',

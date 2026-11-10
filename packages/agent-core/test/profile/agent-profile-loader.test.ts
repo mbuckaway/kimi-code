@@ -173,6 +173,8 @@ describe('default agent profiles', () => {
         'Edit',
         'Bash',
         'Agent',
+        'ListAgents',
+        'SendMessage',
         'Skill',
         'TaskList',
         'TaskOutput',
@@ -191,8 +193,10 @@ describe('default agent profiles', () => {
       'ExitSupermoonMode',
       'Glob',
       'Grep',
+      'ListAgents',
       'Read',
       'ReadMediaFile',
+      'SendMessage',
       'Skill',
       'TaskList',
       'TaskOutput',
@@ -204,7 +208,13 @@ describe('default agent profiles', () => {
       'mcp__*',
     ]);
     expect(DEFAULT_AGENT_PROFILES['explore']?.tools).not.toContain('Write');
+    expect(DEFAULT_AGENT_PROFILES['explore']?.tools).toEqual(
+      expect.arrayContaining(['ListAgents', 'SendMessage']),
+    );
     expect(DEFAULT_AGENT_PROFILES['plan']?.tools).not.toContain('Bash');
+    expect(DEFAULT_AGENT_PROFILES['plan']?.tools).toEqual(
+      expect.arrayContaining(['ListAgents', 'SendMessage']),
+    );
   });
 
   it('renders the model-invocable skill listing for bundled prompts', () => {

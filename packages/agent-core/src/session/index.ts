@@ -159,6 +159,8 @@ export interface AgentMeta {
   readonly type: AgentType;
   readonly parentAgentId?: string | null;
   readonly swarmItem?: string;
+  /** Addressable name assigned at spawn (agent-to-agent messaging). */
+  readonly name?: string;
 }
 
 interface ResumedAgent {
@@ -172,6 +174,7 @@ export interface CreateAgentOptions {
   readonly profile?: ResolvedAgentProfile;
   readonly parentAgentId?: string;
   readonly swarmItem?: string;
+  readonly name?: string;
   readonly persistMetadata?: boolean;
 }
 
@@ -838,6 +841,7 @@ export class Session {
         type,
         parentAgentId,
         swarmItem: options.swarmItem,
+        name: options.name,
       };
       void this.writeMetadata();
     }

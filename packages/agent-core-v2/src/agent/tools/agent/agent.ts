@@ -59,6 +59,15 @@ export const SubagentToolInputSchema = z.preprocess(
       .describe(
         'Which model to run the subagent on: one of the aliases listed under "Available models" in this tool description, or "primary" for the main model you are running on (for hard, quality-sensitive tasks). When omitted, the configured default model is used. Ignored when resuming — resumed subagents keep their own model.',
       ),
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .optional()
+      .describe(
+        'Optional addressable name for the new agent, unique across the session (letters, digits, ".", "_" or "-"; not "main"). Other agents can then address it with SendMessage(to: "<name>"). Ignored when resuming.',
+      ),
   }),
 );
 
@@ -85,6 +94,8 @@ export const RESUME_WITH_TYPE_UNAVAILABLE =
 export const USER_INTERRUPTED_SUBAGENT_MESSAGE =
   'The subagent was stopped before it finished by user.';
 export const SUBAGENT_STOPPED_MESSAGE = 'The subagent was stopped before it finished.';
+export const NAME_EXPERIMENTAL_UNAVAILABLE =
+  'name is disabled: the agent_messaging experimental flag is off.';
 
 export interface ISubagentTool extends AgentTool<SubagentToolInput> {
   readonly _serviceBrand: undefined;

@@ -12,6 +12,7 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { AgentGoal } from '#/features/goal/goalAgentRuntime';
 import { IAgentLoopService, type Turn } from '#/agent/loop/loop';
 import { ContinuationStepRequest, MessageStepRequest } from '#/agent/loop/stepRequest';
+import { AgentMessageStepRequest } from '#/features/messaging/agentMessageRequest';
 import {
   AssistantDelta,
   ThinkingDelta,
@@ -208,7 +209,7 @@ describe('Agent loop', () => {
       [emit] agent.activity.updated      { "time": "<time>", "lifecycle": "ready", "turn": { "turnId": 0, "origin": { "kind": "user" }, "phase": "running", "step": 1, "ending": false, "pendingApprovals": [], "activeToolCalls": [], "since": "<time>" }, "background": [], "agentId": "main" }
       [wire] context.append_loop_event   { "agentId": "main", "event": { "type": "content.part", "uuid": "<uuid-2>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "part": { "type": "text", "text": "blocked" } }, "time": "<time>" }
       [wire] context.append_loop_event   { "agentId": "main", "event": { "type": "step.end", "uuid": "<uuid-1>", "turnId": "0", "step": 1, "finishReason": "filtered", "usage": { "inputOther": 3, "output": 5, "inputCacheRead": 0, "inputCacheCreation": 0 }, "messageId": "mock-1", "providerFinishReason": "filtered", "rawFinishReason": "filtered" }, "time": "<time>" }
-      [wire] turn.ended                  { "agentId": "main", "turnId": 0, "reason": "failed", "error": { "code": "provider.filtered", "message": "Provider safety policy blocked the response.", "name": "ProviderFilteredError", "details": { "finishReason": "filtered" }, "retryable": false }, "time": "<time>" }
+      [wire] turn.ended                  { "agentId": "main", "turnId": 0, "reason": "failed", "error": { "code": "provider.filtered", "message": "Provider safety policy blocked the response.", "name": "ProviderFilteredError", "details": { "finishReason": "filtered" }, "retryable": false }, "interruptReason": "filtered", "time": "<time>" }
       [emit] turn.ended                  { "time": "<time>", "agentId": "main", "turnId": 0, "reason": "failed", "error": { "code": "provider.filtered", "message": "Provider safety policy blocked the response.", "name": "ProviderFilteredError", "details": { "finishReason": "filtered" }, "retryable": false }, "interruptReason": "filtered" }
     `);
 
@@ -1680,6 +1681,90 @@ describe('interruption reminder', () => {
     expect(interruptionReminders()).toHaveLength(2);
   });
 
+  it('flushes a pending agent-message steer into the context when the turn is cancelled', async () => {
+    const local = createTestAgent(permissionModeServices('yolo'));
+    try {
+      const slowToolStarted = registerAbortableWorkTool(local);
+      const localLoop = local.get(IAgentLoopService);
+      local.mockNextResponse(
+        { type: 'text', text: 'working' },
+        { type: 'function', id: 'call-work-1', name: 'Work', arguments: '{}' },
+      );
+      local.mockNextResponse(
+        { type: 'text', text: 'still working' },
+        { type: 'function', id: 'call-work-2', name: 'Work', arguments: '{}' },
+      );
+      const turn = (await localLoop.enqueue(nextTurnMessage('do work')).assigned).turn;
+      await slowToolStarted.promise;
+      const message: ContextMessage = {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '<agent-message from="agent-2">\nplease sync the branch\n</agent-message>',
+          },
+        ],
+        toolCalls: [],
+        origin: { kind: 'agent_message', from: 'agent-2' },
+      };
+
+      localLoop.enqueue(new AgentMessageStepRequest(message, () => {}));
+      localLoop.cancel(turn.id, userCancellationReason());
+      await expect(turn.result).resolves.toMatchObject({ type: 'cancelled' });
+
+      const flushed = local
+        .contextData()
+        .history.filter((entry) => entry.origin?.kind === 'agent_message');
+      expect(flushed).toHaveLength(1);
+      expect(JSON.stringify(flushed[0]?.content)).toContain('please sync the branch');
+    } finally {
+      await local.dispose();
+    }
+  });
+
+  it('does not re-append a materialized agent-message request when the turn ends', async () => {
+    const local = createTestAgent(permissionModeServices('yolo'));
+    try {
+      const localLoop = local.get(IAgentLoopService);
+      const request = new AgentMessageStepRequest(
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: '<agent-message from="agent-2">\nretry me once\n</agent-message>',
+            },
+          ],
+          toolCalls: [],
+          origin: { kind: 'agent_message', from: 'agent-2' },
+        },
+        () => {},
+      );
+      let retried = false;
+      localLoop.registerLoopErrorHandler({
+        id: 'retry-agent-message',
+        match: (context) => context.failedDriver === request,
+        handle: async (context) => {
+          retried = true;
+          context.retry(request);
+          localLoop.cancel(context.turnId, userCancellationReason());
+          return true;
+        },
+      });
+      local.mockNextProviderResponse({ error: new Error('provider down') });
+      const turn = (await localLoop.enqueue(request).assigned).turn;
+      await expect(turn.result).resolves.toMatchObject({ type: 'cancelled' });
+
+      const appended = local
+        .contextData()
+        .history.filter((entry) => entry.origin?.kind === 'agent_message');
+      expect(retried).toBe(true);
+      expect(appended).toHaveLength(1);
+    } finally {
+      await local.dispose();
+    }
+  });
+
   it('does not duplicate recorded content when cancelled during tool execution', async () => {
     const local = createTestAgent(permissionModeServices('yolo'));
     try {
@@ -1700,7 +1785,6 @@ describe('interruption reminder', () => {
 
       expect(contentPartRecordsIn(local)).toBe(2);
       expect(remindersIn(local)).toHaveLength(1);
-
       local.mockNextResponse({ type: 'text', text: 'follow-up answer' });
       await local.rpc.prompt({ input: [{ type: 'text', text: 'again' }] });
       await local.untilTurnEnd();

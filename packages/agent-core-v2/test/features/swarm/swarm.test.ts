@@ -10,6 +10,7 @@ import { Event } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
 import { Error2, ErrorCodes } from '#/errors';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { stubLog } from '../../_base/log/stubs';
 import { stubFlag } from '../../app/flag/stubs';
 import { stubAgentContext } from '../../agent/agentContext/stubs';
@@ -271,6 +272,18 @@ function realSubagents(
     },
   } as unknown as IModelCatalog;
   const sessionContext = { _serviceBrand: undefined, cwd: '/repo' } as unknown as ISessionContext;
+  const sessionMetadata = {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChangeMetadata: Event.None,
+    read: async () => ({ id: 'session', createdAt: 0, updatedAt: 0, archived: false, agents: {} }),
+    update: async () => {},
+    setTitle: async () => {},
+    setGeneratedTitleIfUncustomized: async () => false,
+    setArchived: async () => {},
+    registerAgent: async () => {},
+    unregisterAgent: async () => {},
+  } as unknown as ISessionMetadata;
   return new SessionSubagentService(
     agentLifecycle,
     catalog,
@@ -278,6 +291,7 @@ function realSubagents(
     flags,
     modelCatalog,
     sessionContext,
+    sessionMetadata,
     stubLog(),
   );
 }

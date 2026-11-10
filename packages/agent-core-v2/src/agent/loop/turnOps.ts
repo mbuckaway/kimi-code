@@ -24,6 +24,7 @@ export interface TurnModelState {
     readonly turnId: number;
     readonly reason: 'completed' | 'cancelled' | 'failed' | 'blocked';
     readonly durationMs?: number;
+    readonly interruptReason?: TurnInterruptReason;
   };
 }
 
@@ -85,6 +86,7 @@ const turnEndedSchema = z.object({
   reason: z.enum(['completed', 'cancelled', 'failed', 'blocked']),
   error: z.custom<KimiErrorPayload>().optional(),
   durationMs: z.number().optional(),
+  interruptReason: z.custom<TurnInterruptReason>().optional(),
 });
 
 export interface TurnEndedPayload {
@@ -111,6 +113,7 @@ export class TurnEnded extends AgentEvent2<TurnEndedPayload> {
     };
     if (this.error !== undefined) record['error'] = this.error;
     if (this.durationMs !== undefined) record['durationMs'] = this.durationMs;
+    if (this.interruptReason !== undefined) record['interruptReason'] = this.interruptReason;
     record['time'] = this.time;
     return record as SerializedEvent2;
   }
@@ -161,7 +164,12 @@ export const turnKey = defineState(
   })
   .on(TurnEnded, (s, e) => ({
     ...s,
-    lastEnded: { turnId: e.turnId, reason: e.reason, durationMs: e.durationMs },
+    lastEnded: {
+      turnId: e.turnId,
+      reason: e.reason,
+      durationMs: e.durationMs,
+      interruptReason: e.interruptReason,
+    },
   }));
 
 function advanceTurnClock(

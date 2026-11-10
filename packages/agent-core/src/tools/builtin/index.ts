@@ -7,6 +7,8 @@ export * from '../cron/cron-list';
 export * from './collaboration/agent';
 export * from './collaboration/agent-swarm';
 export * from './collaboration/ask-user';
+export * from './collaboration/list-agents';
+export * from './collaboration/send-message';
 export * from './collaboration/skill-tool';
 export * from './file/edit';
 export * from './file/glob';

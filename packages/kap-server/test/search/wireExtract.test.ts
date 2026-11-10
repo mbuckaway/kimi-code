@@ -47,7 +47,14 @@ describe('extractFromWireLine', () => {
     ]);
   });
 
-  it.each(['injection', 'system_trigger', 'retry', 'compaction_summary', 'plugin_command'])(
+  it.each([
+    'injection',
+    'system_trigger',
+    'retry',
+    'compaction_summary',
+    'plugin_command',
+    'agent_message',
+  ])(
     'filters out origin kind %s',
     (kind) => {
       expect(
@@ -273,7 +280,7 @@ describe('analyzeWireLine turn effects', () => {
     expect(turnOf(userRecord('sum', 1, { kind: 'compaction_summary' }))).toEqual({ kind: 'none' });
   });
 
-  it('cron / task / hook / shell_command origins open non-anchor turns', () => {
+  it('cron / task / hook / shell_command / agent_message origins open non-anchor turns', () => {
     expect(turnOf(userRecord('cron', 1, { kind: 'cron_job', jobId: 'j' }))).toEqual({
       kind: 'open',
       anchor: false,
@@ -287,6 +294,10 @@ describe('analyzeWireLine turn effects', () => {
       anchor: false,
     });
     expect(turnOf(userRecord('!', 1, { kind: 'shell_command', phase: 'input' }))).toEqual({
+      kind: 'open',
+      anchor: false,
+    });
+    expect(turnOf(userRecord('peer', 1, { kind: 'agent_message', from: 'agent-b' }))).toEqual({
       kind: 'open',
       anchor: false,
     });

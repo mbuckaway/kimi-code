@@ -19,6 +19,8 @@ const DEFAULT_APPROVE_TOOLS = new Set([
   'FetchURL',
   'Agent',
   'AgentSwarm',
+  'SendMessage',
+  'ListAgents',
   'AskUserQuestion',
   'Skill',
   'EnterPlanMode',
