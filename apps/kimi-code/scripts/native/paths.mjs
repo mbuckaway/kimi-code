@@ -14,6 +14,13 @@ export function targetArch(target = targetTriple()) {
   return target.slice(target.lastIndexOf('-') + 1);
 }
 
+const NATIVE_PLATFORMS = new Set(['darwin', 'linux', 'win32']);
+
+export function executablePlatform(target = targetTriple()) {
+  const platform = targetPlatform(target);
+  return NATIVE_PLATFORMS.has(platform) ? platform : process.platform;
+}
+
 export function isCrossTarget(target = targetTriple()) {
   return target !== `${process.platform}-${process.arch}`;
 }
@@ -34,7 +41,7 @@ export function nativeBinDir(target = targetTriple()) {
   return resolve(nativeDistRoot(), 'bin', target);
 }
 
-export function nativeBinPath(target = targetTriple(), platform = targetPlatform(target)) {
+export function nativeBinPath(target = targetTriple(), platform = executablePlatform(target)) {
   return resolve(nativeBinDir(target), executableName(platform));
 }
 
