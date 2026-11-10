@@ -6,10 +6,16 @@ import { pipeline } from 'node:stream/promises';
 
 import { ZipFile } from 'yazl';
 
-import { executableName, nativeArtifactsDir, nativeBinPath, targetTriple } from './paths.mjs';
+import {
+  executableName,
+  executablePlatform,
+  nativeArtifactsDir,
+  nativeBinPath,
+  targetTriple,
+} from './paths.mjs';
 
 const target = targetTriple();
-const execName = executableName();
+const execName = executableName(executablePlatform(target));
 const sourceBinary = nativeBinPath(target);
 const artifactsDir = nativeArtifactsDir();
 
