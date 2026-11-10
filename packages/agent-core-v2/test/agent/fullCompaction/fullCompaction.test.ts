@@ -2273,7 +2273,7 @@ describe('FullCompaction', () => {
 
       expect(eventIndex(events, 'compaction.started')).toBe(-1);
       expect(ctx.llmCalls).toHaveLength(1);
-      expect(messageText(ctx.llmCalls[0]?.history.at(-1))).toBe('small prompt');
+      expect(ctx.llmCalls[0]?.history.map(messageText)).toContain('small prompt');
     } finally {
       registration.dispose();
     }

@@ -794,6 +794,7 @@ export class ToolManager {
       this.isExactToolEnabled('TaskStop');
     const allowBackground = canRunInBackground();
     const goalToolsEnabled = this.agent.type === 'main';
+    const agentMessagingEnabled = this.agent.experimentalFlags.enabled('agent_messaging');
     this.builtinTools = new Map(
       [
         new b.ReadTool(kaos, workspace),
@@ -858,6 +859,7 @@ export class ToolManager {
               subagentTimeoutMs: resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
               showModelPreferences: this.agent.experimentalFlags.enabled('secondary-model'),
               modelChoiceEnabled: this.agent.experimentalFlags.enabled('secondary-model'),
+              agentMessagingEnabled,
               subagentModelDescription: buildSubagentModelDescriptions(
                 this.agent.kimiConfig,
                 this.agent.experimentalFlags,
@@ -865,6 +867,12 @@ export class ToolManager {
               ),
             },
           ),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.SendMessageTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.ListAgentsTool(this.agent.subagentHost),
         this.agent.subagentHost &&
           new b.AgentSwarmTool(
             this.agent.subagentHost,

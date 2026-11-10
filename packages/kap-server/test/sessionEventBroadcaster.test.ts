@@ -3087,6 +3087,26 @@ describe('sessionEventMessageSchema', () => {
     ).toBe(true);
   });
 
+  it('accepts a turn.started envelope with a peer agent_message origin', () => {
+    expect(
+      sessionEventMessageSchema.safeParse(
+        envelope({
+          type: 'turn.started',
+          turnId: 4,
+          origin: { kind: 'agent_message', from: 'agent-b', replyTo: 'Builder' },
+        }),
+      ).success,
+    ).toBe(true);
+  });
+
+  it('rejects an agent_message origin without a sender', () => {
+    expect(
+      sessionEventMessageSchema.safeParse(
+        envelope({ type: 'turn.started', turnId: 4, origin: { kind: 'agent_message' } }),
+      ).success,
+    ).toBe(false);
+  });
+
   it('rejects malformed config and model catalog event envelopes', () => {
     expect(
       sessionEventMessageSchema.safeParse(

@@ -302,29 +302,33 @@ function formatPoolLine(label: string, description: string): string {
 export function stripSubagentModelParameter(
   parameters: Record<string, unknown>,
 ): Record<string, unknown> {
-  const properties = parameters['properties'];
-  if (!isPlainObject(properties) || !('model' in properties)) return parameters;
-  const nextProperties = { ...properties };
-  delete nextProperties['model'];
-  const next: Record<string, unknown> = { ...parameters, properties: nextProperties };
-  const required = parameters['required'];
-  if (Array.isArray(required) && required.includes('model')) {
-    next['required'] = required.filter((entry) => entry !== 'model');
-  }
-  return next;
+  return stripParameter(parameters, 'model');
 }
 
 export function stripSubagentForkParameter(
   parameters: Record<string, unknown>,
 ): Record<string, unknown> {
+  return stripParameter(parameters, 'fork');
+}
+
+export function stripSubagentNameParameter(
+  parameters: Record<string, unknown>,
+): Record<string, unknown> {
+  return stripParameter(parameters, 'name');
+}
+
+export function stripParameter(
+  parameters: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
   const properties = parameters['properties'];
-  if (!isPlainObject(properties) || !('fork' in properties)) return parameters;
+  if (!isPlainObject(properties) || !(key in properties)) return parameters;
   const nextProperties = { ...properties };
-  delete nextProperties['fork'];
+  delete nextProperties[key];
   const next: Record<string, unknown> = { ...parameters, properties: nextProperties };
   const required = parameters['required'];
-  if (Array.isArray(required) && required.includes('fork')) {
-    next['required'] = required.filter((entry) => entry !== 'fork');
+  if (Array.isArray(required) && required.includes(key)) {
+    next['required'] = required.filter((entry) => entry !== key);
   }
   return next;
 }

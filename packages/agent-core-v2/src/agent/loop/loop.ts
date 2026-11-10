@@ -136,6 +136,12 @@ export interface StepEnqueueOptions {
   readonly at?: 'head' | 'tail';
 }
 
+export interface TurnCancelHookContext {
+  readonly turnId: number;
+  readonly target: 'active' | 'queued';
+  readonly reason: unknown;
+}
+
 export interface IAgentLoopService {
   readonly _serviceBrand: undefined;
 
@@ -163,6 +169,7 @@ export interface IAgentLoopService {
   readonly hooks: Hooks<{
     onWillBeginStep: BeforeStepContext;
     onDidFinishStep: AfterStepContext;
+    onWillCancelTurn: TurnCancelHookContext;
   }>;
 }
 

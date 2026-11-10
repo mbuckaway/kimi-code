@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { isoDateTimeSchema } from '@moonshot-ai/agent-core-v2/_base/utils/isoDateTime';
 import type { TurnEndReason } from '@moonshot-ai/agent-core-v2/agent/loop/turnEvents';
 import type {
+  AgentMessageOrigin,
   BundledSkillActivation,
   CompactionSummaryOrigin,
   CronJobOrigin,
@@ -213,6 +214,12 @@ export const retryOriginSchema = z.object({
   trigger: z.string().optional(),
 }) satisfies z.ZodType<RetryOrigin>;
 
+export const agentMessageOriginSchema = z.object({
+  kind: z.literal('agent_message'),
+  from: z.string(),
+  replyTo: z.string().optional(),
+}) satisfies z.ZodType<AgentMessageOrigin>;
+
 export const promptOriginSchema = z.discriminatedUnion('kind', [
   userPromptOriginSchema,
   skillActivationOriginSchema,
@@ -227,6 +234,7 @@ export const promptOriginSchema = z.discriminatedUnion('kind', [
   cronMissedOriginSchema,
   hookResultOriginSchema,
   retryOriginSchema,
+  agentMessageOriginSchema,
 ]);
 
 export const goalStatusSchema = z.enum(['active', 'paused', 'blocked', 'complete']) satisfies z.ZodType<GoalStatus>;

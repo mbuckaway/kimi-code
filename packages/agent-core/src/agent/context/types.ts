@@ -87,6 +87,19 @@ export interface RetryOrigin {
   readonly trigger?: string;
 }
 
+/**
+ * A message delivered from another agent in the same session. The receiver
+ * must treat it as agent input, never as user input: it is not user approval
+ * and it grants no permission.
+ */
+export interface AgentMessageOrigin {
+  readonly kind: 'agent_message';
+  /** Agent id of the sender (`main` or a generated subagent id). */
+  readonly from: string;
+  /** Display name of the sender when one was set; replies address `from`. */
+  readonly replyTo?: string;
+}
+
 export type PromptOrigin =
   | UserPromptOrigin
   | SkillActivationOrigin
@@ -99,7 +112,8 @@ export type PromptOrigin =
   | CronJobOrigin
   | CronMissedOrigin
   | HookResultOrigin
-  | RetryOrigin;
+  | RetryOrigin
+  | AgentMessageOrigin;
 
 export type ContextMessage = Message & {
   readonly origin?: PromptOrigin | undefined;

@@ -179,6 +179,7 @@ export function compactionUserMessageDisposition(
     case 'cron_missed':
     case 'hook_result':
     case 'retry':
+    case 'agent_message':
       return 'drop';
     default: {
       const exhaustive: never = origin;

@@ -29,7 +29,10 @@ import {
   type SessionSubagentHost,
   type SubagentHandle,
 } from '../../../session/subagent-host';
-import { stripSubagentModelParameter } from '../../../session/subagent-binding';
+import {
+  stripSubagentModelParameter,
+  stripToolParameter,
+} from '../../../session/subagent-binding';
 import { isUserCancellation } from '../../../utils/abort';
 import { AgentBackgroundTask, type BackgroundManager } from '../../../agent/background';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -78,6 +81,15 @@ export const AgentToolInputSchema = z.preprocess(
       .optional()
       .describe(
         'Optional agent ID to resume instead of creating a new instance. When set, do not also pass subagent_type — the resumed agent keeps its own type, and supplying both is rejected.',
+      ),
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .optional()
+      .describe(
+        'Optional name for the new subagent, so you and its siblings can address it with SendMessage (for example "reviewer"). At most 64 characters of letters, digits, ".", "_" or "-"; "main" is reserved; it must be unique among the agents you can address, and it must not look like an agent id.',
       ),
     run_in_background: z
       .boolean()
@@ -132,6 +144,9 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       // no-op `model` parameter is stripped from the advertised schema so the
       // secondary-model concept never enters the prompt.
       modelChoiceEnabled?: boolean;
+      // Mirrors the `agent_messaging` experiment: off (the default), the
+      // no-op `name` parameter is stripped from the advertised schema.
+      agentMessagingEnabled?: boolean;
     },
   ) {
     const log = options?.log;
@@ -139,10 +154,14 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     // `0` is preserved (not normalized): `0 ?? DEFAULT_SUBAGENT_TIMEOUT_MS`
     // stays `0`, and the BackgroundManager arms no timer for it.
     this.subagentTimeoutMs = options?.subagentTimeoutMs;
-    this.parameters =
-      options?.modelChoiceEnabled === true
-        ? AGENT_TOOL_PARAMETERS
-        : AGENT_TOOL_PARAMETERS_NO_MODEL;
+    let parameters = AGENT_TOOL_PARAMETERS;
+    if (options?.modelChoiceEnabled !== true) {
+      parameters = AGENT_TOOL_PARAMETERS_NO_MODEL;
+    }
+    if (options?.agentMessagingEnabled !== true) {
+      parameters = stripToolParameter(parameters, 'name');
+    }
+    this.parameters = parameters;
     const typeLines = buildSubagentDescriptions(
       subagents,
       options?.showModelPreferences ?? false,
@@ -241,6 +260,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
             : await this.subagentHost.spawn({
                 profileName: requestedProfileName ?? 'coder',
                 modelChoice: args.model,
+                name: args.name,
                 ...runOptions,
               });
       } catch (error) {

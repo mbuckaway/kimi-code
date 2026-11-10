@@ -50,6 +50,15 @@ export const FLAG_DEFINITIONS = [
     default: false,
     surface: 'both',
   },
+  {
+    id: 'agent_messaging',
+    title: 'Agent messaging',
+    description:
+      'Let agents message each other with SendMessage and discover recipients with ListAgents, and let the Agent tool assign addressable names to spawned subagents.',
+    env: 'KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING',
+    default: true,
+    surface: 'both',
+  },
 ] as const satisfies readonly FlagDefinitionInput[];
 
 /** Literal union of registered flag ids. */

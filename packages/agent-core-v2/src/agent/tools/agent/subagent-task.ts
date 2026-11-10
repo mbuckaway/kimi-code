@@ -77,17 +77,20 @@ export class SubagentTask implements AgentTask {
   readonly parentToolCallId?: string;
   readonly model?: string;
   readonly thinkingEffort?: string;
+  readonly messageDelivery: boolean;
 
   constructor(
     private readonly handle: SubagentHandle,
     readonly description: string,
     private readonly abortController: AbortController,
+    options: { readonly messageDelivery?: boolean } = {},
   ) {
     this.agentId = handle.agentId;
     this.subagentType = handle.profileName;
     this.parentToolCallId = handle.parentToolCallId;
     this.model = handle.model;
     this.thinkingEffort = handle.thinkingEffort;
+    this.messageDelivery = options.messageDelivery === true;
   }
 
   async start(sink: AgentTaskSink): Promise<void> {
@@ -124,6 +127,7 @@ export class SubagentTask implements AgentTask {
       parentToolCallId: this.parentToolCallId,
       model: this.model,
       thinkingEffort: this.thinkingEffort,
+      messageDelivery: this.messageDelivery ? true : undefined,
     };
   }
 }

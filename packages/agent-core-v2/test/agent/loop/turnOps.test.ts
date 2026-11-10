@@ -8,6 +8,7 @@ import {
   ContextUndo,
 } from '#/agent/contextMemory/contextEvents';
 import type { Event2, Event2Class } from '#/app/event/event2';
+import { event2FromRecord } from '#/app/event/event2';
 import type { FoldContext } from '#/state/state';
 import {
   TurnCancel,
@@ -100,6 +101,39 @@ describe('turnKey lastEnded', () => {
   it('starts without a stored outcome', () => {
     expect(turnKey.initial().lastEnded).toBeUndefined();
   });
+
+  it('persists the interrupt reason across wire serialization and replay', () => {
+    const ended = new TurnEnded({
+      agentId: 'main',
+      turnId: 1,
+      reason: 'cancelled',
+      interruptReason: 'user_cancelled',
+    });
+
+    const serialized = ended.serialize();
+    expect(serialized).toMatchObject({
+      type: 'turn.ended',
+      reason: 'cancelled',
+      interruptReason: 'user_cancelled',
+    });
+    const restored = event2FromRecord(TurnEnded, serialized) as TurnEnded | undefined;
+    expect(restored?.interruptReason).toBe('user_cancelled');
+
+    let s = turnKey.initial();
+    s = fold(s, new TurnPrompt({ agentId: 'main', input: [], origin: { kind: 'user' } }));
+    s = fold(s, restored!);
+    expect(s.lastEnded).toMatchObject({
+      turnId: 1,
+      reason: 'cancelled',
+      interruptReason: 'user_cancelled',
+    });
+  });
+
+  it('omits the interrupt reason from records that ended without one', () => {
+    const ended = new TurnEnded({ agentId: 'main', turnId: 1, reason: 'completed' });
+
+    expect(ended.serialize()).not.toHaveProperty('interruptReason');
+  });
 });
 
 describe('turnKey anchorTurnIds', () => {
@@ -161,7 +195,7 @@ describe('turnKey anchorTurnIds', () => {
 });
 
 describe('TurnEnded serialization', () => {
-  it('emits the op record shape without the bus-only interruptReason', () => {
+  it('persists the interrupt reason in the op record', () => {
     const event = new TurnEnded(
       {
         agentId: 'main',
@@ -178,6 +212,7 @@ describe('TurnEnded serialization', () => {
       turnId: 3,
       reason: 'cancelled',
       durationMs: 12,
+      interruptReason: 'user_cancelled',
       time: 42,
     });
   });

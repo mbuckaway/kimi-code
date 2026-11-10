@@ -202,6 +202,12 @@ describe('isInternalMessage', () => {
     ).toBe(true);
   });
 
+  it('marks agent_message origin as internal', () => {
+    expect(
+      isInternalMessage(userMsg('x', { kind: 'agent_message', from: 'agent-b' })),
+    ).toBe(true);
+  });
+
   it('keeps real user messages', () => {
     expect(isInternalMessage(userMsg('hello', { kind: 'user' }))).toBe(false);
   });

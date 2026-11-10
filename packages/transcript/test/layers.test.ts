@@ -1371,6 +1371,39 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
     expect(second.steps).toHaveLength(2);
   });
 
+  it('opens a promptless other-origin turn for peer agent messages', () => {
+    const snapshot = groupMessagesIntoSnapshot([
+      { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'answer' }], toolCalls: [] },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '<agent-message from="agent-b">\nstatus?\n</agent-message>',
+          },
+        ],
+        toolCalls: [],
+        origin: { kind: 'agent_message', from: 'agent-b', replyTo: 'Builder' } as { kind: string },
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'peer reply' }], toolCalls: [] },
+    ]);
+
+    expect(snapshot.items.map((item) => item.kind)).toEqual(['turn', 'turn']);
+    const peerTurn = snapshot.items[1];
+    if (peerTurn?.kind !== 'turn') throw new Error('expected turn');
+    expect(peerTurn.origin).toEqual({
+      kind: 'other',
+      payload: { kind: 'agent_message', from: 'agent-b', replyTo: 'Builder' },
+    });
+    expect(peerTurn.prompt).toBeUndefined();
+    expect(peerTurn.steps).toHaveLength(1);
+    const frames = peerTurn.steps[0]!.frames;
+    expect(frames).toEqual([
+      { kind: 'text', frameId: 't1.1.f1', role: 'assistant', text: 'peer reply' },
+    ]);
+  });
+
   it('hides injected user messages and maps cron origins', () => {
     const snapshot = groupMessagesIntoSnapshot([
       {

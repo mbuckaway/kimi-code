@@ -332,6 +332,10 @@ export class SessionReplayRenderer {
       this.renderBackgroundTaskNotification(context, origin);
       return;
     }
+    if (message.origin?.kind === 'agent_message') {
+      this.renderAgentMessage(context, message);
+      return;
+    }
     if (message.origin?.kind === 'hook_result') {
       this.renderHookResult(context, message);
       return;
@@ -650,6 +654,18 @@ export class SessionReplayRenderer {
     });
   }
 
+  private renderAgentMessage(context: ReplayRenderContext, message: ContextMessage): void {
+    if (message.origin?.kind !== 'agent_message') return;
+    this.flushAssistant(context);
+    const { from, replyTo } = message.origin;
+    const sender = replyTo === undefined ? from : `${from} ("${replyTo}")`;
+    this.host.appendTranscriptEntry({
+      ...replayEntry(context, 'status', `Message from agent ${sender}`, 'notice', {
+        detail: extractAgentMessageBody(contentPartsToText(message.content)),
+      }),
+    });
+  }
+
   private renderCronJob(context: ReplayRenderContext, message: ContextMessage): void {
     if (message.origin?.kind !== 'cron_job') return;
     this.flushAssistant(context);
@@ -892,4 +908,13 @@ function stripCronEnvelope(text: string): string {
     return lines.slice(1, -1).join('\n');
   }
   return text;
+}
+
+function extractAgentMessageBody(text: string): string {
+  const open = text.indexOf('<agent-message');
+  if (open < 0) return text.trim();
+  const openingEnd = text.indexOf('>', open);
+  const closingStart = text.lastIndexOf('</agent-message>');
+  if (openingEnd < 0 || closingStart <= openingEnd) return text.trim();
+  return text.slice(openingEnd + 1, closingStart).trim();
 }

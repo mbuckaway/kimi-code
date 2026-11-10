@@ -85,31 +85,43 @@ export function buildSubagentModelDescriptions(
 }
 
 /**
+ * Strip one named property from a collaboration tool's advertised JSON schema.
+ * A gated parameter is a silent no-op while its experiment is off, so the
+ * schema the model sees (and the args validator compiled from the same
+ * advertised schema) drops it entirely instead of advertising a parameter the
+ * runtime ignores. Returns the input unchanged when the property is absent;
+ * otherwise a shallow copy — the input is never mutated, so callers can keep
+ * both variants as shared constants.
+ */
+export function stripToolParameter(
+  parameters: Record<string, unknown>,
+  property: string,
+): Record<string, unknown> {
+  const properties = parameters['properties'];
+  if (typeof properties !== 'object' || properties === null || !(property in properties)) {
+    return parameters;
+  }
+  const nextProperties = { ...(properties as Record<string, unknown>) };
+  delete nextProperties[property];
+  const next: Record<string, unknown> = { ...parameters, properties: nextProperties };
+  const required = parameters['required'];
+  if (Array.isArray(required) && required.includes(property)) {
+    next['required'] = required.filter((entry) => entry !== property);
+  }
+  return next;
+}
+
+/**
  * Strip the `model` property from a subagent collaboration tool's advertised
  * JSON schema. While the `secondary-model` experiment is off the parameter is
- * a silent no-op, so the schema the model sees (and the args validator
- * compiled from the same advertised schema) drops it entirely — the
+ * a silent no-op, so the schema the model sees drops it entirely — the
  * secondary-model concept never enters the prompt, and a stray `model`
  * argument is rejected instead of silently inheriting the caller's model.
- * Returns the input unchanged when there is no `model` property; otherwise a
- * shallow copy — the input is never mutated, so callers can keep both
- * variants as shared constants.
  */
 export function stripSubagentModelParameter(
   parameters: Record<string, unknown>,
 ): Record<string, unknown> {
-  const properties = parameters['properties'];
-  if (typeof properties !== 'object' || properties === null || !('model' in properties)) {
-    return parameters;
-  }
-  const nextProperties = { ...(properties as Record<string, unknown>) };
-  delete nextProperties['model'];
-  const next: Record<string, unknown> = { ...parameters, properties: nextProperties };
-  const required = parameters['required'];
-  if (Array.isArray(required) && required.includes('model')) {
-    next['required'] = required.filter((entry) => entry !== 'model');
-  }
-  return next;
+  return stripToolParameter(parameters, 'model');
 }
 
 /**

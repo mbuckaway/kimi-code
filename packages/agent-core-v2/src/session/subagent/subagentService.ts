@@ -31,6 +31,8 @@ import { RuntimeWorkspaceView } from '#/runtime/runtimeWorkspaceView';
 import { createHooks } from '#/hooks';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { agentContextOf } from '#/agent/scopeContext/scopeContext';
+import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
+import { agentNameOf, normalizeAgentName } from './agentNames';
 
 import {
   type AgentRunHandle,
@@ -62,6 +64,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
   private readonly onDidStopAgentTaskEmitter = this._register(
     new Emitter<AgentTaskStopHookContext>(),
   );
+  private readonly reservedAgentNames = new Map<string, symbol>();
 
   get onDidStopAgentTask() {
     return this.onDidStopAgentTaskEmitter.event;
@@ -74,6 +77,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     @IFlagService private readonly flags: IFlagService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @ISessionContext private readonly sessionContext: ISessionContext,
+    @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @ILogService private readonly log: ILogService,
   ) {
     super();
@@ -153,7 +157,26 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
 
   async spawn(opts: SpawnSubagentOptions): Promise<SpawnedSubagent> {
     const caller = this.requireCaller(opts.callerAgentId);
+    const name = opts.name === undefined ? undefined : normalizeAgentName(opts.name);
+    let releaseName: (() => void) | undefined;
+    if (name !== undefined) {
+      releaseName = this.reserveAgentName(name);
+    }
+    try {
+      if (name !== undefined) await this.assertAgentNameFree(name);
+      return await this.createSpawnedAgent(caller, opts, name);
+    } finally {
+      releaseName?.();
+    }
+  }
+
+  private async createSpawnedAgent(
+    caller: IAgentScopeHandle,
+    opts: SpawnSubagentOptions,
+    name: string | undefined,
+  ): Promise<SpawnedSubagent> {
     const { plan } = opts;
+    const labels = name === undefined ? opts.labels : { ...opts.labels, name };
     const lease = plan.fork
       ? undefined
       : caller.accessor.get(IAgentRuntimeService).acquire(['process']);
@@ -162,7 +185,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
       try {
         if (plan.fork) {
           const forked = await this.agentLifecycle.fork(agentContextOf(caller), {
-            labels: opts.labels,
+            labels,
           });
           created = this.agentLifecycle.handleOf(forked.agentId)!;
         } else {
@@ -172,7 +195,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
               model: plan.model,
               thinking: plan.thinking,
             },
-            labels: opts.labels,
+            labels,
             runtimeId: lease!.runtime.identity.runtimeId,
           });
           created = this.agentLifecycle.handleOf(createdContext.agentId)!;
@@ -183,6 +206,14 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
           plan.model,
           caller.accessor.get(IAgentProfileService).data().modelAlias,
         );
+      }
+      if (name !== undefined) {
+        try {
+          await this.assertAgentNameWon(name, created.id);
+        } catch (error) {
+          await this.discardAgent(created);
+          throw error;
+        }
       }
       created.accessor
         .get(IAgentPermissionModeService)
@@ -207,6 +238,62 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     } finally {
       lease?.dispose();
     }
+  }
+
+  private async assertAgentNameFree(name: string): Promise<void> {
+    const holder = this.findNameHolder(await this.agentMetadata(), name);
+    if (holder !== undefined) {
+      throw new Error2(
+        ErrorCodes.AGENT_NAME_TAKEN,
+        `An agent named "${name}" already exists (${holder}).`,
+      );
+    }
+  }
+
+  private async assertAgentNameWon(name: string, agentId: string): Promise<void> {
+    const agents = await this.agentMetadata();
+    for (const [holderId, meta] of Object.entries(agents)) {
+      if (holderId === agentId || meta.type !== 'sub' || agentNameOf(meta) !== name) continue;
+      if (holderId.localeCompare(agentId, undefined, { numeric: true }) < 0) {
+        throw new Error2(
+          ErrorCodes.AGENT_NAME_TAKEN,
+          `An agent named "${name}" already exists (${holderId}).`,
+        );
+      }
+    }
+  }
+
+  private findNameHolder(
+    agents: Readonly<Record<string, AgentMeta>>,
+    name: string,
+  ): string | undefined {
+    for (const [holderId, meta] of Object.entries(agents)) {
+      if (meta.type === 'sub' && agentNameOf(meta) === name) return holderId;
+    }
+    return undefined;
+  }
+
+  private reserveAgentName(name: string): () => void {
+    if (this.reservedAgentNames.has(name)) {
+      throw new Error2(
+        ErrorCodes.AGENT_NAME_TAKEN,
+        `An agent named "${name}" is already reserved by an in-flight spawn.`,
+      );
+    }
+    const token = Symbol(name);
+    this.reservedAgentNames.set(name, token);
+    return () => {
+      if (this.reservedAgentNames.get(name) === token) this.reservedAgentNames.delete(name);
+    };
+  }
+
+  private async discardAgent(created: IAgentScopeHandle): Promise<void> {
+    await this.agentLifecycle.remove(agentContextOf(created));
+    await this.sessionMetadata.unregisterAgent(created.id);
+  }
+
+  private async agentMetadata(): Promise<Readonly<Record<string, AgentMeta>>> {
+    return (await this.sessionMetadata.read()).agents ?? {};
   }
 
   notifyAgentTaskStopped(context: AgentTaskStopHookContext): void {

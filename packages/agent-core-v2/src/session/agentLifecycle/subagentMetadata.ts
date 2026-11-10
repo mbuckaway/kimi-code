@@ -2,11 +2,14 @@ import type { AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 
 export function subagentLabels(
   parentAgentId: string,
-  options: { readonly swarmItem?: string } = {},
+  options: { readonly swarmItem?: string; readonly name?: string } = {},
 ): Readonly<Record<string, string>> {
   const labels: Record<string, string> = { parentAgentId };
   if (options.swarmItem !== undefined) {
     labels['swarmItem'] = options.swarmItem;
+  }
+  if (options.name !== undefined) {
+    labels['name'] = options.name;
   }
   return labels;
 }

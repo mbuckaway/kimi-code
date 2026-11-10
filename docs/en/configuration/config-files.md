@@ -492,6 +492,7 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `kimi_oauth` | `boolean` | `false` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI; token/apiKey auth remains the default |
+| `agent_messaging` | `boolean` | `true` | Agent-to-agent messaging: the `SendMessage` and `ListAgents` tools, and the `name` parameter on the `Agent` tool; set to `false` to disable |
 
 ## `services`
 

@@ -110,6 +110,10 @@ class FakeSessionMetadata implements ISessionMetadata {
   registerAgent(): Promise<void> {
     return Promise.resolve();
   }
+
+  unregisterAgent(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 function createPendingFetch() {

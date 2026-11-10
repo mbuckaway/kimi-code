@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
@@ -17,15 +17,20 @@ import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile'
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
-import { Error2, ErrorCodes, isError2 } from '#/errors';
+import { Error2, ErrorCodes, errorInfo, isError2 } from '#/errors';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { FakeRuntime } from '#/runtime/fakeRuntime';
 import type { RuntimeLease } from '#/runtime/runtime';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
-import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionMetadata,
+  type AgentMeta,
+  type SessionMeta,
+} from '#/session/sessionMetadata/sessionMetadata';
 import { SECONDARY_MODEL_SECTION } from '#/session/subagent/configSection';
 import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
@@ -54,7 +59,9 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   let modelMeta: Map<string, Partial<Model>>;
   let caller: IAgentScopeHandle;
   let createdHandles: Map<string, IAgentScopeHandle>;
-  let createAgent: ReturnType<typeof vi.fn>;
+  let createAgent: Mock<
+    (input?: { readonly agentId?: string }) => Promise<ReturnType<typeof stubAgentContext>>
+  >;
   let forkAgent: ReturnType<typeof vi.fn>;
   let acquireRuntime: ReturnType<typeof vi.fn>;
   let callerPermissionMode: { mode: string; setMode: ReturnType<typeof vi.fn> };
@@ -62,6 +69,9 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   let callerUserTools: IAgentUserToolService;
   let createdUserTools: IAgentUserToolService;
   let lease: RuntimeLease;
+  let sessionAgents: Record<string, AgentMeta>;
+  let removeAgent: ReturnType<typeof vi.fn>;
+  let unregisterAgent: ReturnType<typeof vi.fn>;
 
   function userToolsStub(): IAgentUserToolService {
     return {
@@ -92,6 +102,9 @@ describe('SessionSubagentService planSpawn and spawn', () => {
           }
           if (serviceId === IAgentPermissionModeService) return createdPermissionMode;
           if (serviceId === IAgentUserToolService) return createdUserTools;
+          if (serviceId === IAgentScopeContext) {
+            return makeAgentScopeContext({ agentId, agentScope: `agents/${agentId}` });
+          }
           return undefined;
         },
       } as IAgentScopeHandle['accessor'],
@@ -102,6 +115,9 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   beforeEach(() => {
     disposables = new DisposableStore();
     ix = disposables.add(new TestInstantiationService());
+    sessionAgents = { main: { type: 'main' } };
+    removeAgent = vi.fn(async () => {});
+    unregisterAgent = vi.fn(async () => {});
     callerData = {
       profileName: 'orchestrator',
       modelAlias: 'main-model',
@@ -164,6 +180,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     createAgent = vi.fn(async (input: { readonly agentId?: string } = {}) => {
       const agentId = input.agentId ?? 'agent-child';
       createdHandles.set(agentId, createdHandle(agentId));
+      sessionAgents[agentId] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
       return stubAgentContext(agentId, 1);
     });
     forkAgent = vi.fn(async () => {
@@ -182,7 +199,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       handleOf: (agentId: string) =>
         agentId === CALLER_ID ? caller : createdHandles.get(agentId),
       list: () => [stubAgentContext(CALLER_ID, 1)],
-      remove: async () => {},
+      remove: removeAgent,
       broadcastPermissionMode: () => {},
     } as unknown as IAgentLifecycleService);
     ix.stub(ISessionAgentProfileCatalog, {
@@ -209,6 +226,27 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       },
     } as unknown as IModelCatalog);
     ix.stub(ISessionContext, { _serviceBrand: undefined, cwd: '/repo' } as unknown as ISessionContext);
+    ix.stub(ISessionMetadata, {
+      _serviceBrand: undefined,
+      ready: Promise.resolve(),
+      onDidChangeMetadata: Event.None,
+      read: vi.fn(
+        async () =>
+          ({
+            id: 'session-1',
+            createdAt: 0,
+            updatedAt: 0,
+            archived: false,
+            agents: { ...sessionAgents },
+          }) as SessionMeta,
+      ),
+      update: async () => {},
+      setTitle: async () => {},
+      setGeneratedTitleIfUncustomized: async () => false,
+      setArchived: async () => {},
+      registerAgent: async () => {},
+      unregisterAgent,
+    } as ISessionMetadata);
     ix.stub(ILogService, stubLog());
   });
 
@@ -669,5 +707,217 @@ describe('SessionSubagentService planSpawn and spawn', () => {
 
     expect(createAgent).not.toHaveBeenCalled();
     expect(forkAgent).not.toHaveBeenCalled();
+  });
+
+  function spawnNamed(svc: ISessionSubagentService, name: string): Promise<SpawnedSubagent> {
+    return svc.spawn({
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      labels: { parentAgentId: 'main' },
+      prompt: 'Review the file',
+      name,
+    });
+  }
+
+  it('rejects the reserved root name case-insensitively', async () => {
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'MAIN',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_RESERVED);
+    expect(error.message).toBe('The name "main" is reserved for the root agent.');
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a name that looks like an agent id', async () => {
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'agent-12',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_INVALID);
+    expect(error.message).toBe('Agent names must not look like an agent id ("agent-12").');
+  });
+
+  it.each(['has space', 'emoji🚀', 'slash/name', ''])(
+    'rejects the invalid agent name %j',
+    async (name) => {
+      const svc = service();
+
+      const error = await spawnError(svc, {
+        callerAgentId: CALLER_ID,
+        plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+        prompt: 'Review the file',
+        name,
+      });
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NAME_INVALID);
+      expect(error.message).toContain('must be 1-64 characters of letters, digits, ".", "_" or "-"');
+    },
+  );
+
+  it('accepts a 64-character name and rejects 65', async () => {
+    const svc = service();
+
+    await expect(spawnNamed(svc, 'a'.repeat(64))).resolves.toMatchObject({ profileName: 'coder' });
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'a'.repeat(65),
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_INVALID);
+  });
+
+  it('stores the addressable name as a label on the created agent', async () => {
+    const svc = service();
+
+    await spawnNamed(svc, ' scout ');
+
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ labels: { parentAgentId: 'main', name: 'scout' } }),
+    );
+  });
+
+  it('rejects a name already held by another subagent', async () => {
+    sessionAgents['agent-4'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'scout',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_TAKEN);
+    expect(error.message).toBe('An agent named "scout" already exists (agent-4).');
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a name held by a parallel in-flight spawn', async () => {
+    createAgent.mockImplementationOnce(() => new Promise<never>(() => {}));
+    const svc = service();
+    void spawnNamed(svc, 'scout');
+    await vi.waitFor(() => {
+      expect(createAgent).toHaveBeenCalledTimes(1);
+    });
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'scout',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_TAKEN);
+    expect(error.message).toBe(
+      'An agent named "scout" is already reserved by an in-flight spawn.',
+    );
+  });
+
+  it('reserves a name before the persisted-metadata uniqueness read', async () => {
+    let releaseRead: (() => void) | undefined;
+    const metadata = ix.get(ISessionMetadata) as unknown as {
+      read: Mock<() => Promise<SessionMeta>>;
+    };
+    metadata.read.mockImplementation(
+      () =>
+        new Promise<SessionMeta>((resolve) => {
+          releaseRead = () => {
+            resolve({
+              id: 'session-1',
+              createdAt: 0,
+              updatedAt: 0,
+              archived: false,
+              agents: { ...sessionAgents },
+            });
+          };
+        }),
+    );
+    createAgent.mockImplementationOnce(() => new Promise<never>(() => {}));
+    const svc = service();
+    void spawnNamed(svc, 'scout');
+    await Promise.resolve();
+
+    const outcome = await Promise.race([
+      spawnError(svc, {
+        callerAgentId: CALLER_ID,
+        plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+        prompt: 'Review the file',
+        name: 'scout',
+      }).then((error) => error.message),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 100)),
+    ]);
+    releaseRead?.();
+
+    expect(outcome).toBe('An agent named "scout" is already reserved by an in-flight spawn.');
+  });
+
+  it('describes the agent name error codes', () => {
+    expect(errorInfo(ErrorCodes.AGENT_NAME_INVALID)).toMatchObject({
+      title: 'Invalid agent name',
+      retryable: false,
+    });
+    expect(errorInfo(ErrorCodes.AGENT_NAME_RESERVED)).toMatchObject({
+      title: 'That agent name is reserved',
+      retryable: false,
+    });
+    expect(errorInfo(ErrorCodes.AGENT_NAME_TAKEN)).toMatchObject({
+      title: 'That agent name is already in use',
+      retryable: false,
+    });
+  });
+
+  it('tears down a spawn that loses the name race to an earlier agent id', async () => {
+    createAgent.mockImplementationOnce(async () => {
+      sessionAgents['agent-8'] = {
+        type: 'sub',
+        labels: { parentAgentId: 'main', name: 'scout' },
+      };
+      createdHandles.set('agent-9', createdHandle('agent-9'));
+      sessionAgents['agent-9'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+      return stubAgentContext('agent-9', 1);
+    });
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'scout',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_TAKEN);
+    expect(error.message).toBe('An agent named "scout" already exists (agent-8).');
+    expect(removeAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'agent-9' }),
+    );
+    expect(unregisterAgent).toHaveBeenCalledWith('agent-9');
+  });
+
+  it('keeps a spawn that wins the name race against a later agent id', async () => {
+    createAgent.mockImplementationOnce(async () => {
+      createdHandles.set('agent-2', createdHandle('agent-2'));
+      sessionAgents['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+      sessionAgents['agent-9'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+      return stubAgentContext('agent-2', 1);
+    });
+    const svc = service();
+
+    await expect(spawnNamed(svc, 'scout')).resolves.toMatchObject({ agentId: 'agent-2' });
+
+    expect(removeAgent).not.toHaveBeenCalled();
+    expect(unregisterAgent).not.toHaveBeenCalled();
   });
 });

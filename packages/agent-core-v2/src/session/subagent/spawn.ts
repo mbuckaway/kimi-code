@@ -63,6 +63,7 @@ export interface SpawnSubagentOptions {
   readonly plan: SubagentSpawnPlan;
   readonly labels?: Readonly<Record<string, string>>;
   readonly prompt: string;
+  readonly name?: string;
 }
 
 export interface SpawnedSubagent {

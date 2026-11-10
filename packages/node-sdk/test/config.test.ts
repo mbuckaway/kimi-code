@@ -375,6 +375,17 @@ describe('KimiHarness config API', () => {
         enabled: false,
         source: 'default',
       },
+      {
+        id: 'agent_messaging',
+        title: 'Agent messaging',
+        description:
+          'Let agents message each other with SendMessage and discover recipients with ListAgents, and let the Agent tool assign addressable names to spawned subagents.',
+        surface: 'both',
+        env: 'KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING',
+        defaultEnabled: true,
+        enabled: true,
+        source: 'default',
+      },
     ]);
   });
 

@@ -39,6 +39,7 @@ export function isAgentReplayUserTurnRecord(record: AgentReplayRecord): boolean 
     case 'hook_result':
     case 'injection':
     case 'retry':
+    case 'agent_message':
       return false;
     case 'system_trigger':
       // The goal driver fires one synthetic continuation prompt per goal turn

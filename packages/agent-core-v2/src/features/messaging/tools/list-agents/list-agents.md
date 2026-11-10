@@ -1,0 +1,1 @@
+List the agents you can message: the root agent (`main`), your parent, and the agents you or the root agent spawned. Your own entry is never listed. Each entry shows the agent id, its name when one was set, and whether it is running or idle. Use an id or name as the `to` value of `SendMessage`.

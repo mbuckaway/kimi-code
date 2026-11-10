@@ -22,9 +22,13 @@ subagent 由 main agent 自动调度——根据任务复杂度、上下文消�
 
 subagent 支持在后台运行：完成后结果自动回到 main agent，无需手动轮询。也可以唤回已有的 subagent 实例继续推进同一任务。
 
+Agent 间的消息通信是由 `agent_messaging` flag 控制的实验功能，默认启用；可通过 `KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING=0` 或 `config.toml` 中 `[experimental]` 下的 `agent_messaging = false` 禁用。启用时，`Agent` 工具接受可选的 `name` 参数，让新 subagent 可按名称寻址：名称由 1–64 个字母、数字、`.`、`_` 或 `-` 组成，在会话的所有 subagent 中唯一，`main` 保留给根 agent；恢复（resume）时该参数会被忽略。
+
+此后，Agent 之间可以用 `SendMessage` 互相发消息，并用 `ListAgents` 查看可以联系的对象。运行中的 Agent 会在下一个步骤边界收到消息，空闲的 Agent（包括 `main`）会被唤醒来回复。消息以 `<agent-message>` 信封送达，属于来自其他 Agent 的不受信任输入：既不是用户审批，也不授予任何权限。subagent 的启动提示词中还会附带一份可联系 Agent 的名单（roster）。
+
 ## 上下文隔离与资源开销
 
-每个 subagent 拥有完全独立的上下文窗口，只能看到 main agent 显式传入的任务描述，看不到 main agent 的对话历史。subagent 自己的中间思考和工具调用记录不会回流，只有最终结果会出现在 main agent 的上下文里。
+每个 subagent 拥有完全独立的上下文窗口，只能看到 main agent 显式传入的内容（默认只有任务描述），看不到 main agent 的对话历史。subagent 自己的中间思考和工具调用记录不会回流，只有最终结果会出现在 main agent 的上下文里。启用 [Agent 间的消息通信](#调用方式) 后，与其他 Agent 交换的消息会双向传递，这是上述隔离的唯一例外。
 
 这种隔离带来两个好处：
 

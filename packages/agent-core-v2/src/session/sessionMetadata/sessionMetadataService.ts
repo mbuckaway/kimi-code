@@ -137,6 +137,16 @@ export class SessionMetadata extends Service implements ISessionMetadata {
     });
   }
 
+  async unregisterAgent(agentId: string): Promise<void> {
+    return this.enqueueUpdate(async () => {
+      await this.ready;
+      if (this.data.agents === undefined || !Object.hasOwn(this.data.agents, agentId)) return;
+      const agents = { ...this.data.agents };
+      delete agents[agentId];
+      await this.applyUpdate({ agents }, { touchUpdatedAt: false });
+    });
+  }
+
   private enqueueUpdate<T>(work: () => Promise<T>): Promise<T> {
     const run = this.updateQueue.then(work, work);
     const tracked: Promise<void> = run.then(

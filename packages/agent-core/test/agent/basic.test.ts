@@ -15,9 +15,9 @@ it('creates an independent agent with a scoped experimental flag resolver', () =
     experimentalFlags: new FlagResolver({}, FLAG_DEFINITIONS),
   });
 
-  // No experimental flags are currently registered, so the scoped resolver
-  // reports none enabled.
-  expect(ctx.agent.experimentalFlags.enabledIds()).toEqual([]);
+  // The scoped resolver reflects the registry defaults; `agent_messaging` is
+  // released on by default.
+  expect(ctx.agent.experimentalFlags.enabledIds()).toEqual(['agent_messaging']);
 });
 
 it('runs a text-only agent turn from prompt to completion', async () => {
