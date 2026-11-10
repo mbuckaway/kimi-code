@@ -6,6 +6,18 @@ export function targetTriple({ platform = process.platform, arch = process.arch,
   return env.KIMI_CODE_BUILD_TARGET ?? `${platform}-${arch}`;
 }
 
+export function targetPlatform(target = targetTriple()) {
+  return target.slice(0, target.lastIndexOf('-'));
+}
+
+export function targetArch(target = targetTriple()) {
+  return target.slice(target.lastIndexOf('-') + 1);
+}
+
+export function isCrossTarget(target = targetTriple()) {
+  return target !== `${process.platform}-${process.arch}`;
+}
+
 export function executableName(platform = process.platform) {
   return platform === 'win32' ? 'kimi.exe' : 'kimi';
 }
@@ -22,7 +34,7 @@ export function nativeBinDir(target = targetTriple()) {
   return resolve(nativeDistRoot(), 'bin', target);
 }
 
-export function nativeBinPath(target = targetTriple(), platform = process.platform) {
+export function nativeBinPath(target = targetTriple(), platform = targetPlatform(target)) {
   return resolve(nativeBinDir(target), executableName(platform));
 }
 

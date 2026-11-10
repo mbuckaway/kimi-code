@@ -47,12 +47,15 @@ jobs:
             target: linux-arm64
           - os: macos-15-intel
             target: darwin-x64
-          - os: macos-15
+          - os: ubuntu-24.04-arm
             target: darwin-arm64
           - os: windows-2025-vs2026
             target: win32-x64
           - os: windows-11-arm
             target: win32-arm64
+
+    env:
+      KIMI_CODE_BUILD_TARGET: ${{ matrix.target }}
 
     steps:
       - name: Checkout
@@ -69,6 +72,25 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Setup cross-signing tool (cross-compiled macOS builds)
+        if: startsWith(matrix.target, 'darwin-') && runner.os != 'macOS' && !inputs.sign-macos
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) RC_ARCH=x86_64-unknown-linux-musl; RC_SHA256=dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002 ;;
+            aarch64|arm64) RC_ARCH=aarch64-unknown-linux-musl; RC_SHA256=4af92c87ddf52f5f2d1258a3b4e56c7dcb8f1b2468df744976c5f139e031961f ;;
+            *) echo "Unsupported runner architecture: $(uname -m)"; exit 1 ;;
+          esac
+          RC_VERSION=0.29.0
+          URL="https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RC_VERSION}/apple-codesign-${RC_VERSION}-${RC_ARCH}.tar.gz"
+          curl -sSfL "$URL" -o "$RUNNER_TEMP/rcodesign.tar.gz"
+          echo "${RC_SHA256}  $RUNNER_TEMP/rcodesign.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/rcodesign"
+          tar -xzf "$RUNNER_TEMP/rcodesign.tar.gz" -C "$RUNNER_TEMP/rcodesign" --strip-components=1
+          echo "$RUNNER_TEMP/rcodesign" >> "$GITHUB_PATH"
+          echo "KIMI_CODE_RCODESIGN=$RUNNER_TEMP/rcodesign/rcodesign" >> "$GITHUB_ENV"
 
       - name: Setup macOS keychain (release only)
         if: runner.os == 'macOS' && inputs.sign-macos
