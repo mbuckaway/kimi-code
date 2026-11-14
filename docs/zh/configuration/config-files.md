@@ -492,7 +492,13 @@ reply_language = "en"     # 可选 — 默认值为 "en"
 | --- | --- | --- | --- |
 | `kimi_oauth` | `boolean` | `false` | 在 web UI 和 TUI 中启用 kimi.com/kimi.ai 的 OAuth 设备码登录；token/apiKey 鉴权仍为默认 |
 | `agent_messaging` | `boolean` | `true` | Agent 间的消息通信与只读的 Agent 集群可见性：`SendMessage`、`ListAgents`、`AgentResult`、`AgentHealth`、`WaitForAll` 工具，以及 `Agent` 工具的 `name` 参数；设为 `false` 可禁用 |
-| `agent_fleet_control` | `boolean` | `false` | 破坏性的 Agent 集群生命周期控制：`StopAgent`、`InterruptAgent`、`StopAgents`、`DismissAgents`、`TagAgent` 和 `RenameAgent` 工具；默认关闭 |
+| `agent_fleet_control` | `boolean` | `true` | 破坏性的 Agent 集群生命周期控制：`StopAgent`、`InterruptAgent`、`StopAgents`、`DismissAgents`、`TagAgent` 和 `RenameAgent` 工具；默认启用，设为 `false` 可禁用 |
+| `agent_persona` | `boolean` | `true` | 通过 `Agent` 和 `AgentSwarm` 的 `persona`/`personas` 参数，给派生的 Agent profile 叠加 Markdown persona（overlay 或 replace）；默认启用，设为 `false` 可禁用 |
+| `tool-select` | `boolean` | `true` | 将 MCP 工具 schema 移出顶层工具列表，由模型通过 `select_tools` 按需加载；仅对支持动态加载工具的模型生效。默认启用 |
+| `secondary-model` | `boolean` | `false` | 让新派生的 subagent 默认使用单独配置的次级模型，并可对质量敏感任务显式指定主模型；默认关闭 |
+| `subagent_fork` | `boolean` | `false` | 让 `Agent` 和 `AgentSwarm` 通过 `fork` 参数以调用方对话历史的快照启动 subagent；默认关闭 |
+| `wait_for` | `boolean` | `true` | 向模型提供 `WaitFor` 工具，使其可以在当前轮次内等待后台任务，而不是结束轮次；默认启用 |
+| `tower` | `boolean` | `false` | 启用 tower 模式，在共享目标上协调多个 Agent，通过 `/tower` 切换；默认关闭 |
 
 ## `services`
 

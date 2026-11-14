@@ -156,6 +156,8 @@ export class TurnFlow {
   private latestTraceId: string | undefined;
   private currentStep = 0;
   private readonly mediaStripAccumulator: Set<string> = new Set();
+  /** Turn id that should end after its current step, set by `InterruptAgent`. */
+  private stopAfterStepTurnId: number | null = null;
 
   constructor(protected readonly agent: Agent) {
     for (const key of agent.initialStrippedMediaKeys ?? []) {
@@ -413,6 +415,25 @@ export class TurnFlow {
     return this.activeTurn !== null && this.activeTurn !== 'resuming';
   }
 
+  /**
+   * Ask the active turn to stop after its current step finishes, including the
+   * tools that step already called. Returns false when nothing is running, so
+   * the caller can report a no-op interrupt instead of arming a later turn.
+   */
+  requestStopAfterStep(): boolean {
+    if (!this.hasActiveTurn) return false;
+    this.stopAfterStepTurnId = this.currentId;
+    return true;
+  }
+
+  /** Consume a pending stop-after-step request for the current turn. */
+  private takeStopAfterStep(): boolean {
+    if (this.stopAfterStepTurnId === null) return false;
+    const matches = this.stopAfterStepTurnId === this.currentId;
+    this.stopAfterStepTurnId = null;
+    return matches;
+  }
+
   private ensureActiveTurn(): ActiveTurn {
     if (this.activeTurn === null || this.activeTurn === 'resuming') {
       throw new Error('No active turn');
@@ -441,6 +462,9 @@ export class TurnFlow {
   }
 
   private abortTurn(reason: unknown) {
+    // A hard cancel supersedes any pending graceful stop request; clearing it
+    // here keeps a later turn from stopping on a stale request.
+    this.stopAfterStepTurnId = null;
     // Decide the user-interruption flag at cancel time, not when the aborted
     // worker unwinds: `activeTurn` clears synchronously here, so a concurrent
     // reader must already see the turn as user-stopped. A cancel with no turn
@@ -1012,7 +1036,9 @@ export class TurnFlow {
               this.agent.usage.record(model, usage, 'turn');
               await this.agent.fullCompaction.afterStep();
               deduper.endStep();
-              return stopForGoalBudget ? { stopTurn: true } : undefined;
+              return stopForGoalBudget || this.takeStopAfterStep()
+                ? { stopTurn: true }
+                : undefined;
             },
             // oxlint-disable-next-line no-loop-func -- stop hook continuation state is scoped to this turn.
             shouldContinueAfterStop: async (ctx) => {

@@ -86,6 +86,25 @@ describe('default agent profiles', () => {
     }
   });
 
+  it('lists the fleet-control tools on agent and coder but not on explore/plan (v2 parity)', () => {
+    const fleetTools = [
+      'StopAgent',
+      'StopAgents',
+      'InterruptAgent',
+      'DismissAgents',
+      'RenameAgent',
+      'TagAgent',
+    ];
+    for (const name of ['agent', 'coder']) {
+      const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
+      expect(tools).toEqual(expect.arrayContaining(fleetTools));
+    }
+    for (const name of ['explore', 'plan']) {
+      const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
+      for (const tool of fleetTools) expect(tools).not.toContain(tool);
+    }
+  });
+
   it('fails loudly when an embedded system prompt source is missing', () => {
     expect(() =>
       loadAgentProfilesFromSources(['profile/default/agent.yaml'], {

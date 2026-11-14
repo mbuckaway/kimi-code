@@ -274,6 +274,31 @@ describe('Plan mode permission policy', () => {
     expect(deny.message ?? '').toContain('plan mode');
   });
 
+  it.each(['StopAgent', 'StopAgents', 'InterruptAgent', 'DismissAgents'] as const)(
+    'blocks the destructive fleet tool %s while plan mode is active',
+    async (toolName) => {
+      const { agent } = await activePlanAgent();
+
+      const result = evaluatePlanPolicy(agent, toolName, { agent_id: 'agent-0' });
+
+      const deny = expectDeny(result);
+      expect(deny.message ?? '').toContain(toolName);
+      expect(deny.message ?? '').toContain('plan mode');
+      expect(deny.message ?? '').toContain('ExitPlanMode');
+    },
+  );
+
+  it('keeps the label-only fleet tools available in plan mode', async () => {
+    const { agent } = await activePlanAgent();
+
+    expect(
+      evaluatePlanPolicy(agent, 'TagAgent', { agent_id: 'agent-0', tags: ['ui'] }),
+    ).toBeUndefined();
+    expect(
+      evaluatePlanPolicy(agent, 'RenameAgent', { agent_id: 'agent-0', name: 'scout' }),
+    ).toBeUndefined();
+  });
+
   it('allows CronList when plan mode is active', async () => {
     const { agent } = await activePlanAgent();
 

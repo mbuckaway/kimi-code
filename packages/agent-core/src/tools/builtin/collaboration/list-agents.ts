@@ -43,7 +43,11 @@ function formatAgentRoster(roster: readonly AgentRosterEntry[]): string {
   const lines = ['Agents you can message:'];
   for (const entry of roster) {
     const state = entry.running ? 'running' : 'idle';
-    lines.push(`- ${entry.name ?? entry.agentId} (id: ${entry.agentId}) — ${state}`);
+    const tags =
+      entry.tags === undefined || entry.tags.length === 0
+        ? ''
+        : ` · tags: ${entry.tags.join(', ')}`;
+    lines.push(`- ${entry.name ?? entry.agentId} (id: ${entry.agentId}) — ${state}${tags}`);
   }
   return lines.join('\n');
 }

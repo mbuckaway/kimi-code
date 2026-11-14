@@ -26,7 +26,9 @@ import { WorkspaceStateService } from '#/workspace/state/workspaceStateService';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import '#/features/reminder/reminderFeature';
-import { AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
+import { TOOL_SELECT_FLAG_ID } from '#/agent/toolSelect/flag';
+import { AGENT_FLEET_CONTROL_FLAG_ID, AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
+import { AGENT_PERSONA_FLAG_ID } from '#/session/subagent/flag';
 import { BUILTIN_REPLAYABLE_STATE_KEYS } from '../state/builtinReplayableKeys';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { AgentCron } from '#/features/cron/cronAgentRuntime';
@@ -2512,7 +2514,12 @@ function emptyConfig(): KimiConfig {
   return configWithProvider(
     {
       providers: {},
-      experimental: { [AGENT_MESSAGING_FLAG_ID]: false },
+      experimental: {
+        [TOOL_SELECT_FLAG_ID]: false,
+        [AGENT_MESSAGING_FLAG_ID]: false,
+        [AGENT_PERSONA_FLAG_ID]: false,
+        [AGENT_FLEET_CONTROL_FLAG_ID]: false,
+      },
       cron: { ...DEFAULT_CRON_CONFIG, pollIntervalMs: 0 },
     },
     MOCK_PROVIDER,

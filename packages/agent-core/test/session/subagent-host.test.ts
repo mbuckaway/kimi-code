@@ -36,6 +36,7 @@ import {
   type QueuedSubagentTask,
 } from '../../src/session/subagent-host';
 import { abortError, userCancellationReason } from '../../src/utils/abort';
+import { agentTask } from '../agent/background/helpers';
 import { testAgent, type AgentTestContext } from '../agent/harness/agent';
 import { createFakeKaos } from '../tools/fixtures/fake-kaos';
 import { executeTool } from '../tools/fixtures/execute-tool';
@@ -3797,7 +3798,13 @@ describe('SessionSubagentHost inbox, roster and health', () => {
     const session = messagingSession([
       { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
       { id: 'agent-2', agent: lead.agent, name: 'lead', parentAgentId: 'main' },
-      { id: 'agent-3', agent: worker.agent, name: 'worker', parentAgentId: 'agent-2' },
+      {
+        id: 'agent-3',
+        agent: worker.agent,
+        name: 'worker',
+        parentAgentId: 'agent-2',
+        tags: ['ui', 'fast'],
+      },
     ]);
     const host = new SessionSubagentHost(session, 'agent-2', () => lead.agent);
 
@@ -3809,7 +3816,7 @@ describe('SessionSubagentHost inbox, roster and health', () => {
         role: 'sub',
         running: false,
         parentAgentId: 'agent-2',
-        tags: undefined,
+        tags: ['ui', 'fast'],
         state: 'idle',
       },
     ]);
@@ -4481,6 +4488,7 @@ interface MessagingSessionAgent {
   readonly name?: string;
   readonly type?: 'main' | 'sub';
   readonly parentAgentId?: string | null;
+  readonly tags?: readonly string[];
 }
 
 function messagingSession(entries: readonly MessagingSessionAgent[]) {
@@ -4493,6 +4501,7 @@ function messagingSession(entries: readonly MessagingSessionAgent[]) {
       type,
       parentAgentId: entry.parentAgentId ?? (type === 'main' ? null : 'main'),
       name: entry.name,
+      tags: entry.tags,
     };
   }
   return {
@@ -4752,3 +4761,480 @@ function createSessionRpc(): SDKSessionRPC {
     },
   ) as SDKSessionRPC;
 }
+
+describe('SessionSubagentHost fleet control', () => {
+  function gate(): { readonly promise: Promise<void>; resolve(): void } {
+    let resolve: () => void = () => {};
+    const promise = new Promise<void>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  function todoCallResult(title: string): Awaited<ReturnType<GenerateFn>> {
+    return {
+      id: 'mock-tool',
+      message: {
+        role: 'assistant',
+        content: [],
+        toolCalls: [
+          {
+            type: 'function',
+            id: 'call_todo',
+            name: 'TodoList',
+            arguments: JSON.stringify({ todos: [{ title, status: 'in_progress' }] }),
+          },
+        ],
+      },
+      usage: { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+      finishReason: 'tool_calls',
+      rawFinishReason: 'tool_calls',
+    };
+  }
+
+  function gatedChild(config: {
+    readonly tools?: readonly string[];
+    readonly firstStep: 'text' | 'tool';
+  }): { child: AgentTestContext; release(): void; calls: () => number } {
+    const wait = gate();
+    let calls = 0;
+    const generate: GenerateFn = async (_provider, _system, _tools, _history, callbacks) => {
+      calls += 1;
+      await callbacks?.onMessagePart?.({ type: 'text', text: 'Working on it.' });
+      if (calls === 1) {
+        await wait.promise;
+        return config.firstStep === 'tool'
+          ? todoCallResult('finish the task')
+          : textResult('Finished.');
+      }
+      return textResult('Second step.');
+    };
+    const child = testAgent({ type: 'sub', generate });
+    child.configure({ tools: [...(config.tools ?? [])] });
+    return { child, release: wait.resolve, calls: () => calls };
+  }
+
+  function stoppableTask(agentId: string, detached = true) {
+    const abortController = new AbortController();
+    const completion = new Promise<{ result: string }>((_resolve, reject) => {
+      abortController.signal.addEventListener(
+        'abort',
+        () => {
+          reject(abortError());
+        },
+        { once: true },
+      );
+    });
+    return { task: agentTask(completion, 'delegate', { agentId, abortController }), detached };
+  }
+
+  it('stops a running child turn and keeps its name and metadata', async () => {
+    const main = testAgent();
+    main.configure();
+    const { child, release } = gatedChild({ firstStep: 'text' });
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const ended = child.untilTurnEnd();
+    void child.rpc.prompt({ input: [{ type: 'text', text: 'work' }] });
+    await vi.waitFor(() => {
+      expect(child.agent.turn.hasActiveTurn).toBe(true);
+    });
+
+    const result = await host.stopAgent('reviewer', 'too slow');
+
+    expect(result).toEqual({
+      agentId: 'agent-0',
+      label: 'reviewer',
+      stopped: true,
+      pendingTurnIds: [],
+    });
+    expect(child.agent.turn.hasActiveTurn).toBe(false);
+    release();
+    await ended;
+    expect(session.metadata.agents['agent-0']).toMatchObject({
+      type: 'sub',
+      parentAgentId: 'main',
+      name: 'reviewer',
+    });
+  });
+
+  it('reports an idle target without claiming a stop', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(host.stopAgent('reviewer')).resolves.toEqual({
+      agentId: 'agent-0',
+      label: 'reviewer',
+      stopped: false,
+      pendingTurnIds: [],
+    });
+  });
+
+  it('refuses to stop main and itself', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+
+    await expect(new SessionSubagentHost(session, 'main').stopAgent('main')).rejects.toThrow(
+      'The root agent cannot be stopped by an agent.',
+    );
+    await expect(new SessionSubagentHost(session, 'agent-0').stopAgent('agent-0')).rejects.toThrow(
+      'An agent cannot stop itself.',
+    );
+  });
+
+  it('refuses to stop a sibling it does not own', async () => {
+    const main = testAgent();
+    main.configure();
+    const sibling = testAgent({ type: 'sub' });
+    sibling.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+      { id: 'agent-1', agent: sibling.agent, name: 'sibling' },
+    ]);
+    const host = new SessionSubagentHost(session, 'agent-0');
+
+    await expect(host.stopAgent('agent-1')).rejects.toThrow(
+      'Agent "agent-1" is not owned by "agent-0".',
+    );
+  });
+
+  it('interrupts a running child after its current step instead of mid-step', async () => {
+    const main = testAgent();
+    main.configure();
+    const { child, release, calls } = gatedChild({ tools: ['TodoList'], firstStep: 'tool' });
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const ended = child.untilTurnEnd();
+    void child.rpc.prompt({ input: [{ type: 'text', text: 'work' }] });
+    await vi.waitFor(() => {
+      expect(child.agent.turn.hasActiveTurn).toBe(true);
+    });
+
+    await expect(host.interruptAgent('reviewer')).resolves.toEqual({
+      agentId: 'agent-0',
+      label: 'reviewer',
+      interrupted: true,
+    });
+
+    release();
+    await ended;
+    // The current step — including its TodoList call — ran, then the turn
+    // stopped instead of starting a second step.
+    expect(calls()).toBe(1);
+    expect(child.agent.turn.hasActiveTurn).toBe(false);
+  });
+
+  it('reports no interrupt for an idle target', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(host.interruptAgent('reviewer')).resolves.toEqual({
+      agentId: 'agent-0',
+      label: 'reviewer',
+      interrupted: false,
+    });
+  });
+
+  it('dismisses named owned agents and unregisters ghost entries', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    session.metadata.agents['agent-9'] = {
+      homedir: '/tmp/kimi-session/agents/agent-9',
+      type: 'sub',
+      parentAgentId: 'main',
+      name: 'ghost',
+    };
+    const host = new SessionSubagentHost(session, 'main');
+
+    const result = await host.dismissAgents({ names: ['reviewer', 'ghost'] });
+
+    expect(result).toEqual({
+      dismissed: [
+        { agentId: 'agent-0', name: 'reviewer', ghost: false },
+        { agentId: 'agent-9', name: 'ghost', ghost: true },
+      ],
+    });
+    expect(session.metadata.agents['agent-0']).toBeUndefined();
+    expect(session.metadata.agents['agent-9']).toBeUndefined();
+    expect(session.agents.has('agent-0')).toBe(false);
+    expect(session.writeMetadata).toHaveBeenCalled();
+  });
+
+  it('validates every dismiss target before removing anything', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(host.dismissAgents({ ids: ['agent-0', 'main'] })).rejects.toThrow(
+      'The root agent "main" is not a subagent.',
+    );
+    expect(session.metadata.agents['agent-0']).toMatchObject({ name: 'reviewer' });
+  });
+
+  it('dismisses every owned agent with all:true but never main', async () => {
+    const main = testAgent();
+    main.configure();
+    const first = testAgent({ type: 'sub' });
+    first.configure();
+    const second = testAgent({ type: 'sub' });
+    second.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: first.agent, name: 'one' },
+      { id: 'agent-1', agent: second.agent, name: 'two' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const result = await host.dismissAgents({ all: true });
+
+    expect(result.dismissed.map((entry) => entry.agentId)).toEqual(['agent-0', 'agent-1']);
+    expect(session.metadata.agents['main']).toBeDefined();
+  });
+
+  it('sets, dedupes, and clears tags on an owned agent', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const tagged = await host.setAgentTags('reviewer', [' ui ', 'ui', '', 'fast']);
+    expect(tagged).toEqual({ agentId: 'agent-0', name: 'reviewer', tags: ['ui', 'fast'] });
+    expect(session.metadata.agents['agent-0']?.tags).toEqual(['ui', 'fast']);
+    expect(host.listAgents()).toContainEqual(
+      expect.objectContaining({ agentId: 'agent-0', tags: ['ui', 'fast'] }),
+    );
+
+    const cleared = await host.setAgentTags('agent-0', []);
+    expect(cleared.tags).toEqual([]);
+    expect(session.metadata.agents['agent-0']?.['tags']).toBeUndefined();
+  });
+
+  it('refuses to tag or rename an agent the caller does not own', async () => {
+    const main = testAgent();
+    main.configure();
+    const sibling = testAgent({ type: 'sub' });
+    sibling.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+      { id: 'agent-1', agent: sibling.agent, name: 'sibling' },
+    ]);
+    const host = new SessionSubagentHost(session, 'agent-0');
+
+    await expect(host.setAgentTags('agent-1', ['ui'])).rejects.toThrow(
+      'Agent "agent-1" is not owned by "agent-0".',
+    );
+    await expect(host.renameAgent('agent-1', 'scout')).rejects.toThrow(
+      'Agent "agent-1" is not owned by "agent-0".',
+    );
+    // A sibling's name is not resolvable from this caller at all, so the
+    // message matches v2's "does not exist" wording.
+    await expect(host.setAgentTags('sibling', ['ui'])).rejects.toThrow(
+      'Agent "sibling" does not exist.',
+    );
+    await expect(host.setAgentTags('main', ['ui'])).rejects.toThrow(
+      'The root agent "main" is not a subagent.',
+    );
+  });
+
+  it('renames an owned agent without changing its id or tags', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer', tags: ['ui'] },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    const result = await host.renameAgent('reviewer', ' scout ');
+
+    expect(result).toEqual({ agentId: 'agent-0', name: 'scout', tags: ['ui'] });
+    expect(session.metadata.agents['agent-0']).toMatchObject({ name: 'scout', tags: ['ui'] });
+    expect(host.listAgents()).toContainEqual(
+      expect.objectContaining({ agentId: 'agent-0', name: 'scout' }),
+    );
+  });
+
+  it('rejects a rename to a name another agent already holds', async () => {
+    const main = testAgent();
+    main.configure();
+    const first = testAgent({ type: 'sub' });
+    first.configure();
+    const second = testAgent({ type: 'sub' });
+    second.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: first.agent, name: 'reviewer' },
+      { id: 'agent-5', agent: second.agent, name: 'scout' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(host.renameAgent('reviewer', 'scout')).rejects.toThrow(
+      'An agent named "scout" already exists (agent-5).',
+    );
+    expect(session.metadata.agents['agent-0']).toMatchObject({ name: 'reviewer' });
+  });
+
+  it('rejects a rename to a reserved or invalid name', async () => {
+    const main = testAgent();
+    main.configure();
+    const child = testAgent({ type: 'sub' });
+    child.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+      { id: 'agent-0', agent: child.agent, name: 'reviewer' },
+    ]);
+    const host = new SessionSubagentHost(session, 'main');
+
+    await expect(host.renameAgent('reviewer', 'main')).rejects.toThrow(
+      'The name "main" is reserved for the root agent.',
+    );
+    await expect(host.renameAgent('reviewer', 'has space')).rejects.toThrow(
+      'Agent name "has space" must be 1-64 characters of letters, digits, ".", "_" or "-".',
+    );
+  });
+
+  it('stops the latest task of a requested agent', async () => {
+    const main = testAgent();
+    main.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+    ]);
+    const host = new SessionSubagentHost(session, 'main', () => main.agent);
+    const { task } = stoppableTask('agent-0');
+    const taskId = main.agent.background.registerTask(task);
+
+    const result = await host.stopAgents({ agentIds: ['agent-0'], reason: 'cohort done' });
+
+    expect(result.requested).toBe(1);
+    expect(result.stopped).toBe(1);
+    expect(result.rows).toEqual([
+      {
+        taskId,
+        agentId: 'agent-0',
+        kind: 'agent',
+        status: 'stopped',
+        reason: 'cohort done',
+      },
+    ]);
+    expect(main.agent.background.getTask(taskId)?.status).toBe('killed');
+  });
+
+  it('reports terminal and unknown tasks without stopping anything', async () => {
+    const main = testAgent();
+    main.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+    ]);
+    const host = new SessionSubagentHost(session, 'main', () => main.agent);
+    const { task } = stoppableTask('agent-0');
+    const taskId = main.agent.background.registerTask(task);
+    await main.agent.background.stop(taskId, 'first stop');
+
+    const result = await host.stopAgents({ taskIds: [taskId, 'agent-missing'] });
+
+    expect(result.stopped).toBe(0);
+    expect(result.requested).toBe(2);
+    expect(result.rows).toEqual([
+      {
+        taskId,
+        agentId: 'agent-0',
+        kind: 'agent',
+        status: 'already_terminal',
+        reason: 'first stop',
+      },
+      { taskId: 'agent-missing', status: 'not_found', reason: 'Task not found' },
+    ]);
+  });
+
+  it('skips foreground tasks unless include_foreground is set', async () => {
+    const main = testAgent();
+    main.configure();
+    const session = messagingSession([
+      { id: 'main', agent: main.agent, type: 'main', parentAgentId: null },
+    ]);
+    const host = new SessionSubagentHost(session, 'main', () => main.agent);
+    const foreground = stoppableTask('agent-0', false);
+    const foregroundId = main.agent.background.registerTask(foreground.task, {
+      detached: false,
+    });
+
+    const skipped = await host.stopAgents({ all: true });
+    expect(skipped.rows).toEqual([
+      {
+        taskId: foregroundId,
+        agentId: 'agent-0',
+        kind: 'agent',
+        status: 'skipped_foreground',
+        reason: 'Foreground task skipped; set include_foreground=true to stop it.',
+      },
+    ]);
+    expect(skipped.stopped).toBe(0);
+    expect(main.agent.background.getTask(foregroundId)?.status).toBe('running');
+
+    const stopped = await host.stopAgents({ all: true, includeForeground: true });
+    expect(stopped.stopped).toBe(1);
+    expect(main.agent.background.getTask(foregroundId)?.status).toBe('killed');
+  });
+
+  it('rejects bulk stopping when the owning agent is not ready', async () => {
+    const session = messagingSession([]);
+    const host = new SessionSubagentHost(session, 'agent-9');
+
+    await expect(host.stopAgents({ all: true })).rejects.toThrow(
+      'Agent "agent-9" is not ready to control tasks.',
+    );
+  });
+});

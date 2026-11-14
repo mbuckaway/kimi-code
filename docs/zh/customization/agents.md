@@ -126,7 +126,7 @@ disallowedTools:
 
 ### Persona
 
-Persona 是一个 Agent 文件，它给另一个 Agent（基座 Agent）叠加一层角色设定，而不是定义一个独立 Agent。多个任务共用同一个基座 Agent、但需要不同角色框架时使用它 —— 例如让一个 `coder` 在某个派生中侧重安全审查，在另一个派生中侧重性能审查。该功能是实验功能，默认关闭：通过 `KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=1` 或 `config.toml` 中 `[experimental]` 下的 `agent_persona = true` 开启。
+Persona 是一个 Agent 文件，它给另一个 Agent（基座 Agent）叠加一层角色设定，而不是定义一个独立 Agent。多个任务共用同一个基座 Agent、但需要不同角色框架时使用它 —— 例如让一个 `coder` 在某个派生中侧重安全审查，在另一个派生中侧重性能审查。该功能是实验功能，默认启用：通过 `KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=0` 或 `config.toml` 中 `[experimental]` 下的 `agent_persona = false` 禁用。
 
 Persona 用 `extends` 声明基座 Agent，用 `mode` 选择两段提示词的组合方式。`mode: overlay` 是默认值：基座系统提示词保持完整，persona 正文渲染到它的 `${persona}` 位置，排在角色段落之后。`mode: replace` 则让 persona 正文成为系统提示词，而 `${base_prompt}` 仍展开为有效的基座提示词，因此正文可以主动包裹它。
 

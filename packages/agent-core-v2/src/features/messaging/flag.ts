@@ -22,7 +22,7 @@ export const agentFleetControlFlag: FlagDefinitionInput = {
   description:
     'Let agents stop, interrupt, dismiss, tag, and rename the agents they own through StopAgent, StopAgents, InterruptAgent, DismissAgents, TagAgent and RenameAgent.',
   env: AGENT_FLEET_CONTROL_FLAG_ENV,
-  default: false,
+  default: true,
   surface: 'both',
 };
 

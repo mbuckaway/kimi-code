@@ -47,6 +47,11 @@ mark the row `merged-upstream` (keep the row as history).
 | agent lifecycle control | `feat/agent-fleet-and-persona` | Add `agent_fleet_control` (default off): `StopAgent`, `StopAgents`, `DismissAgents`, `TagAgent`, `RenameAgent`, `InterruptAgent`; destructive tools, not auto-approved, plan-mode vetoed, ownership-gated | — | — | local |
 | AgentSwarm names | `feat/agent-fleet-and-persona` | Add per-item `names` to `AgentSwarm` with length/duplicate validation and flag-gated schema stripping; resumed members keep their name | — | — | local |
 | agent persona | `feat/agent-fleet-and-persona` | Add `agent_persona` (default off): `persona`/`personas` on `Agent`/`AgentSwarm` with overlay/replace, `extends` base-match, skills, capability clamping, and realpath-checked path personas | — | — | local |
+| enable agent fleet control by default | `feat/agent-defaults-on` | Flip `agent_fleet_control` to default on (v2); the config/env off-switch stays | — | — | local |
+| enable agent persona by default | `feat/agent-defaults-on` | Flip `agent_persona` to default on (v2); the config/env off-switch stays | — | — | local |
+| enable tool-select by default | `feat/agent-defaults-on` | Flip `tool-select` to default on in both engines (`agent-core` v1 + `agent-core-v2`); the config/env off-switch stays | — | — | local |
+| document experimental flags in config | `feat/agent-defaults-on` | Document all experimental `[experimental]` flags with their defaults in `config-files.md` and `env-vars.md` (en + zh) | — | — | local |
+| port fleet-control tools to v1 | `feat/agent-defaults-on` | Add `StopAgent`, `StopAgents`, `InterruptAgent`, `DismissAgents`, `TagAgent`, `RenameAgent` to `agent-core` v1 behind a new `agent_fleet_control` flag (default on) so v1 and v2 expose the same tool set and the v1↔v2 parity test passes | — | — | local |
 
 The agent fleet/messaging features above ship in both engines (`agent-core` v1 and `agent-core-v2`).
 

@@ -53,9 +53,14 @@ describe('PlanModeInjector content', () => {
     expect(text).toContain('Edit');
     expect(text).toContain('ExitPlanMode');
     expect(text).toContain('Plan file: /tmp/plan.md');
-    // TaskStop/CronCreate/CronDelete are hard-denied in plan mode
-    // (plan-mode-guard-deny.ts); the reminder must name them.
+    // TaskStop, the destructive fleet tools, and CronCreate/CronDelete are
+    // hard-denied in plan mode (plan-mode-guard-deny.ts); the reminder must
+    // name them.
     expect(text).toContain('TaskStop');
+    expect(text).toContain('StopAgent');
+    expect(text).toContain('StopAgents');
+    expect(text).toContain('DismissAgents');
+    expect(text).toContain('InterruptAgent');
     expect(text).toContain('Plan review gate');
     expect(text).toContain(
       'Do not make shit up. Do your research. Ask questions for clarification and to resolve ambiguities.',

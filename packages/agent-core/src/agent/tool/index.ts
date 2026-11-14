@@ -795,6 +795,7 @@ export class ToolManager {
     const allowBackground = canRunInBackground();
     const goalToolsEnabled = this.agent.type === 'main';
     const agentMessagingEnabled = this.agent.experimentalFlags.enabled('agent_messaging');
+    const agentFleetControlEnabled = this.agent.experimentalFlags.enabled('agent_fleet_control');
     this.builtinTools = new Map(
       [
         new b.ReadTool(kaos, workspace),
@@ -882,6 +883,24 @@ export class ToolManager {
         this.agent.subagentHost &&
           agentMessagingEnabled &&
           new b.BroadcastMessageTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.StopAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.InterruptAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.DismissAgentsTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.TagAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.RenameAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.StopAgentsTool(this.agent.subagentHost),
         agentMessagingEnabled && new b.AgentResultTool(background),
         this.agent.subagentHost &&
           agentMessagingEnabled &&

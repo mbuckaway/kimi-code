@@ -126,7 +126,7 @@ Custom agents delegated as sub-agents run without the built-in sub-agent framing
 
 ### Personas
 
-A persona is an agent file that adds a role layer to another agent, its base agent, instead of defining a standalone agent. Use one when several tasks share a base agent but need different role framing — for example, a `coder` that reviews security in one spawn and performance in another. The feature is experimental and off by default: enable it with `KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=1` or `agent_persona = true` under `[experimental]` in `config.toml`.
+A persona is an agent file that adds a role layer to another agent, its base agent, instead of defining a standalone agent. Use one when several tasks share a base agent but need different role framing — for example, a `coder` that reviews security in one spawn and performance in another. The feature is experimental and enabled by default: disable it with `KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=0` or `agent_persona = false` under `[experimental]` in `config.toml`.
 
 A persona declares `extends` to name its base agent and `mode` to choose how the two prompts combine. `mode: overlay` is the default: the base system prompt stays intact, and the persona body renders into its `${persona}` slot after the role section. `mode: replace` makes the persona body the system prompt instead, while `${base_prompt}` still expands to the effective base prompt, so the body can wrap it deliberately.
 
