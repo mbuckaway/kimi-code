@@ -59,6 +59,15 @@ export const FLAG_DEFINITIONS = [
     default: true,
     surface: 'both',
   },
+  {
+    id: 'agent_fleet_control',
+    title: 'Agent fleet control',
+    description:
+      'Let agents stop, interrupt, dismiss, tag, and rename the agents they own through StopAgent, StopAgents, InterruptAgent, DismissAgents, TagAgent and RenameAgent.',
+    env: 'KIMI_CODE_EXPERIMENTAL_AGENT_FLEET_CONTROL',
+    default: true,
+    surface: 'both',
+  },
 ] as const satisfies readonly FlagDefinitionInput[];
 
 /** Literal union of registered flag ids. */

@@ -9,6 +9,7 @@ import type { Agent } from '../agent';
 import {
   AgentBackgroundTask,
   type AgentBackgroundTaskInfo,
+  type BackgroundManager,
   type BackgroundTaskInfo,
 } from '../agent/background';
 import { TERMINAL_STATUSES } from '../agent/background/task';
@@ -22,6 +23,7 @@ import {
   type ResolvedAgentProfile,
 } from '../profile';
 import {
+  abortError,
   abortable,
   createDeadlineAbortSignal,
   linkAbortSignal,
@@ -71,6 +73,9 @@ export const DEFAULT_INBOX_LIMIT = 20;
 
 /** Origin variant stamped on injected roster-change reminders. */
 export const AGENT_MESSAGING_ROSTER_CHANGE_VARIANT = 'agent_messaging_roster_change';
+
+/** Session-wide id of the root agent. */
+const MAIN_AGENT_ID = 'main';
 
 const RECEIVER_QUEUE_FULL_MESSAGE = "The receiver's message queue is full — retry later.";
 
@@ -462,6 +467,90 @@ export interface AgentRosterEntry {
   readonly state?: AgentHealthState;
 }
 
+/**
+ * Longest reason recorded when a fleet-control tool stops a turn or task.
+ * Mirrors the v2 engine's `MAX_STOP_REASON_CHARS`.
+ */
+export const MAX_STOP_REASON_CHARS = 500;
+
+/** Result of cancelling one agent's active run. */
+export interface StopAgentResult {
+  readonly agentId: string;
+  /** Display label: the target's name when it has one, else its id. */
+  readonly label: string;
+  /** False when the target was already idle; stopping is a no-op then. */
+  readonly stopped: boolean;
+  /**
+   * v1 has no queued-turn list (a turn is either active or not), so this is
+   * always empty; it exists so the tool result shape matches v2.
+   */
+  readonly pendingTurnIds: readonly number[];
+}
+
+/** Result of asking one agent to stop after its current step. */
+export interface InterruptAgentResult {
+  readonly agentId: string;
+  readonly label: string;
+  /** False when the target had no active turn to interrupt. */
+  readonly interrupted: boolean;
+}
+
+/** Exactly one selector is required by the `DismissAgents` schema. */
+export interface DismissAgentsTargets {
+  readonly ids?: readonly string[];
+  readonly names?: readonly string[];
+  readonly all?: boolean;
+}
+
+export interface DismissedAgent {
+  readonly agentId: string;
+  readonly name?: string;
+  /** True when only metadata was removed: no live agent was attached. */
+  readonly ghost: boolean;
+}
+
+export interface DismissAgentsResult {
+  readonly dismissed: readonly DismissedAgent[];
+}
+
+/** The agent's labels after a tag or rename update. */
+export interface AgentLabelUpdate {
+  readonly agentId: string;
+  readonly name?: string;
+  readonly tags: readonly string[];
+}
+
+/** Selectors accepted by {@link SessionSubagentHost.stopAgents}. */
+export interface StopAgentsRequest {
+  readonly agentIds?: readonly string[];
+  readonly taskIds?: readonly string[];
+  readonly all?: boolean;
+  readonly includeForeground?: boolean;
+  readonly reason?: string;
+}
+
+export type StopAgentsOutcome =
+  | 'stopped'
+  | 'already_terminal'
+  | 'skipped_foreground'
+  | 'not_found';
+
+/** One requested task in a bulk stop, with the outcome of its stop attempt. */
+export interface StopAgentsRow {
+  readonly taskId?: string;
+  readonly agentId?: string;
+  readonly kind?: BackgroundTaskInfo['kind'];
+  readonly status: StopAgentsOutcome;
+  readonly reason?: string;
+}
+
+export interface StopAgentsResult {
+  readonly stopped: number;
+  readonly requested: number;
+  readonly capacity: { readonly running: number; readonly max?: number };
+  readonly rows: readonly StopAgentsRow[];
+}
+
 interface AgentMessageRecipient {
   readonly agentId: string;
   readonly label: string;
@@ -483,6 +572,110 @@ interface AddressableAgent {
   readonly agentId: string;
   readonly metadata: AgentMeta | undefined;
   readonly role: 'main' | 'sub';
+}
+
+/** A subagent target resolved for a fleet-control operation. */
+interface OwnedAgentTarget {
+  readonly agentId: string;
+  readonly metadata: AgentMeta | undefined;
+}
+
+interface StopAgentsRequestEntry {
+  readonly selector: 'task' | 'agent';
+  readonly id: string;
+  readonly info: BackgroundTaskInfo | undefined;
+}
+
+const DEFAULT_STOP_AGENTS_REASON = 'Stopped by StopAgents';
+const FOREGROUND_SKIPPED_REASON =
+  'Foreground task skipped; set include_foreground=true to stop it.';
+
+/** Build the cancellation reason recorded on a stopped agent's turn. */
+function stopReasonFor(callerAgentId: string, reason: string | undefined): string {
+  const trimmed = reason?.trim() ?? '';
+  return trimmed.length === 0
+    ? `Stopped by agent ${callerAgentId}`
+    : `Stopped by agent ${callerAgentId}: ${trimmed}`;
+}
+
+/** Trimmed reason, falling back when the caller passed a blank one. */
+function resolveStopReason(reason: string | undefined, fallback: string): string {
+  const trimmed = reason?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? fallback : trimmed;
+}
+
+/** Tags recorded on an agent's metadata, or undefined when it has none. */
+function agentTagsOf(metadata: AgentMeta | undefined): readonly string[] | undefined {
+  const tags = metadata?.tags;
+  return tags === undefined || tags.length === 0 ? undefined : tags;
+}
+
+/** Trim, drop blanks, and dedupe a tag list while keeping its order. */
+function normalizeAgentTags(tags: readonly string[]): readonly string[] {
+  return [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0))];
+}
+
+/** Copy metadata without its tags. */
+function withoutTags(metadata: AgentMeta): AgentMeta {
+  const { tags: _tags, ...rest } = metadata;
+  return rest;
+}
+
+function resolveStopTargets(
+  background: BackgroundManager,
+  request: StopAgentsRequest,
+): readonly StopAgentsRequestEntry[] {
+  if (request.taskIds !== undefined) {
+    return request.taskIds.map((taskId) => ({
+      selector: 'task' as const,
+      id: taskId,
+      info: background.getTask(taskId),
+    }));
+  }
+  if (request.agentIds !== undefined) {
+    const tasks = background.list(false);
+    return request.agentIds.map((agentId) => ({
+      selector: 'agent' as const,
+      id: agentId,
+      info: agentTaskFor(tasks, agentId),
+    }));
+  }
+  return background.list(true).map((info) => ({
+    selector: 'task' as const,
+    id: info.taskId,
+    info,
+  }));
+}
+
+function notFoundStopRow(entry: StopAgentsRequestEntry): StopAgentsRow {
+  return entry.selector === 'agent'
+    ? { agentId: entry.id, status: 'not_found', reason: 'No task found for agent' }
+    : { taskId: entry.id, status: 'not_found', reason: 'Task not found' };
+}
+
+function alreadyTerminalStopRow(info: BackgroundTaskInfo): StopAgentsRow {
+  const recorded = info.stopReason?.trim();
+  return stopTaskRow(
+    info,
+    'already_terminal',
+    recorded === undefined || recorded.length === 0
+      ? `Task already ${info.status}`
+      : recorded,
+  );
+}
+
+function stopTaskRow(
+  info: BackgroundTaskInfo,
+  status: StopAgentsOutcome,
+  reason: string,
+): StopAgentsRow {
+  return {
+    taskId: info.taskId,
+    agentId: info.kind === 'agent' ? info.agentId : undefined,
+    kind: info.kind,
+    status,
+    reason,
+  };
 }
 
 export class SessionSubagentHost {
@@ -934,7 +1127,7 @@ export class SessionSubagentHost {
         role: entry.role,
         running: this.isAgentRunning(entry.agentId),
         parentAgentId: subagentParentAgentId(entry.metadata),
-        tags: undefined,
+        tags: agentTagsOf(entry.metadata),
         state: deriveAgentHealth({
           hasHandle: this.session.getReadyAgent?.(entry.agentId) !== undefined,
           loopState: this.isAgentRunning(entry.agentId) ? 'running' : 'idle',
@@ -944,6 +1137,270 @@ export class SessionSubagentHost {
           ),
         }),
       }));
+  }
+
+  /**
+   * Cancel the target's active run. Its turn, its foreground children and any
+   * in-flight message-delivery run are aborted. The agent stays in the roster
+   * and keeps its name, so a later message resumes it.
+   */
+  async stopAgent(to: string, reason?: string, signal?: AbortSignal): Promise<StopAgentResult> {
+    signal?.throwIfAborted();
+    const recipient = this.resolveRecipient(to);
+    this.assertStoppable(recipient);
+    this.resolveOwnedTarget(recipient.agentId);
+    const stopped = this.isAgentRunning(recipient.agentId);
+    const cancelReason = abortError(stopReasonFor(this.ownerAgentId, reason));
+    this.activeChildren.get(recipient.agentId)?.controller.abort(cancelReason);
+    if (stopped) {
+      this.session.getReadyAgent?.(recipient.agentId)?.turn.cancel(undefined, cancelReason);
+    }
+    return {
+      agentId: recipient.agentId,
+      label: recipient.label,
+      stopped,
+      pendingTurnIds: [],
+    };
+  }
+
+  /**
+   * Ask the target to finish its current step — including the tools it already
+   * called — and then stop, instead of cancelling it mid-step.
+   */
+  async interruptAgent(to: string, signal?: AbortSignal): Promise<InterruptAgentResult> {
+    signal?.throwIfAborted();
+    const recipient = this.resolveRecipient(to);
+    this.assertStoppable(recipient);
+    this.resolveOwnedTarget(recipient.agentId);
+    const interrupted =
+      this.session.getReadyAgent?.(recipient.agentId)?.turn.requestStopAfterStep() ?? false;
+    return { agentId: recipient.agentId, label: recipient.label, interrupted };
+  }
+
+  /**
+   * Remove agents the caller owns from the session roster. A running agent is
+   * cancelled first; a ghost entry (metadata without a live agent) is only
+   * unregistered. Every selector is resolved before anything is removed, so a
+   * rejected call removes nothing.
+   */
+  async dismissAgents(targets: DismissAgentsTargets): Promise<DismissAgentsResult> {
+    const resolved = this.resolveDismissTargets(targets);
+    const dismissed: DismissedAgent[] = [];
+    for (const entry of resolved) {
+      const live = this.session.getReadyAgent?.(entry.agentId);
+      if (live !== undefined) {
+        const reason = abortError(`Agent ${entry.agentId} was dismissed.`);
+        this.activeChildren.get(entry.agentId)?.controller.abort(reason);
+        live.turn.cancel(undefined, reason);
+      }
+      await this.removeAgentRecord(entry.agentId);
+      dismissed.push({
+        agentId: entry.agentId,
+        name: entry.metadata?.name,
+        ghost: live === undefined,
+      });
+    }
+    if (dismissed.length > 0) await this.syncRosterForAll();
+    return { dismissed };
+  }
+
+  /** Replace the target's tags. An empty list clears them. */
+  async setAgentTags(target: string, tags: readonly string[]): Promise<AgentLabelUpdate> {
+    const entry = this.requireMetadata(this.resolveOwnedTarget(target));
+    const normalized = normalizeAgentTags(tags);
+    const next: AgentMeta =
+      normalized.length === 0
+        ? withoutTags(entry.metadata)
+        : { ...entry.metadata, tags: [...normalized] };
+    await this.writeAgentMeta(entry.agentId, next);
+    return { agentId: entry.agentId, name: next.name, tags: normalized };
+  }
+
+  /**
+   * Rename a subagent the caller owns. The name goes through the same
+   * validation and session-wide reservation a spawn-time name does; the agent
+   * id never changes and tags are unaffected.
+   */
+  async renameAgent(target: string, name: string): Promise<AgentLabelUpdate> {
+    const entry = this.requireMetadata(this.resolveOwnedTarget(target));
+    const normalized = this.normalizeChildName(name);
+    if (entry.metadata.name === normalized) {
+      return {
+        agentId: entry.agentId,
+        name: normalized,
+        tags: agentTagsOf(entry.metadata) ?? [],
+      };
+    }
+    const release = this.reserveChildName(normalized);
+    if (release === undefined) {
+      throw new Error(
+        `An agent named "${normalized}" is already reserved by an in-flight spawn.`,
+      );
+    }
+    try {
+      this.validateChildName(normalized, entry.agentId);
+      await this.writeAgentMeta(entry.agentId, { ...entry.metadata, name: normalized });
+      // The roster labels agents by name, so a rename is a roster change and
+      // every reachable agent learns about it through the usual reminder.
+      await this.syncRosterForAll();
+      return {
+        agentId: entry.agentId,
+        name: normalized,
+        tags: agentTagsOf(entry.metadata) ?? [],
+      };
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Stop several of the owning agent's background tasks at once. Foreground
+   * tasks are skipped unless `includeForeground` is set, terminal tasks are
+   * reported without being stopped again, and every requested task gets one
+   * result row.
+   */
+  async stopAgents(request: StopAgentsRequest): Promise<StopAgentsResult> {
+    const background = this.requireOwnerAgent().background;
+    const reason = resolveStopReason(request.reason, DEFAULT_STOP_AGENTS_REASON);
+    const includeForeground = request.includeForeground === true;
+    const requested = resolveStopTargets(background, request);
+    const rows: StopAgentsRow[] = [];
+    let stopped = 0;
+
+    for (const entry of requested) {
+      const info = entry.info;
+      if (info === undefined) {
+        rows.push(notFoundStopRow(entry));
+        continue;
+      }
+      if (TERMINAL_STATUSES.has(info.status)) {
+        rows.push(alreadyTerminalStopRow(info));
+        continue;
+      }
+      if (!includeForeground && info.detached === false) {
+        rows.push(stopTaskRow(info, 'skipped_foreground', FOREGROUND_SKIPPED_REASON));
+        continue;
+      }
+      await background.suppressTerminalNotification(info.taskId);
+      const result = await background.stop(info.taskId, reason);
+      stopped += 1;
+      rows.push(stopTaskRow(result ?? info, 'stopped', reason));
+    }
+
+    return {
+      stopped,
+      requested: requested.length,
+      capacity: background.capacity(),
+      rows,
+    };
+  }
+
+  private assertStoppable(recipient: AgentMessageRecipient): void {
+    if (recipient.agentId === MAIN_AGENT_ID) {
+      throw new Error('The root agent cannot be stopped by an agent.');
+    }
+    if (recipient.agentId === this.ownerAgentId) {
+      throw new Error('An agent cannot stop itself.');
+    }
+  }
+
+  /**
+   * Resolve a target the caller owns: one of its own subagents, addressed by id
+   * or by name. `main`, the caller itself, siblings, and other agents' children
+   * are refused.
+   */
+  private resolveOwnedTarget(target: string): OwnedAgentTarget {
+    const address = target.trim();
+    if (address === MAIN_AGENT_ID) {
+      throw new Error(`The root agent "${MAIN_AGENT_ID}" is not a subagent.`);
+    }
+    if (address === this.ownerAgentId) {
+      throw new Error('An agent cannot target itself.');
+    }
+    const direct = this.agentMetadata(address);
+    if (direct !== undefined) {
+      if (direct.type === 'main') {
+        throw new Error(`Agent "${address}" is not a subagent.`);
+      }
+      if (direct.parentAgentId !== this.ownerAgentId) {
+        throw new Error(`Agent "${address}" is not owned by "${this.ownerAgentId}".`);
+      }
+      return { agentId: address, metadata: direct };
+    }
+    const transientParent =
+      agentRegistry(this.session).transientSubagents.get(address) ?? undefined;
+    if (transientParent !== undefined) {
+      if (transientParent !== this.ownerAgentId) {
+        throw new Error(`Agent "${address}" is not owned by "${this.ownerAgentId}".`);
+      }
+      return { agentId: address, metadata: undefined };
+    }
+    const named = this.ownedAgentEntries().find((entry) => entry.metadata?.name === address);
+    if (named === undefined) {
+      throw new Error(`Agent "${address}" does not exist.`);
+    }
+    return named;
+  }
+
+  private requireMetadata(target: OwnedAgentTarget): OwnedAgentTarget & {
+    readonly metadata: AgentMeta;
+  } {
+    if (target.metadata === undefined) {
+      throw new Error(
+        `Agent "${target.agentId}" is a transient side-question agent and has no persisted metadata.`,
+      );
+    }
+    return { agentId: target.agentId, metadata: target.metadata };
+  }
+
+  /** Owned subagents from session metadata, newest id last. */
+  private ownedAgentEntries(): readonly OwnedAgentTarget[] {
+    return Object.entries(this.session.metadata.agents)
+      .filter(
+        ([, metadata]) =>
+          metadata.type === 'sub' && metadata.parentAgentId === this.ownerAgentId,
+      )
+      .toSorted((left, right) => left[0].localeCompare(right[0]))
+      .map(([agentId, metadata]) => ({ agentId, metadata }));
+  }
+
+  private resolveDismissTargets(targets: DismissAgentsTargets): readonly OwnedAgentTarget[] {
+    const resolved: OwnedAgentTarget[] = [];
+    const seen = new Set<string>();
+    for (const target of [...(targets.ids ?? []), ...(targets.names ?? [])]) {
+      const entry = this.resolveOwnedTarget(target);
+      if (seen.has(entry.agentId)) continue;
+      seen.add(entry.agentId);
+      resolved.push(entry);
+    }
+    if (targets.all === true) {
+      for (const entry of this.ownedAgentEntries()) {
+        if (seen.has(entry.agentId)) continue;
+        seen.add(entry.agentId);
+        resolved.push(entry);
+      }
+    }
+    return resolved;
+  }
+
+  private requireOwnerAgent(): Agent {
+    const owner = this.getOwnerAgent?.() ?? this.session.getReadyAgent(this.ownerAgentId);
+    if (owner === undefined) {
+      throw new Error(`Agent "${this.ownerAgentId}" is not ready to control tasks.`);
+    }
+    return owner;
+  }
+
+  private async writeAgentMeta(agentId: string, meta: AgentMeta): Promise<void> {
+    this.session.metadata.agents[agentId] = meta;
+    await this.session.writeMetadata();
+  }
+
+  /** Drop an agent from the live map, the transient map, and session metadata. */
+  private async removeAgentRecord(agentId: string): Promise<void> {
+    await this.discardAgent(agentId);
+    agentRegistry(this.session).transientSubagents.delete(agentId);
+    this.activeChildren.delete(agentId);
   }
 
   /**

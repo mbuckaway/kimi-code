@@ -387,6 +387,17 @@ describe('KimiHarness config API', () => {
         enabled: true,
         source: 'default',
       },
+      {
+        id: 'agent_fleet_control',
+        title: 'Agent fleet control',
+        description:
+          'Let agents stop, interrupt, dismiss, tag, and rename the agents they own through StopAgent, StopAgents, InterruptAgent, DismissAgents, TagAgent and RenameAgent.',
+        surface: 'both',
+        env: 'KIMI_CODE_EXPERIMENTAL_AGENT_FLEET_CONTROL',
+        defaultEnabled: true,
+        enabled: true,
+        source: 'default',
+      },
     ]);
   });
 

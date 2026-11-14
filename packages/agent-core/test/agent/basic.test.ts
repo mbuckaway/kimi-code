@@ -16,8 +16,13 @@ it('creates an independent agent with a scoped experimental flag resolver', () =
   });
 
   // The scoped resolver reflects the registry defaults, in FLAG_DEFINITIONS
-  // order: `tool-select` and `agent_messaging` are both on by default.
-  expect(ctx.agent.experimentalFlags.enabledIds()).toEqual(['tool-select', 'agent_messaging']);
+  // order: `tool-select`, `agent_messaging`, and `agent_fleet_control` are all
+  // on by default.
+  expect(ctx.agent.experimentalFlags.enabledIds()).toEqual([
+    'tool-select',
+    'agent_messaging',
+    'agent_fleet_control',
+  ]);
 });
 
 it('runs a text-only agent turn from prompt to completion', async () => {

@@ -161,6 +161,8 @@ export interface AgentMeta {
   readonly swarmItem?: string;
   /** Addressable name assigned at spawn (agent-to-agent messaging). */
   readonly name?: string;
+  /** Labels set through `TagAgent`; an agent carries at most 20. */
+  readonly tags?: readonly string[];
 }
 
 interface ResumedAgent {

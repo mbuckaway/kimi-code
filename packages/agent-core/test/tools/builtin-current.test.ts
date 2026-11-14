@@ -41,13 +41,37 @@ import {
   BroadcastMessageTool,
 } from '../../src/tools/builtin/collaboration/broadcast-message';
 import {
+  DismissAgentsInputSchema,
+  DismissAgentsTool,
+} from '../../src/tools/builtin/collaboration/dismiss-agents';
+import {
+  InterruptAgentInputSchema,
+  InterruptAgentTool,
+} from '../../src/tools/builtin/collaboration/interrupt-agent';
+import {
   ListMessagesToolInputSchema,
   ListMessagesTool,
 } from '../../src/tools/builtin/collaboration/list-messages';
 import {
+  RenameAgentInputSchema,
+  RenameAgentTool,
+} from '../../src/tools/builtin/collaboration/rename-agent';
+import {
   ReplyMessageToolInputSchema,
   ReplyMessageTool,
 } from '../../src/tools/builtin/collaboration/reply-message';
+import {
+  StopAgentInputSchema,
+  StopAgentTool,
+} from '../../src/tools/builtin/collaboration/stop-agent';
+import {
+  StopAgentsInputSchema,
+  StopAgentsTool,
+} from '../../src/tools/builtin/collaboration/stop-agents';
+import {
+  TagAgentInputSchema,
+  TagAgentTool,
+} from '../../src/tools/builtin/collaboration/tag-agent';
 import { SkillTool, SkillToolInputSchema } from '../../src/tools/builtin/collaboration/skill-tool';
 import {
   WaitForAllInputSchema,
@@ -1541,6 +1565,129 @@ describe('current builtin collaboration tools', () => {
     const result = await executeTool(tool, context({ timeout: 5, task_ids: ['bash-missing'] }));
     expect(result).toMatchObject({ isError: true });
     expect(result.output).toContain('Task not found: bash-missing');
+  });
+
+  it('StopAgent exposes parameters and reports a stop', async () => {
+    const host = mockSubagentHost({
+      stopAgent: vi.fn().mockResolvedValue({
+        agentId: 'agent-a',
+        label: 'Alice',
+        stopped: true,
+        pendingTurnIds: [],
+      }),
+    });
+    const tool = new StopAgentTool(host);
+
+    expect(StopAgentInputSchema.safeParse({ agent_id: 'agent-a' }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { agent_id: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ agent_id: 'agent-a' }));
+    expect(result.output).toContain('status: stopped');
+    expect(result.output).toContain('name: Alice');
+  });
+
+  it('InterruptAgent exposes parameters and reports a requested interrupt', async () => {
+    const host = mockSubagentHost({
+      interruptAgent: vi.fn().mockResolvedValue({
+        agentId: 'agent-a',
+        label: 'Alice',
+        interrupted: true,
+      }),
+    });
+    const tool = new InterruptAgentTool(host);
+
+    expect(InterruptAgentInputSchema.safeParse({ agent_id: 'agent-a' }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { agent_id: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ agent_id: 'agent-a' }));
+    expect(result.output).toContain('interrupt: requested');
+  });
+
+  it('DismissAgents exposes parameters and reports the removal count', async () => {
+    const host = mockSubagentHost({
+      dismissAgents: vi.fn().mockResolvedValue({
+        dismissed: [{ agentId: 'agent-a', name: 'Alice', ghost: false }],
+      }),
+    });
+    const tool = new DismissAgentsTool(host);
+
+    expect(DismissAgentsInputSchema.safeParse({ ids: ['agent-a'] }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { ids: { type: 'array' } },
+    });
+
+    const result = await executeTool(tool, context({ ids: ['agent-a'] }));
+    expect(result.output).toContain('dismissed: 1');
+  });
+
+  it('TagAgent exposes parameters and reports the tags', async () => {
+    const host = mockSubagentHost({
+      setAgentTags: vi.fn().mockResolvedValue({
+        agentId: 'agent-a',
+        name: 'Alice',
+        tags: ['ui'],
+      }),
+    });
+    const tool = new TagAgentTool(host);
+
+    expect(TagAgentInputSchema.safeParse({ agent_id: 'agent-a', tags: ['ui'] }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { tags: { type: 'array' } },
+    });
+
+    const result = await executeTool(tool, context({ agent_id: 'agent-a', tags: ['ui'] }));
+    expect(result.output).toContain('tags: ui');
+  });
+
+  it('RenameAgent exposes parameters and reports the new name', async () => {
+    const host = mockSubagentHost({
+      renameAgent: vi.fn().mockResolvedValue({
+        agentId: 'agent-a',
+        name: 'Bob',
+        tags: [],
+      }),
+    });
+    const tool = new RenameAgentTool(host);
+
+    expect(RenameAgentInputSchema.safeParse({ agent_id: 'agent-a', name: 'Bob' }).success).toBe(
+      true,
+    );
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { name: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ agent_id: 'agent-a', name: 'Bob' }));
+    expect(result.output).toContain('name: Bob');
+  });
+
+  it('StopAgents exposes parameters and reports the stop status', async () => {
+    const host = mockSubagentHost({
+      stopAgents: vi.fn().mockResolvedValue({
+        stopped: 1,
+        requested: 1,
+        capacity: { running: 1, max: 4 },
+        rows: [{ taskId: 'bash-1', kind: 'process', status: 'stopped', reason: 'done' }],
+      }),
+    });
+    const tool = new StopAgentsTool(host);
+
+    expect(StopAgentsInputSchema.safeParse({ task_ids: ['bash-1'] }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { task_ids: { type: 'array' } },
+    });
+
+    const result = await executeTool(tool, context({ task_ids: ['bash-1'] }));
+    expect(result.output).toContain('stop_status: 1/1');
   });
 });
 

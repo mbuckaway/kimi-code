@@ -28,6 +28,12 @@ tools:
   - ReadMediaFile
   - ReplyMessage
   - SendMessage
+  - StopAgent
+  - StopAgents
+  - InterruptAgent
+  - DismissAgents
+  - RenameAgent
+  - TagAgent
   - Skill
   - TaskList
   - TaskOutput

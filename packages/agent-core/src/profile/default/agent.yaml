@@ -32,6 +32,12 @@ tools:
   - ReplyMessage
   - SendMessage
   - WaitForAll
+  - StopAgent
+  - StopAgents
+  - InterruptAgent
+  - DismissAgents
+  - RenameAgent
+  - TagAgent
   - FetchURL
   - AskUserQuestion
   - EnterPlanMode
