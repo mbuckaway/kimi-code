@@ -12,7 +12,7 @@ import {
   type BroadcastMessageResult,
 } from '#/features/messaging/messaging';
 
-import { MAX_MESSAGE_SUMMARY_CHARS } from '../send-message/send-message';
+import { messagePreviewOf } from '../send-message/send-message';
 import {
   BroadcastMessageToolInputSchema,
   IBroadcastMessageTool,
@@ -37,7 +37,7 @@ export class BroadcastMessageTool implements IBroadcastMessageTool {
 
   resolveExecution(args: BroadcastMessageToolInput): ToolExecution {
     return {
-      description: `Broadcast message: ${messagePreview(args)}`,
+      description: `Broadcast message: ${messagePreviewOf(args)}`,
       accesses: ToolAccesses.none(),
       approvalRule: this.name,
       execute: (ctx) => this.execution(args, ctx),
@@ -68,14 +68,6 @@ export class BroadcastMessageTool implements IBroadcastMessageTool {
       };
     }
   }
-}
-
-function messagePreview(args: BroadcastMessageToolInput): string {
-  const newline = args.message.indexOf('\n');
-  const source = args.summary ?? (newline === -1 ? args.message : args.message.slice(0, newline));
-  return source.length > MAX_MESSAGE_SUMMARY_CHARS
-    ? `${source.slice(0, MAX_MESSAGE_SUMMARY_CHARS - 1)}…`
-    : source;
 }
 
 function formatBroadcastMessageResult(result: BroadcastMessageResult): string {

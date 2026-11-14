@@ -618,7 +618,6 @@ describe('systemPromptVars persona', () => {
 
 describe('withPersona', () => {
   const binding = (overrides: Partial<PersonaBinding> = {}): PersonaBinding => ({
-    name: 'reviewer',
     mode: 'overlay',
     text: 'PERSONA',
     ...overrides,
@@ -749,6 +748,18 @@ describe('withPersona', () => {
     expect(profile.subagents).toEqual(['explore']);
   });
 
+  it('takes the persona allowlist when the base declares none', () => {
+    const profile = withPersona(baseProfile(), binding({ subagents: ['explore', 'plan'] }));
+
+    expect(profile.subagents).toEqual(['explore', 'plan']);
+  });
+
+  it('keeps the base allowlist when the persona declares none', () => {
+    const profile = withPersona(baseProfile({ subagents: ['explore', 'plan'] }), binding());
+
+    expect(profile.subagents).toEqual(['explore', 'plan']);
+  });
+
   it('renders the persona at the role slot in overlay mode', () => {
     const profile = withPersona(
       baseProfile(),
@@ -799,6 +810,6 @@ describe('withPersona', () => {
   it('exposes the rendered text through systemPrompt for overlay mode', () => {
     const profile = withPersona(baseProfile(), binding({ text: 'PERSONA' }));
 
-    expect(profile.systemPrompt({})).toBe(profile.renderSystemPrompt({}).text);
+    expect(profile.systemPrompt({})).toContain('\n\nPERSONA\n\n');
   });
 });

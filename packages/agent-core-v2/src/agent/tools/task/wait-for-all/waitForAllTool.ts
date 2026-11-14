@@ -14,9 +14,6 @@ import { TERMINAL_STATUSES } from '#/agent/task/types';
 import { formatBackgroundCapacity } from '#/agent/task/agentHealth';
 import { formatPlainObject } from '#/agent/task/tools/format';
 import { formatTaskList } from '#/agent/tools/task/task-list/taskListTool';
-import { IFlagService } from '#/app/flag/flag';
-import { AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
-import { WAIT_FOR_FLAG_ID } from '../task-wait/flag';
 import { IWaitForAllTool, WaitForAllInputSchema, type WaitForAllInput } from './wait-for-all';
 import WAIT_FOR_ALL_DESCRIPTION from './wait-for-all.md?raw';
 
@@ -40,10 +37,7 @@ export class WaitForAllTool implements IWaitForAllTool {
   readonly description: string = WAIT_FOR_ALL_DESCRIPTION;
   readonly parameters: Record<string, unknown> = toInputJsonSchema(WaitForAllInputSchema);
 
-  constructor(
-    @IAgentTaskService private readonly tasks: IAgentTaskService,
-    @IFlagService private readonly flags: IFlagService,
-  ) {}
+  constructor(@IAgentTaskService private readonly tasks: IAgentTaskService) {}
 
   resolveExecution(args: WaitForAllInput): ToolExecution {
     const subject = args.task_ids?.join(',') ?? args.agent_ids?.join(',') ?? 'all';
@@ -60,19 +54,6 @@ export class WaitForAllTool implements IWaitForAllTool {
     args: WaitForAllInput,
     ctx: ExecutableToolContext,
   ): Promise<ExecutableToolResult> {
-    if (!this.flags.enabled(WAIT_FOR_FLAG_ID)) {
-      return {
-        isError: true,
-        output: 'WaitForAll is disabled: the wait_for experimental flag is off.',
-      };
-    }
-    if (!this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
-      return {
-        isError: true,
-        output: 'WaitForAll is disabled: the agent_messaging experimental flag is off.',
-      };
-    }
-
     const startedAt = Date.now();
     const timeoutMs = args.timeout * 1000;
     const deadline = startedAt + timeoutMs;

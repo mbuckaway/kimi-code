@@ -8,8 +8,6 @@ import {
 
 import { formatPlainObject } from '#/agent/task/tools/format';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { IFlagService } from '#/app/flag/flag';
-import { AGENT_FLEET_CONTROL_FLAG_ID } from '#/features/messaging/flag';
 import {
   ISessionSubagentService,
   type DismissAgentsResult,
@@ -20,8 +18,8 @@ import {
   DismissAgentsInputSchema,
   IDismissAgentsTool,
   type DismissAgentsToolInput,
-} from './dismiss-agent';
-import DISMISS_AGENTS_DESCRIPTION from './dismiss-agent.md?raw';
+} from './dismiss-agents';
+import DISMISS_AGENTS_DESCRIPTION from './dismiss-agents.md?raw';
 
 export class DismissAgentsTool implements IDismissAgentsTool {
   declare readonly _serviceBrand: undefined;
@@ -34,7 +32,6 @@ export class DismissAgentsTool implements IDismissAgentsTool {
   constructor(
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @IAgentScopeContext scopeContext: IAgentScopeContext,
-    @IFlagService private readonly flags: IFlagService,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -50,12 +47,6 @@ export class DismissAgentsTool implements IDismissAgentsTool {
   }
 
   private async execution(args: DismissAgentsToolInput): Promise<ExecutableToolResult> {
-    if (!this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID)) {
-      return {
-        isError: true,
-        output: 'DismissAgents is disabled: the agent_fleet_control experimental flag is off.',
-      };
-    }
     try {
       const result = await this.subagents.dismissAgents(this.callerAgentId, targetsOf(args));
       return { output: formatDismissResult(result) };

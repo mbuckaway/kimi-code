@@ -14,7 +14,7 @@ import {
   type IAgentTaskEntry,
   type RegisterAgentTaskOptions,
 } from '#/agent/task/task';
-import { type AgentTaskStatus, TERMINAL_STATUSES } from '#/agent/task/types';
+import { MAX_STOP_REASON_CHARS, type AgentTaskStatus, TERMINAL_STATUSES } from '#/agent/task/types';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { TaskListInputSchema } from '#/agent/tools/task/task-list/task-list';
 import { TaskListTool } from '#/agent/tools/task/task-list/taskListTool';
@@ -32,21 +32,20 @@ import { makeAgentScopeContext, IAgentScopeContext } from '#/agent/scopeContext/
 import type { UsageStatus } from '#/agent/usage/usage';
 import { AgentResultInputSchema } from '#/agent/tools/task/agent-result/agent-result';
 import { AgentResultTool } from '#/agent/tools/task/agent-result/agentResultTool';
-import { AgentHealthInputSchema } from '#/agent/tools/task/agent-status/agent-status';
-import { AgentHealthTool } from '#/agent/tools/task/agent-status/agentStatusTool';
+import { AgentHealthInputSchema } from '#/agent/tools/task/agent-health/agent-health';
+import { AgentHealthTool } from '#/agent/tools/task/agent-health/agentHealthTool';
 import {
   WAIT_FOR_ALL_MAX_TIMEOUT_S,
   WaitForAllInputSchema,
   type WaitForAllInput,
-} from '#/agent/tools/task/task-wait-all/wait-for-all';
-import { WaitForAllTool } from '#/agent/tools/task/task-wait-all/waitForAllTool';
-import { WAIT_FOR_FLAG_ID } from '#/agent/tools/task/task-wait/flag';
+} from '#/agent/tools/task/wait-for-all/wait-for-all';
+import { WaitForAllTool } from '#/agent/tools/task/wait-for-all/waitForAllTool';
 import {
   StopAgentsInputSchema,
   type StopAgentsInput,
 } from '#/agent/tools/task/task-stop-agents/task-stop-agents';
 import { StopAgentsTool } from '#/agent/tools/task/task-stop-agents/taskStopAgentsTool';
-import { AGENT_FLEET_CONTROL_FLAG_ID, AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
+import type { AgentRosterEntry, ISessionMessagingService } from '#/features/messaging/messaging';
 import type { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import type { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import type { ISessionUsageService } from '#/session/usage/sessionUsage';
@@ -171,6 +170,10 @@ class FakeTaskService implements IAgentTaskService {
     } as AgentTaskInfo;
   }
 
+  remove(taskId: string): void {
+    this.entries.delete(taskId);
+  }
+
   track(_handle: ITaskHandle, _options: AgentTaskTrackOptions): IAgentTaskEntry {
     throw new Error('track is not implemented in FakeTaskService.');
   }
@@ -195,18 +198,9 @@ class FakeTaskService implements IAgentTaskService {
     return result;
   }
 
-  capacityOverride: AgentTaskCapacity | undefined;
+  capacityResult: AgentTaskCapacity = { running: 0 };
 
-  capacity(): AgentTaskCapacity {
-    if (this.capacityOverride !== undefined) return this.capacityOverride;
-    let running = 0;
-    for (const entry of this.entries.values()) {
-      if (TERMINAL_STATUSES.has(entry.info.status)) continue;
-      if (entry.info.detached === false) continue;
-      running++;
-    }
-    return { running };
-  }
+  readonly capacity = vi.fn((): AgentTaskCapacity => this.capacityResult);
 
   persistOutput(_taskId: string): void {}
 
@@ -607,6 +601,28 @@ describe('TaskOutputTool', () => {
     expect(output).toContain('status: killed');
     expect(output).toContain('stop_reason: operator cancelled');
     expect(output).toContain('terminal_reason: stopped');
+  });
+
+  it('taskOutputTool_failedTask_reportsFailedTerminalReason', async () => {
+    expect.assertions(3);
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(
+      processTask({
+        taskId: 'bash-failed02',
+        status: 'failed',
+        endedAt: 1_700_000_001_000,
+        stopReason: 'tool crashed',
+      }),
+    );
+
+    const result = await executeTool(
+      new TaskOutputTool(tasks),
+      context('task_output_failed', { task_id: taskId }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('status: failed');
+    expect(output).toContain('terminal_reason: failed');
   });
 
   it('does not advertise output_path when the persisted log file does not exist', async () => {
@@ -1291,7 +1307,7 @@ describe('WaitForTool (harness)', () => {
 
 describe('AgentResultTool', () => {
   it('has name and accepts the current schema', () => {
-    const tool = new AgentResultTool(new FakeTaskService(), stubFlag(true));
+    const tool = new AgentResultTool(new FakeTaskService());
 
     expect(tool.name).toBe('AgentResult');
     expect(tool.description).toContain('agent id');
@@ -1307,7 +1323,7 @@ describe('AgentResultTool', () => {
   });
 
   it('resolves execution metadata and matches the agent id', () => {
-    const tool = new AgentResultTool(new FakeTaskService(), stubFlag(true));
+    const tool = new AgentResultTool(new FakeTaskService());
 
     const execution = tool.resolveExecution({ agent_id: 'agent-child' }) as Extract<
       ToolExecution,
@@ -1322,6 +1338,7 @@ describe('AgentResultTool', () => {
   });
 
   it('returns the agent result snapshot with the preview', async () => {
+    expect.assertions(9);
     const tasks = new FakeTaskService();
     tasks.add(
       agentTaskInfo(),
@@ -1332,7 +1349,7 @@ describe('AgentResultTool', () => {
     );
 
     const result = await executeTool(
-      new AgentResultTool(tasks, stubFlag(true)),
+      new AgentResultTool(tasks),
       context('agent_result_ok', { agent_id: 'agent-child' }),
     );
     const output = outputString(result);
@@ -1348,6 +1365,7 @@ describe('AgentResultTool', () => {
   });
 
   it('prefers the running task over an older finished task', async () => {
+    expect.assertions(6);
     const tasks = new FakeTaskService();
     tasks.add(
       agentTaskInfo({
@@ -1369,7 +1387,7 @@ describe('AgentResultTool', () => {
     );
 
     const result = await executeTool(
-      new AgentResultTool(tasks, stubFlag(true)),
+      new AgentResultTool(tasks),
       context('agent_result_running', { agent_id: 'agent-child' }),
     );
     const output = outputString(result);
@@ -1382,11 +1400,12 @@ describe('AgentResultTool', () => {
   });
 
   it('reports an empty preview', async () => {
+    expect.assertions(2);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
 
     const result = await executeTool(
-      new AgentResultTool(tasks, stubFlag(true)),
+      new AgentResultTool(tasks),
       context('agent_result_empty', { agent_id: 'agent-child' }),
     );
 
@@ -1409,11 +1428,12 @@ describe('AgentResultTool', () => {
       banner: '[Truncated. Full output: unavailable]',
     },
   ])('points at the full output when truncated with $label', async ({ snapshot, banner }) => {
+    expect.assertions(3);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo(), snapshot);
 
     const result = await executeTool(
-      new AgentResultTool(tasks, stubFlag(true)),
+      new AgentResultTool(tasks),
       context('agent_result_truncated', { agent_id: 'agent-child' }),
     );
     const output = outputString(result);
@@ -1423,8 +1443,9 @@ describe('AgentResultTool', () => {
   });
 
   it('returns an error for an unknown agent', async () => {
+    expect.assertions(3);
     const result = await executeTool(
-      new AgentResultTool(new FakeTaskService(), stubFlag(true)),
+      new AgentResultTool(new FakeTaskService()),
       context('agent_result_unknown', { agent_id: 'agent-missing' }),
     );
 
@@ -1432,29 +1453,17 @@ describe('AgentResultTool', () => {
     expect(outputString(result)).toBe('No task found for agent: agent-missing');
   });
 
-  it('rejects execution when the agent_messaging flag is off', async () => {
-    const tasks = new FakeTaskService();
-    tasks.add(agentTaskInfo());
-
-    const result = await executeTool(
-      new AgentResultTool(tasks, stubFlag(false)),
-      context('agent_result_flag_off', { agent_id: 'agent-child' }),
-    );
-
-    expect(result.isError).toBe(true);
-    expect(outputString(result)).toContain('agent_messaging experimental flag is off');
-  });
-
-  it('succeeds when the agent_messaging flag is on', async () => {
+  it('succeeds without a flag dependency', async () => {
+    expect.assertions(3);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo(), outputSnapshot('FLAG-ON\n'));
 
     const result = await executeTool(
-      new AgentResultTool(tasks, stubFlag(true)),
-      context('agent_result_flag_on', { agent_id: 'agent-child' }),
+      new AgentResultTool(tasks),
+      context('agent_result_no_flag', { agent_id: 'agent-child' }),
     );
 
-    expect(result.isError ?? false).toBe(false);
+    expect(result.isError).toBe(false);
     expect(outputString(result)).toContain('FLAG-ON');
   });
 });
@@ -1493,13 +1502,17 @@ describe('AgentHealthTool', () => {
     };
   }
 
+  function rosterEntry(agentId: string): AgentRosterEntry {
+    return { agentId, role: 'sub', running: true };
+  }
+
   function makeHealthTool(options: {
     readonly tasks?: FakeTaskService;
     readonly handle?: boolean;
     readonly loopState?: LoopState;
     readonly activity?: AgentActivityState;
     readonly usageStatus?: UsageStatus;
-    readonly flagsOn?: boolean;
+    readonly roster?: readonly AgentRosterEntry[];
   } = {}) {
     const tasks = options.tasks ?? new FakeTaskService();
     const handleOf = vi.fn(() =>
@@ -1509,7 +1522,12 @@ describe('AgentHealthTool', () => {
     );
     const status = vi.fn(() => options.usageStatus ?? { total: tokenUsage() });
     const statusSize = vi.fn(() => 1234);
+    const listAgents = vi.fn(async () => options.roster ?? [rosterEntry('agent-child')]);
     const agents = { _serviceBrand: undefined, handleOf } as unknown as IAgentLifecycleService;
+    const messaging = {
+      _serviceBrand: undefined,
+      listAgents,
+    } as unknown as ISessionMessagingService;
     const usage = { _serviceBrand: undefined, status } as unknown as ISessionUsageService;
     const tokenCounting = {
       _serviceBrand: undefined,
@@ -1518,11 +1536,12 @@ describe('AgentHealthTool', () => {
     const tool = new AgentHealthTool(
       tasks,
       agents,
+      messaging,
+      makeAgentScopeContext({ agentId: 'main', agentScope: 'main' }),
       usage,
       tokenCounting,
-      stubFlag(options.flagsOn ?? true),
     );
-    return { tool, tasks, handleOf, status, statusSize };
+    return { tool, tasks, handleOf, status, statusSize, listAgents };
   }
 
   it('has name and accepts the current schema', () => {
@@ -1557,6 +1576,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('reports idle for a live agent with no task', async () => {
+    expect.assertions(11);
     const { tool, status, statusSize } = makeHealthTool();
 
     const result = await executeTool(
@@ -1578,6 +1598,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('reports running when the loop is running', async () => {
+    expect.assertions(3);
     const result = await executeTool(
       makeHealthTool({ loopState: 'running' }).tool,
       context('agent_health_running', { agent_id: 'agent-child' }),
@@ -1589,6 +1610,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('reports stalled when a running agent task exists but the loop is idle', async () => {
+    expect.assertions(6);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
 
@@ -1606,6 +1628,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('reports orphaned when the agent has no live handle', async () => {
+    expect.assertions(5);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
 
@@ -1622,6 +1645,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('reports lost for a lost task', async () => {
+    expect.assertions(2);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo({ status: 'lost' }));
 
@@ -1634,6 +1658,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('reports completed for a completed task', async () => {
+    expect.assertions(4);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo());
 
@@ -1649,9 +1674,10 @@ describe('AgentHealthTool', () => {
   });
 
   it('includes turn activity and background capacity', async () => {
+    expect.assertions(7);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
-    tasks.capacityOverride = { running: 1, max: 3 };
+    tasks.capacityResult = { running: 1, max: 3 };
     const activity: AgentActivityState = {
       lifecycle: 'ready',
       turn: {
@@ -1686,6 +1712,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('omits active tools when no tool call is running', async () => {
+    expect.assertions(2);
     const activity: AgentActivityState = {
       lifecycle: 'ready',
       turn: {
@@ -1710,6 +1737,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('omits token totals when no usage is recorded', async () => {
+    expect.assertions(4);
     const result = await executeTool(
       makeHealthTool({ usageStatus: {} }).tool,
       context('agent_health_no_usage', { agent_id: 'agent-child' }),
@@ -1722,6 +1750,7 @@ describe('AgentHealthTool', () => {
   });
 
   it('returns an error when neither a handle nor a task exists', async () => {
+    expect.assertions(3);
     const result = await executeTool(
       makeHealthTool({ handle: false }).tool,
       context('agent_health_missing', { agent_id: 'agent-child' }),
@@ -1731,20 +1760,27 @@ describe('AgentHealthTool', () => {
     expect(outputString(result)).toBe('Agent not found: agent-child');
   });
 
-  it('rejects execution when the agent_messaging flag is off', async () => {
+  it('agentHealthTool_unknownAgent_returnsNotFoundWithoutReadingUsage', async () => {
+    expect.assertions(7);
+    const { tool, status, statusSize, handleOf, listAgents } = makeHealthTool({ roster: [] });
+
     const result = await executeTool(
-      makeHealthTool({ flagsOn: false }).tool,
-      context('agent_health_flag_off', { agent_id: 'agent-child' }),
+      tool,
+      context('agent_health_not_in_roster', { agent_id: 'agent-other' }),
     );
 
     expect(result.isError).toBe(true);
-    expect(outputString(result)).toContain('agent_messaging experimental flag is off');
+    expect(outputString(result)).toBe('Agent not found: agent-other');
+    expect(listAgents).toHaveBeenCalledWith('main');
+    expect(handleOf).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+    expect(statusSize).not.toHaveBeenCalled();
   });
 });
 
 describe('WaitForAllTool', () => {
   it('has name and enforces the schema boundaries', () => {
-    const tool = new WaitForAllTool(new FakeTaskService(), stubFlag(true));
+    const tool = new WaitForAllTool(new FakeTaskService());
 
     expect(tool.name).toBe('WaitForAll');
     expect(tool.description).toContain('cohort');
@@ -1802,7 +1838,7 @@ describe('WaitForAllTool', () => {
     },
     { args: { timeout: 10 }, expected: 'Waiting up to 10s for all background tasks' },
   ])('describes the cohort as $expected', ({ args, expected }) => {
-    const tool = new WaitForAllTool(new FakeTaskService(), stubFlag(true));
+    const tool = new WaitForAllTool(new FakeTaskService());
 
     const execution = tool.resolveExecution(args) as Extract<
       ToolExecution,
@@ -1815,7 +1851,7 @@ describe('WaitForAllTool', () => {
   });
 
   it('matches the unfiltered cohort subject', () => {
-    const tool = new WaitForAllTool(new FakeTaskService(), stubFlag(true));
+    const tool = new WaitForAllTool(new FakeTaskService());
 
     const execution = tool.resolveExecution({ timeout: 10 }) as Extract<
       ToolExecution,
@@ -1827,6 +1863,7 @@ describe('WaitForAllTool', () => {
   });
 
   it('waits on every running task with a bounded shared timeout', async () => {
+    expect.assertions(3);
     const tasks = new FakeTaskService();
     tasks.add(processTask({ taskId: 'bash-wa-many1' }));
     tasks.add(processTask({ taskId: 'bash-wa-many2' }));
@@ -1836,7 +1873,7 @@ describe('WaitForAllTool', () => {
     };
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_many', { timeout: 600 }),
     );
 
@@ -1854,17 +1891,18 @@ describe('WaitForAllTool', () => {
   });
 
   it('reports completed and marks every finished task delivered', async () => {
+    expect.assertions(12);
     const tasks = new FakeTaskService();
     tasks.add(processTask({ taskId: 'bash-wa-done1' }));
     tasks.add(processTask({ taskId: 'bash-wa-done2' }));
-    tasks.capacityOverride = { running: 1, max: 3 };
+    tasks.capacityResult = { running: 1, max: 3 };
     tasks.waitDelegate = async (taskId) => {
       tasks.settle(taskId);
       return tasks.getTask(taskId);
     };
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_completed', { timeout: 600 }),
     );
     const output = outputString(result);
@@ -1888,6 +1926,7 @@ describe('WaitForAllTool', () => {
   });
 
   it('reports partial and marks only the finished tasks delivered', async () => {
+    expect.assertions(8);
     const tasks = new FakeTaskService();
     tasks.add(processTask({ taskId: 'bash-wa-fin1' }));
     tasks.add(processTask({ taskId: 'bash-wa-run1', description: 'still going' }));
@@ -1897,7 +1936,7 @@ describe('WaitForAllTool', () => {
     };
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_partial', { timeout: 600 }),
     );
     const output = outputString(result);
@@ -1912,11 +1951,12 @@ describe('WaitForAllTool', () => {
   });
 
   it('reports timed_out without marking anything delivered', async () => {
+    expect.assertions(7);
     const tasks = new FakeTaskService();
     tasks.add(processTask({ taskId: 'bash-wa-time1' }));
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_timeout', { timeout: 10, task_ids: ['bash-wa-time1'] }),
     );
     const output = outputString(result);
@@ -1930,6 +1970,7 @@ describe('WaitForAllTool', () => {
   });
 
   it('resolves an agent cohort and reports the agent id for finished tasks', async () => {
+    expect.assertions(7);
     const tasks = new FakeTaskService();
     tasks.add(agentTaskInfo({ taskId: 'agent-cohort1', agentId: 'agent-a' }));
     tasks.add(agentTaskInfo({ taskId: 'agent-cohort2', agentId: 'agent-b' }));
@@ -1939,7 +1980,7 @@ describe('WaitForAllTool', () => {
     };
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_agents', { timeout: 60, agent_ids: ['agent-a'] }),
     );
     const output = outputString(result);
@@ -1956,10 +1997,11 @@ describe('WaitForAllTool', () => {
     { args: { timeout: 10, task_ids: ['bash-missing'] }, message: 'Task not found: bash-missing' },
     { args: { timeout: 10, agent_ids: ['agent-missing'] }, message: 'Agent not found: agent-missing' },
   ])('returns an error for an unknown cohort member ($message)', async ({ args, message }) => {
+    expect.assertions(4);
     const tasks = new FakeTaskService();
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_unknown', args),
     );
 
@@ -1969,10 +2011,11 @@ describe('WaitForAllTool', () => {
   });
 
   it('returns no_tasks without waiting when nothing is running', async () => {
+    expect.assertions(8);
     const tasks = new FakeTaskService();
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_none', { timeout: 10 }),
     );
     const output = outputString(result);
@@ -1986,35 +2029,29 @@ describe('WaitForAllTool', () => {
     expect(tasks.waitDeliveries).toEqual([]);
   });
 
-  it('rejects execution when the wait_for flag is off', async () => {
+  it('waitForAllTool_getTaskMiss_fallsBackToCohortSnapshot', async () => {
+    expect.assertions(5);
     const tasks = new FakeTaskService();
-    tasks.add(processTask({ taskId: 'bash-wa-flag1' }));
+    const taskId = tasks.add(processTask({ taskId: 'bash-wa-vanish1' }));
+    tasks.waitDelegate = async (waitedTaskId) => {
+      tasks.remove(waitedTaskId);
+      return undefined;
+    };
 
     const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID)),
-      context('wait_all_flag_wait_for', { timeout: 10 }),
+      new WaitForAllTool(tasks),
+      context('wait_all_vanish', { timeout: 10, task_ids: [taskId] }),
     );
+    const output = outputString(result);
 
-    expect(result.isError).toBe(true);
-    expect(outputString(result)).toContain('wait_for experimental flag is off');
-    expect(tasks.waitCalls).toEqual([]);
-  });
-
-  it('rejects execution when the agent_messaging flag is off', async () => {
-    const tasks = new FakeTaskService();
-    tasks.add(processTask({ taskId: 'bash-wa-flag2' }));
-
-    const result = await executeTool(
-      new WaitForAllTool(tasks, stubFlag((id) => id === WAIT_FOR_FLAG_ID)),
-      context('wait_all_flag_messaging', { timeout: 10 }),
-    );
-
-    expect(result.isError).toBe(true);
-    expect(outputString(result)).toContain('agent_messaging experimental flag is off');
-    expect(tasks.waitCalls).toEqual([]);
+    expect(result.isError).toBe(false);
+    expect(output).toContain('wait_status: timed_out');
+    expect(output).not.toContain('[finished]');
+    expect(tasks.waitDeliveries).toEqual([]);
   });
 
   it('propagates an abort while waiting', async () => {
+    expect.assertions(2);
     const tasks = new FakeTaskService();
     tasks.add(processTask({ taskId: 'bash-wa-abort' }));
     tasks.waitDelegate = (_taskId, _timeoutMs, waitSignal) =>
@@ -2026,7 +2063,7 @@ describe('WaitForAllTool', () => {
 
     const controller = new AbortController();
     const pending = executeTool(
-      new WaitForAllTool(tasks, stubFlag(true)),
+      new WaitForAllTool(tasks),
       context('wait_all_abort', { timeout: 600 }, controller.signal),
     );
     controller.abort();
@@ -2037,8 +2074,23 @@ describe('WaitForAllTool', () => {
 });
 
 describe('StopAgentsTool', () => {
+  it('stopAgentsTool_reason_rejectsOverLimitLength', () => {
+    expect(
+      StopAgentsInputSchema.safeParse({
+        task_ids: ['bash-a'],
+        reason: 'x'.repeat(MAX_STOP_REASON_CHARS),
+      }).success,
+    ).toBe(true);
+    expect(
+      StopAgentsInputSchema.safeParse({
+        task_ids: ['bash-a'],
+        reason: 'x'.repeat(MAX_STOP_REASON_CHARS + 1),
+      }).success,
+    ).toBe(false);
+  });
+
   it('stopAgentsTool_schema_requiresExactlyOneSelector', () => {
-    const tool = new StopAgentsTool(new FakeTaskService(), stubFlag(true));
+    const tool = new StopAgentsTool(new FakeTaskService());
 
     expect(tool.name).toBe('StopAgents');
     expect(tool.description).toContain('background tasks');
@@ -2124,7 +2176,7 @@ describe('StopAgentsTool', () => {
       subject: 'all',
     },
   ])('stopAgentsTool_resolveExecution_setsMetadataFor$label', ({ args, expected, subject }) => {
-    const tool = new StopAgentsTool(new FakeTaskService(), stubFlag(true));
+    const tool = new StopAgentsTool(new FakeTaskService());
 
     const execution = tool.resolveExecution(args) as Extract<ToolExecution, { execute: unknown }>;
 
@@ -2136,6 +2188,7 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_taskIds_stopsRunningDetachedTaskAfterSuppressing', async () => {
+    expect.assertions(6);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(processTask({ taskId: 'bash-sa-run0001' }));
     const order: string[] = [];
@@ -2151,7 +2204,7 @@ describe('StopAgentsTool', () => {
     });
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_task_stop', { task_ids: [taskId] }),
     );
     const output = outputString(result);
@@ -2166,6 +2219,7 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_taskIds_reportsTerminalTaskWithoutStopping', async () => {
+    expect.assertions(6);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(
       processTask({
@@ -2178,7 +2232,7 @@ describe('StopAgentsTool', () => {
     );
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_task_terminal', { task_ids: [taskId] }),
     );
     const output = outputString(result);
@@ -2201,6 +2255,7 @@ describe('StopAgentsTool', () => {
     { label: 'WithoutStopReason', stopReason: undefined, expected: 'Task already completed' },
     { label: 'WithBlankStopReason', stopReason: '   ', expected: 'Task already completed' },
   ])('stopAgentsTool_taskIds_reportsTerminalReason$label', async ({ stopReason, expected }) => {
+    expect.assertions(2);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(
       processTask({
@@ -2213,7 +2268,7 @@ describe('StopAgentsTool', () => {
     );
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_task_terminal_reason', { task_ids: [taskId] }),
     );
 
@@ -2221,10 +2276,11 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_taskIds_reportsUnknownTaskAsNotFound', async () => {
+    expect.assertions(6);
     const tasks = new FakeTaskService();
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_task_missing', { task_ids: ['bash-sa-missing1'] }),
     );
     const output = outputString(result);
@@ -2237,6 +2293,7 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_agentIds_resolvesLatestTaskViaAgentTaskFor', async () => {
+    expect.assertions(7);
     const tasks = new FakeTaskService();
     tasks.add(
       agentTaskInfo({
@@ -2258,7 +2315,7 @@ describe('StopAgentsTool', () => {
     );
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_agent_latest', { agent_ids: ['agent-child'] }),
     );
     const output = outputString(result);
@@ -2274,10 +2331,11 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_agentIds_reportsUnknownAgentAsNotFound', async () => {
+    expect.assertions(5);
     const tasks = new FakeTaskService();
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_agent_missing', { agent_ids: ['agent-missing'] }),
     );
     const output = outputString(result);
@@ -2291,11 +2349,12 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_foreground_skipsByDefault', async () => {
+    expect.assertions(6);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(processTask({ taskId: 'bash-sa-fg00001', detached: false }));
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_foreground_default', { task_ids: [taskId] }),
     );
     const output = outputString(result);
@@ -2310,11 +2369,12 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_foreground_stopsWhenIncludeForegroundIsTrue', async () => {
+    expect.assertions(5);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(processTask({ taskId: 'bash-sa-fg00002', detached: false }));
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_foreground_included', {
         task_ids: [taskId],
         include_foreground: true,
@@ -2328,6 +2388,7 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_foreground_reportsTerminalForegroundTaskAsAlreadyTerminal', async () => {
+    expect.assertions(6);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(
       processTask({
@@ -2340,7 +2401,7 @@ describe('StopAgentsTool', () => {
     );
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_foreground_terminal', { task_ids: [taskId] }),
     );
     const output = outputString(result);
@@ -2355,6 +2416,7 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_all_stopsActiveDetachedAndSkipsForegroundAndTerminal', async () => {
+    expect.assertions(9);
     const tasks = new FakeTaskService();
     const runningId = tasks.add(processTask({ taskId: 'bash-sa-allrun1' }));
     const foregroundId = tasks.add(processTask({ taskId: 'bash-sa-allfg01', detached: false }));
@@ -2366,10 +2428,10 @@ describe('StopAgentsTool', () => {
         exitCode: 0,
       }),
     );
-    tasks.capacityOverride = { running: 1, max: 3 };
+    tasks.capacityResult = { running: 1, max: 3 };
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_all', { all: true }),
     );
     const output = outputString(result);
@@ -2394,11 +2456,12 @@ describe('StopAgentsTool', () => {
     { label: 'Whitespace', reason: '   ', expected: 'Stopped by StopAgents' },
     { label: 'Omitted', reason: undefined, expected: 'Stopped by StopAgents' },
   ])('stopAgentsTool_reason_applies$label', async ({ reason, expected }) => {
+    expect.assertions(4);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(processTask({ taskId: 'bash-sa-reason1' }));
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_reason', { task_ids: [taskId], reason }),
     );
 
@@ -2408,32 +2471,16 @@ describe('StopAgentsTool', () => {
   });
 
   it('stopAgentsTool_output_reportsBackgroundCapacity', async () => {
+    expect.assertions(2);
     const tasks = new FakeTaskService();
     const taskId = tasks.add(processTask({ taskId: 'bash-sa-cap0001' }));
-    tasks.capacityOverride = { running: 2 };
+    tasks.capacityResult = { running: 2 };
 
     const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag(true)),
+      new StopAgentsTool(tasks),
       context('stop_agents_capacity', { task_ids: [taskId] }),
     );
 
     expect(outputString(result)).toContain('background_capacity: 2/unlimited');
-  });
-
-  it('stopAgentsTool_flagOff_returnsDisabledMessageWithoutStopping', async () => {
-    const tasks = new FakeTaskService();
-    const taskId = tasks.add(processTask({ taskId: 'bash-sa-flag001' }));
-
-    const result = await executeTool(
-      new StopAgentsTool(tasks, stubFlag((id) => id !== AGENT_FLEET_CONTROL_FLAG_ID)),
-      context('stop_agents_flag_off', { task_ids: [taskId] }),
-    );
-
-    expect(result.isError).toBe(true);
-    expect(outputString(result)).toBe(
-      'StopAgents is disabled: the agent_fleet_control experimental flag is off.',
-    );
-    expect(tasks.stopCalls).toEqual([]);
-    expect(tasks.suppressCalls).toEqual([]);
   });
 });

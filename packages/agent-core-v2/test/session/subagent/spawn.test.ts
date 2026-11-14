@@ -14,7 +14,6 @@ import {
   type AgentProfile,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { AgentContext } from '#/agent/agentContext/agentContext';
-import { AGENTS_MD_RECOMMENDED_MAX_BYTES } from '#/agent/profile/context';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
@@ -23,6 +22,7 @@ import { Error2, ErrorCodes, errorInfo, isError2 } from '#/errors';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { IHostFileSystem, type HostFileStat } from '#/os/interface/hostFileSystem';
+import { HostFsError, OsFsErrors } from '#/os/interface/hostFsErrors';
 import { FakeRuntime } from '#/runtime/fakeRuntime';
 import type { RuntimeLease } from '#/runtime/runtime';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
@@ -37,6 +37,7 @@ import {
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { SECONDARY_MODEL_SECTION } from '#/session/subagent/configSection';
 import { AGENT_PERSONA_FLAG_ID, SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { PERSONA_FILE_MAX_BYTES } from '#/session/subagent/persona';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 import { SessionSubagentService } from '#/session/subagent/subagentService';
 import {
@@ -101,6 +102,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   let hostFs: {
     lstat: Mock<(path: string) => Promise<HostFileStat>>;
     readText: Mock<(path: string) => Promise<string>>;
+    realpath: Mock<(path: string) => Promise<string>>;
   };
   let workspaceContext: {
     resolve: Mock<(rel: string) => string>;
@@ -288,6 +290,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     hostFs = {
       lstat: vi.fn(async () => REGULAR_FILE_STAT),
       readText: vi.fn(async () => PATH_PERSONA_TEXT),
+      realpath: vi.fn(async (path: string) => path),
     };
     workspaceContext = {
       resolve: vi.fn((rel: string) => `/repo/${rel}`),
@@ -297,6 +300,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       _serviceBrand: undefined,
       lstat: hostFs.lstat,
       readText: hostFs.readText,
+      realpath: hostFs.realpath,
     } as unknown as IHostFileSystem);
     ix.stub(ISessionWorkspaceContext, {
       _serviceBrand: undefined,
@@ -1004,6 +1008,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     }
 
     it('dismisses a child by id, removing the handle before unregistering metadata', async () => {
+      expect.assertions(4);
       const order: string[] = [];
       removeAgent.mockImplementation(async () => {
         order.push('remove');
@@ -1026,6 +1031,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('dismisses a ghost child by only unregistering its metadata', async () => {
+      expect.assertions(3);
       addSubagent('agent-2');
       const svc = service();
 
@@ -1037,6 +1043,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('dismisses every directly owned child and never main or a sibling', async () => {
+      expect.assertions(7);
       addSubagent('agent-1');
       addSubagent('agent-2', { parentAgentId: 'agent-1' });
       addSubagent('agent-3', { parentAgentId: 'agent-1' });
@@ -1060,6 +1067,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('dismisses a child addressed by its name', async () => {
+      expect.assertions(2);
       addSubagent('agent-2', { name: 'scout' });
       attachHandle('agent-2');
       const svc = service();
@@ -1071,6 +1079,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('returns the dismissals in ids-then-names order', async () => {
+      expect.assertions(1);
       addSubagent('agent-2', { name: 'scout' });
       addSubagent('agent-3', { name: 'reviewer' });
       const svc = service();
@@ -1084,6 +1093,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('de-duplicates a target requested by both id and name', async () => {
+      expect.assertions(3);
       addSubagent('agent-2', { name: 'scout' });
       const svc = service();
 
@@ -1098,6 +1108,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('validates every target before mutating anything when one id is not owned', async () => {
+      expect.assertions(4);
       addSubagent('agent-2');
       attachHandle('agent-2');
       sessionAgents['agent-5'] = { type: 'sub', labels: { parentAgentId: 'agent-9' } };
@@ -1114,6 +1125,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('validates every target before mutating anything when one id is unknown', async () => {
+      expect.assertions(4);
       addSubagent('agent-2');
       attachHandle('agent-2');
       const svc = service();
@@ -1129,6 +1141,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects dismissing the caller itself', async () => {
+      expect.assertions(2);
       addSubagent('agent-1');
       const svc = service();
 
@@ -1139,6 +1152,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects dismissing the root agent', async () => {
+      expect.assertions(3);
       const svc = service();
 
       const error = await failure(svc.dismissAgents(CALLER_ID, { ids: ['main'] }));
@@ -1149,6 +1163,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects dismissing an unknown agent id', async () => {
+      expect.assertions(3);
       const svc = service();
 
       const error = await failure(svc.dismissAgents(CALLER_ID, { ids: ['agent-404'] }));
@@ -1159,6 +1174,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('returns no dismissals when no target is requested', async () => {
+      expect.assertions(3);
       addSubagent('agent-2');
       const svc = service();
 
@@ -1170,6 +1186,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('writes normalized tags to the agent labels', async () => {
+      expect.assertions(2);
       addSubagent('agent-2', { name: 'scout' });
       const svc = service();
 
@@ -1189,6 +1206,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('writes a single tag', async () => {
+      expect.assertions(2);
       addSubagent('agent-2');
       const svc = service();
 
@@ -1202,6 +1220,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('removes the tags key when the new tag list is empty', async () => {
+      expect.assertions(3);
       addSubagent('agent-2', { tags: 'old' });
       const svc = service();
 
@@ -1216,6 +1235,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects tagging a non-owned agent without writing', async () => {
+      expect.assertions(2);
       sessionAgents['agent-5'] = { type: 'sub', labels: { parentAgentId: 'agent-9' } };
       const svc = service();
 
@@ -1226,6 +1246,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('renames an owned agent and writes the normalized name', async () => {
+      expect.assertions(2);
       addSubagent('agent-2', { tags: 'a,b' });
       const svc = service();
 
@@ -1239,6 +1260,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('does not write when the agent already has the requested name', async () => {
+      expect.assertions(2);
       addSubagent('agent-2', { name: 'scout' });
       const svc = service();
 
@@ -1249,6 +1271,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects a name already held by another subagent without writing', async () => {
+      expect.assertions(3);
       addSubagent('agent-2');
       addSubagent('agent-3', { name: 'scout' });
       const svc = service();
@@ -1261,6 +1284,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('releases the name reservation after a rename', async () => {
+      expect.assertions(1);
       addSubagent('agent-2');
       addSubagent('agent-3', { name: 'scout' });
       const svc = service();
@@ -1294,6 +1318,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects renaming an unknown target', async () => {
+      expect.assertions(2);
       const svc = service();
 
       const error = await failure(svc.renameAgent(CALLER_ID, 'agent-404', 'scout'));
@@ -1303,6 +1328,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects a main-typed agent addressed by its entry id', async () => {
+      expect.assertions(3);
       sessionAgents['agent-root'] = { type: 'main' };
       const svc = service();
 
@@ -1314,6 +1340,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('resolves a duplicated owned name to the first agent id', async () => {
+      expect.assertions(2);
       addSubagent('agent-2', { name: 'scout' });
       addSubagent('agent-3', { name: 'scout' });
       const svc = service();
@@ -1325,6 +1352,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('de-duplicates ids already selected by all', async () => {
+      expect.assertions(2);
       addSubagent('agent-2');
       addSubagent('agent-3');
       const svc = service();
@@ -1366,6 +1394,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     }
 
     it('plans a catalog persona with its extends as the default base', async () => {
+      expect.assertions(3);
       addSecurityPersona();
       const svc = enablePersona();
 
@@ -1377,7 +1406,6 @@ describe('SessionSubagentService planSpawn and spawn', () => {
         thinking: 'high',
         fork: false,
         persona: {
-          name: 'security-persona',
           mode: 'overlay',
           text: 'You audit code for security issues.',
           skills: undefined,
@@ -1387,10 +1415,12 @@ describe('SessionSubagentService planSpawn and spawn', () => {
           base: 'coder',
         },
       });
+      expect(plan.persona).not.toHaveProperty('name');
       expect(hostFs.lstat).not.toHaveBeenCalled();
     });
 
     it('threads the planned persona into the created agent binding', async () => {
+      expect.assertions(1);
       addSecurityPersona();
       const svc = enablePersona();
       const plan = await svc.planSpawn({
@@ -1413,6 +1443,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('accepts an explicit subagent_type equal to the persona extends', async () => {
+      expect.assertions(2);
       addSecurityPersona();
       const svc = enablePersona();
 
@@ -1423,10 +1454,11 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       });
 
       expect(plan.profileName).toBe('coder');
-      expect(plan.persona).toMatchObject({ name: 'security-persona', base: 'coder' });
+      expect(plan.persona).toMatchObject({ base: 'coder' });
     });
 
     it('rejects a base mismatch between subagent_type and extends', async () => {
+      expect.assertions(3);
       addSecurityPersona();
       const svc = enablePersona();
 
@@ -1447,6 +1479,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects a catalog persona without extends', async () => {
+      expect.assertions(2);
       addPersonaProfile({ name: 'unbased-persona', persona: 'You audit code.' });
       const svc = enablePersona();
 
@@ -1460,6 +1493,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects a catalog persona without a body', async () => {
+      expect.assertions(2);
       addPersonaProfile({ name: 'empty-persona', extends: 'coder' });
       const svc = enablePersona();
 
@@ -1473,6 +1507,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects an unknown non-path persona name and lists the catalog', async () => {
+      expect.assertions(3);
       const svc = enablePersona();
 
       const error = await planSpawnError(svc, {
@@ -1488,6 +1523,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('parses a workspace path persona and returns its declared limits', async () => {
+      expect.assertions(6);
       const svc = enablePersona();
 
       const plan = await svc.planSpawn({
@@ -1497,7 +1533,6 @@ describe('SessionSubagentService planSpawn and spawn', () => {
 
       expect(plan.profileName).toBe('coder');
       expect(plan.persona).toEqual({
-        name: '/repo/personas/security.md',
         mode: 'overlay',
         text: 'You audit code for security issues.',
         skills: undefined,
@@ -1516,6 +1551,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('propagates the workspace guard error for a path outside the roots', async () => {
+      expect.assertions(3);
       workspaceContext.assertAllowed.mockImplementationOnce(() => {
         throw new Error2(
           ErrorCodes.FS_PATH_ESCAPES,
@@ -1536,6 +1572,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects a sensitive persona file', async () => {
+      expect.assertions(3);
       const svc = enablePersona();
 
       const error = await planSpawnError(svc, {
@@ -1546,6 +1583,205 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
       expect(error.message).toContain('sensitive');
       expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona pointing at .npmrc', async () => {
+      expect.assertions(3);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/.npmrc',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('sensitive');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona pointing at docker/config.json', async () => {
+      expect.assertions(3);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'docker/config.json',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('sensitive');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona whose resolved path is a sensitive file', async () => {
+      expect.assertions(3);
+      hostFs.realpath.mockImplementation(async (path: string) =>
+        path === '/repo/personas/security.md' ? '/repo/.env' : path,
+      );
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('sensitive');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('reads the persona through its real path when it stays inside the workspace', async () => {
+      expect.assertions(2);
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('resolves a persona path whose final component is missing on realpath', async () => {
+      expect.assertions(2);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas/security.md') {
+          throw new HostFsError(OsFsErrors.codes.OS_FS_NOT_FOUND, 'path does not exist');
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('accepts a persona file inside an additional directory root', async () => {
+      expect.assertions(2);
+      workspaceContext.resolve.mockImplementation((rel: string) => `/extra/${rel}`);
+      ix.stub(ISessionWorkspaceContext, {
+        _serviceBrand: undefined,
+        workDir: '/repo',
+        additionalDirs: ['/extra'],
+        isWithin: () => true,
+        resolve: workspaceContext.resolve,
+        assertAllowed: workspaceContext.assertAllowed,
+      } as unknown as ISessionWorkspaceContext);
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/extra/personas/security.md');
+    });
+
+    it('falls back to the lexical root when the workspace root realpath fails', async () => {
+      expect.assertions(2);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo') {
+          throw new HostFsError(OsFsErrors.codes.OS_FS_NOT_FOUND, 'path does not exist');
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('skips the parent symlink check when the parent does not exist', async () => {
+      expect.assertions(2);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas') {
+          throw new HostFsError(OsFsErrors.codes.OS_FS_NOT_FOUND, 'path does not exist');
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('propagates a non-missing parent realpath failure', async () => {
+      expect.assertions(1);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas') {
+          throw new HostFsError(
+            OsFsErrors.codes.OS_FS_PERMISSION_DENIED,
+            'realpath failed: permission denied',
+          );
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      await expect(
+        svc.planSpawn({ callerAgentId: CALLER_ID, persona: 'personas/security.md' }),
+      ).rejects.toThrow(/realpath failed: permission denied/);
+    });
+
+    it('rejects a persona path that escapes the workspace through a symlink', async () => {
+      expect.assertions(4);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas/security.md') return '/outside/personas/security.md';
+        if (path === '/repo/personas') return '/outside/personas';
+        return path;
+      });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.FS_PATH_ESCAPES);
+      expect(error.message).toContain('escapes the workspace through a symlink');
+      expect(error.details).toEqual({
+        persona: 'personas/security.md',
+        path: '/repo/personas/security.md',
+        realPath: '/outside/personas/security.md',
+        reason: 'symlink_outside',
+      });
+      expect(hostFs.readText).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona with a symlinked parent that stays inside the workspace', async () => {
+      expect.assertions(3);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas') return '/repo/real-personas';
+        if (path === '/repo/personas/security.md') return '/repo/real-personas/security.md';
+        return path;
+      });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.FS_PATH_ESCAPES);
+      expect(error.details).toMatchObject({ reason: 'symlink_parent' });
+      expect(hostFs.readText).not.toHaveBeenCalled();
     });
 
     it.each<[string, HostFileStat]>([
@@ -1565,11 +1801,10 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       expect(hostFs.readText).not.toHaveBeenCalled();
     });
 
-    it('accepts a persona file exactly at the size limit', async () => {
-      hostFs.lstat.mockResolvedValueOnce({
-        ...REGULAR_FILE_STAT,
-        size: AGENTS_MD_RECOMMENDED_MAX_BYTES,
-      });
+    it('accepts a persona file exactly at the 32768-byte limit', async () => {
+      expect.assertions(2);
+      expect(PERSONA_FILE_MAX_BYTES).toBe(32768);
+      hostFs.lstat.mockResolvedValueOnce({ ...REGULAR_FILE_STAT, size: 32768 });
       const svc = enablePersona();
 
       const plan = await svc.planSpawn({
@@ -1580,11 +1815,9 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       expect(plan.persona).toMatchObject({ base: 'coder' });
     });
 
-    it('rejects an oversized persona file', async () => {
-      hostFs.lstat.mockResolvedValueOnce({
-        ...REGULAR_FILE_STAT,
-        size: AGENTS_MD_RECOMMENDED_MAX_BYTES + 1,
-      });
+    it('rejects a persona file at 32769 bytes', async () => {
+      expect.assertions(3);
+      hostFs.lstat.mockResolvedValueOnce({ ...REGULAR_FILE_STAT, size: 32769 });
       const svc = enablePersona();
 
       const error = await planSpawnError(svc, {
@@ -1593,11 +1826,12 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       });
 
       expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
-      expect(error.message).toContain(String(AGENTS_MD_RECOMMENDED_MAX_BYTES));
+      expect(error.message).toContain('limit 32768 bytes');
       expect(hostFs.readText).not.toHaveBeenCalled();
     });
 
     it('wraps a persona file read failure with the path', async () => {
+      expect.assertions(3);
       hostFs.readText.mockRejectedValueOnce(new Error('disk gone'));
       const svc = enablePersona();
 
@@ -1612,6 +1846,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('wraps a persona file parse failure', async () => {
+      expect.assertions(2);
       hostFs.readText.mockResolvedValueOnce(
         '---\nname: security-review\ndescription: Security\n---\nBody',
       );
@@ -1627,6 +1862,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects a persona combined with fork', async () => {
+      expect.assertions(2);
       const svc = enablePersona();
 
       const error = await planSpawnError(svc, {
@@ -1640,6 +1876,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('rejects a persona while the agent_persona flag is off', async () => {
+      expect.assertions(2);
       addSecurityPersona();
       const svc = service();
 
@@ -1653,6 +1890,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     });
 
     it('keeps the plan shape unchanged when no persona is requested', async () => {
+      expect.assertions(1);
       const svc = enablePersona();
 
       const plan = await svc.planSpawn({ callerAgentId: CALLER_ID, profileName: 'coder' });

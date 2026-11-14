@@ -64,8 +64,9 @@ import {
   stripSubagentForkParameter,
   stripSubagentModelParameter,
   stripSubagentNameParameter,
-  stripSubagentPersonaParameter,
+  stripParameters,
 } from '#/session/subagent/configSection';
+
 import {
   BACKGROUND_AGENT_UNAVAILABLE,
   DEFAULT_PROFILE_NAME,
@@ -108,7 +109,7 @@ export class SubagentTool implements ISubagentTool {
       : stripSubagentNameParameter(withFork);
     return this.flags.enabled(AGENT_PERSONA_FLAG_ID)
       ? withName
-      : stripSubagentPersonaParameter(withName);
+      : stripParameters(withName, 'persona');
   }
 
   private readonly callerAgentId: string;
@@ -267,34 +268,15 @@ export class SubagentTool implements ISubagentTool {
   }
 
   async resolveExecution(args: SubagentToolInput): Promise<ToolExecution> {
+    const rejection = this.personaLaunchError(args);
+    if (rejection !== undefined) {
+      return { output: rejection, isError: true };
+    }
+
     const requestedProfileName = args.subagent_type?.length ? args.subagent_type : undefined;
     const resumeAgentId = args.resume?.trim();
     const persona = normalizePersona(args.persona);
     const hasResume = resumeAgentId !== undefined && resumeAgentId.length > 0;
-
-    if (hasResume && requestedProfileName !== undefined) {
-      return { output: RESUME_WITH_TYPE_UNAVAILABLE, isError: true };
-    }
-
-    if (persona !== undefined && !this.flags.enabled(AGENT_PERSONA_FLAG_ID)) {
-      return { output: PERSONA_EXPERIMENTAL_UNAVAILABLE, isError: true };
-    }
-    if (persona !== undefined && hasResume) {
-      return { output: PERSONA_WITH_RESUME_UNAVAILABLE, isError: true };
-    }
-
-    if (args.fork === true) {
-      if (!this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
-        return { output: FORK_EXPERIMENTAL_UNAVAILABLE, isError: true };
-      }
-      if (persona !== undefined) {
-        return { output: PERSONA_WITH_FORK_UNAVAILABLE, isError: true };
-      }
-      const forkError = forkIncompatibility(args, this.profile.data());
-      if (forkError !== undefined) {
-        return { output: forkError, isError: true };
-      }
-    }
 
     const profileNameForDisplay =
       persona ??
@@ -324,6 +306,24 @@ export class SubagentTool implements ISubagentTool {
     const target = this.agentLifecycle.handleOf(agentId);
     if (target === undefined) return undefined;
     return target.accessor.get(IAgentProfileService).data().profileName;
+  }
+
+  private personaLaunchError(args: SubagentToolInput): string | undefined {
+    const requestedProfileName = args.subagent_type?.length ? args.subagent_type : undefined;
+    const resumeAgentId = args.resume?.trim();
+    const hasResume = resumeAgentId !== undefined && resumeAgentId.length > 0;
+    if (hasResume && requestedProfileName !== undefined) return RESUME_WITH_TYPE_UNAVAILABLE;
+
+    const persona = normalizePersona(args.persona);
+    if (persona !== undefined && !this.flags.enabled(AGENT_PERSONA_FLAG_ID)) {
+      return PERSONA_EXPERIMENTAL_UNAVAILABLE;
+    }
+    if (persona !== undefined && hasResume) return PERSONA_WITH_RESUME_UNAVAILABLE;
+
+    if (args.fork !== true) return undefined;
+    if (!this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) return FORK_EXPERIMENTAL_UNAVAILABLE;
+    if (persona !== undefined) return PERSONA_WITH_FORK_UNAVAILABLE;
+    return forkIncompatibility(args, this.profile.data());
   }
 
   private async launch(
@@ -445,33 +445,13 @@ export class SubagentTool implements ISubagentTool {
       const resumeAgentId = args.resume?.trim();
       const isResume = resumeAgentId !== undefined && resumeAgentId.length > 0;
 
-      if (isResume && requestedProfileName !== undefined) {
-        return { output: RESUME_WITH_TYPE_UNAVAILABLE, isError: true };
-      }
-
       if (args.name !== undefined && !this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
         return { output: NAME_EXPERIMENTAL_UNAVAILABLE, isError: true };
       }
 
-      const persona = normalizePersona(args.persona);
-      if (persona !== undefined && !this.flags.enabled(AGENT_PERSONA_FLAG_ID)) {
-        return { output: PERSONA_EXPERIMENTAL_UNAVAILABLE, isError: true };
-      }
-      if (persona !== undefined && isResume) {
-        return { output: PERSONA_WITH_RESUME_UNAVAILABLE, isError: true };
-      }
-
-      if (args.fork === true) {
-        if (!this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
-          return { output: FORK_EXPERIMENTAL_UNAVAILABLE, isError: true };
-        }
-        if (persona !== undefined) {
-          return { output: PERSONA_WITH_FORK_UNAVAILABLE, isError: true };
-        }
-        const forkError = forkIncompatibility(args, this.profile.data());
-        if (forkError !== undefined) {
-          return { output: forkError, isError: true };
-        }
+      const rejection = this.personaLaunchError(args);
+      if (rejection !== undefined) {
+        return { output: rejection, isError: true };
       }
 
       const allowBackground = this.canRunInBackground();

@@ -24,8 +24,16 @@ export interface ParseAgentFileOptions {
   readonly requireExtends?: boolean;
 }
 
+export interface ParseAgentFileRequiresExtendsOptions extends ParseAgentFileOptions {
+  readonly requireExtends: true;
+}
+
 const AGENT_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+export function parseAgentFileText(
+  options: ParseAgentFileRequiresExtendsOptions,
+): AgentFileDefinition & { readonly extends: string };
+export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDefinition;
 export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDefinition {
   let parsed;
   try {

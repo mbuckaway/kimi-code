@@ -6,7 +6,7 @@ import {
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { AgentProfileContribution } from '#/app/agentProfileCatalog/agentProfileContribution';
 import {
-  personaSkillsGuidance,
+  renderPersonaSystemPrompt,
   renderPromptTemplateResult,
 } from '#/app/agentProfileCatalog/profile-shared';
 
@@ -32,25 +32,14 @@ export function agentProfileFromFile(
     tools: definition.tools,
     disallowedTools: definition.disallowedTools,
     subagents: definition.subagents,
-    renderSystemPrompt: (context) => {
-      if (isPersona && definition.mode === 'replace') {
-        const guidance = personaSkillsGuidance(definition.skills);
-        return renderPromptTemplateResult(
-          guidance.length > 0 ? `${definition.prompt}\n\n${guidance}` : definition.prompt,
-          context,
-          { skillActive },
+    renderSystemPrompt: isPersona
+      ? renderPersonaSystemPrompt(
           basePrompt,
-        );
-      }
-      if (isPersona) {
-        return basePrompt({
-          ...context,
-          persona: definition.prompt,
-          personaSkills: definition.skills,
-        });
-      }
-      return renderPromptTemplateResult(definition.prompt, context, { skillActive }, basePrompt);
-    },
+          { mode: definition.mode, text: definition.prompt, skills: definition.skills },
+          skillActive,
+        )
+      : (context) =>
+          renderPromptTemplateResult(definition.prompt, context, { skillActive }, basePrompt),
   });
 }
 

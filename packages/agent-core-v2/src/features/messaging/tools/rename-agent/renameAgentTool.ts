@@ -8,8 +8,6 @@ import {
 
 import { formatPlainObject } from '#/agent/task/tools/format';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { IFlagService } from '#/app/flag/flag';
-import { AGENT_FLEET_CONTROL_FLAG_ID } from '#/features/messaging/flag';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 
 import {
@@ -30,7 +28,6 @@ export class RenameAgentTool implements IRenameAgentTool {
   constructor(
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @IAgentScopeContext scopeContext: IAgentScopeContext,
-    @IFlagService private readonly flags: IFlagService,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -46,12 +43,6 @@ export class RenameAgentTool implements IRenameAgentTool {
   }
 
   private async execution(args: RenameAgentToolInput): Promise<ExecutableToolResult> {
-    if (!this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID)) {
-      return {
-        isError: true,
-        output: 'RenameAgent is disabled: the agent_fleet_control experimental flag is off.',
-      };
-    }
     try {
       const result = await this.subagents.renameAgent(
         this.callerAgentId,

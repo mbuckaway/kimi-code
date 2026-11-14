@@ -12,7 +12,7 @@ import {
   type ReplyMessageResult,
 } from '#/features/messaging/messaging';
 
-import { MAX_MESSAGE_SUMMARY_CHARS } from '../send-message/send-message';
+import { messagePreviewOf } from '../send-message/send-message';
 import {
   IReplyMessageTool,
   ReplyMessageToolInputSchema,
@@ -38,7 +38,7 @@ export class ReplyMessageTool implements IReplyMessageTool {
   resolveExecution(args: ReplyMessageToolInput): ToolExecution {
     const messageId = args.message_id.trim();
     return {
-      description: `Reply to ${messageId}: ${messagePreview(args)}`,
+      description: `Reply to ${messageId}: ${messagePreviewOf(args)}`,
       accesses: ToolAccesses.none(),
       approvalRule: this.name,
       execute: (ctx) => this.execution(args, ctx),
@@ -69,14 +69,6 @@ export class ReplyMessageTool implements IReplyMessageTool {
       };
     }
   }
-}
-
-function messagePreview(args: ReplyMessageToolInput): string {
-  const newline = args.message.indexOf('\n');
-  const source = args.summary ?? (newline === -1 ? args.message : args.message.slice(0, newline));
-  return source.length > MAX_MESSAGE_SUMMARY_CHARS
-    ? `${source.slice(0, MAX_MESSAGE_SUMMARY_CHARS - 1)}…`
-    : source;
 }
 
 function formatReplyMessageResult(result: ReplyMessageResult): string {

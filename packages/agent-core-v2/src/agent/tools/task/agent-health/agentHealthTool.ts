@@ -8,15 +8,14 @@ import { deriveAgentHealth, formatBackgroundCapacity } from '#/agent/task/agentH
 import { formatPlainObject } from '#/agent/task/tools/format';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentActivityView } from '#/agent/activityView/activityView';
-import { agentContextOf } from '#/agent/scopeContext/scopeContext';
+import { agentContextOf, IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { ISessionMessagingService } from '#/features/messaging/messaging';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionUsageService } from '#/session/usage/sessionUsage';
 import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { inputTotal } from '#/kosong/contract/usage';
-import { IFlagService } from '#/app/flag/flag';
-import { AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
-import { IAgentHealthTool, AgentHealthInputSchema, type AgentHealthInput } from './agent-status';
-import AGENT_HEALTH_DESCRIPTION from './agent-status.md?raw';
+import { IAgentHealthTool, AgentHealthInputSchema, type AgentHealthInput } from './agent-health';
+import AGENT_HEALTH_DESCRIPTION from './agent-health.md?raw';
 
 export class AgentHealthTool implements IAgentHealthTool {
   declare readonly _serviceBrand: undefined;
@@ -24,13 +23,18 @@ export class AgentHealthTool implements IAgentHealthTool {
   readonly description: string = AGENT_HEALTH_DESCRIPTION;
   readonly parameters: Record<string, unknown> = toInputJsonSchema(AgentHealthInputSchema);
 
+  private readonly callerAgentId: string;
+
   constructor(
     @IAgentTaskService private readonly tasks: IAgentTaskService,
     @IAgentLifecycleService private readonly agents: IAgentLifecycleService,
+    @ISessionMessagingService private readonly messaging: ISessionMessagingService,
+    @IAgentScopeContext scopeContext: IAgentScopeContext,
     @ISessionUsageService private readonly usage: ISessionUsageService,
     @ISessionTokenCountingService private readonly tokenCounting: ISessionTokenCountingService,
-    @IFlagService private readonly flags: IFlagService,
-  ) {}
+  ) {
+    this.callerAgentId = scopeContext.agentId;
+  }
 
   resolveExecution(args: AgentHealthInput): ToolExecution {
     return {
@@ -43,11 +47,9 @@ export class AgentHealthTool implements IAgentHealthTool {
   }
 
   private async execute(args: AgentHealthInput): Promise<ExecutableToolResult> {
-    if (!this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
-      return {
-        isError: true,
-        output: 'AgentHealth is disabled: the agent_messaging experimental flag is off.',
-      };
+    const roster = await this.messaging.listAgents(this.callerAgentId);
+    if (!roster.some((entry) => entry.agentId === args.agent_id)) {
+      return { isError: true, output: `Agent not found: ${args.agent_id}` };
     }
 
     const task = agentTaskFor(this.tasks.list(false), args.agent_id);

@@ -33,8 +33,10 @@ import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/
 import {
   labelsFromAgentMeta,
   subagentParentAgentId,
+  tagsOf,
 } from '#/session/agentLifecycle/subagentMetadata';
 import { agentNameOf } from '#/session/subagent/agentNames';
+import { ISessionSubagentService } from '#/session/subagent/subagent';
 import {
   formatSubagentTimeoutDescription,
   resolveSubagentTimeoutMs,
@@ -51,14 +53,13 @@ import {
   AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
   DEFAULT_INBOX_LIMIT,
   MAX_BUFFERED_AGENT_MESSAGES,
-  MAX_INBOX_MESSAGES,
   MESSAGING_INSTRUCTIONS,
-  appendInboxEntry,
   formatRosterChangeNotice,
   recordRecentSend,
   truncateAgentMessage,
   wrapAgentMessage,
 } from './envelope';
+import { MAX_INBOX_MESSAGES, appendInboxEntry } from './sessionInbox';
 import {
   type AgentInbox,
   type AgentInboxDelivery,
@@ -118,6 +119,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @IConfigService private readonly configService: IConfigService,
     @IFlagService private readonly flags: IFlagService,
+    @ISessionSubagentService private readonly subagents: ISessionSubagentService,
   ) {
     super();
     for (const agent of this.agentLifecycle.list()) {
@@ -298,6 +300,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     signal?.throwIfAborted();
     const recipient = await this.resolveRecipient(callerAgentId, to);
     this.assertStoppable(callerAgentId, recipient);
+    await this.subagents.assertOwned(callerAgentId, recipient.agentId);
     const cancelReason = abortError(stopReasonFor(callerAgentId, reason));
     const controller = this.runControllers.get(recipient.agentId);
     controller?.abort(cancelReason);
@@ -335,6 +338,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     signal?.throwIfAborted();
     const recipient = await this.resolveRecipient(callerAgentId, to);
     this.assertStoppable(callerAgentId, recipient);
+    await this.subagents.assertOwned(callerAgentId, recipient.agentId);
     const handle = this.agentLifecycle.handleOf(recipient.agentId);
     if (handle === undefined) {
       return { agentId: recipient.agentId, label: recipient.label, interrupted: false };
@@ -847,18 +851,25 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   }
 
   private labelOf(entry: AddressableAgent): string {
-    if (entry.role === 'main') return MAIN_AGENT_ID;
-    return agentNameOf(entry.meta) ?? this.profileNameOfId(entry.agentId) ?? entry.agentId;
+    return this.labelPartsOf(entry).label;
   }
 
   private rosterLineOf(entry: AddressableAgent): string {
-    const suffix = `(id: ${entry.agentId})`;
-    if (entry.role === 'main') return `- ${MAIN_AGENT_ID} ${suffix}`;
+    const { label, profile } = this.labelPartsOf(entry);
+    const marker = profile ? ' (profile)' : '';
+    return `- ${label}${marker} (id: ${entry.agentId})`;
+  }
+
+  private labelPartsOf(entry: AddressableAgent): {
+    readonly label: string;
+    readonly profile: boolean;
+  } {
+    if (entry.role === 'main') return { label: MAIN_AGENT_ID, profile: false };
     const name = agentNameOf(entry.meta);
-    if (name !== undefined) return `- ${name} ${suffix}`;
+    if (name !== undefined) return { label: name, profile: false };
     const profileName = this.profileNameOfId(entry.agentId);
-    if (profileName !== undefined) return `- ${profileName} (profile) ${suffix}`;
-    return `- ${entry.agentId} ${suffix}`;
+    if (profileName !== undefined) return { label: profileName, profile: true };
+    return { label: entry.agentId, profile: false };
   }
 
   private profileNameOfId(agentId: string): string | undefined {
@@ -929,10 +940,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   async syncRoster(agentId: string): Promise<void> {
     const previous = this.rosterSyncs.get(agentId) ?? Promise.resolve();
     const run = previous.then(() => this.applyRosterSync(agentId));
-    const tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
+    const tail = run.then(() => undefined, onUnexpectedError);
     this.rosterSyncs.set(agentId, tail);
     try {
       await run;
@@ -1037,12 +1045,8 @@ function stopReasonFor(callerAgentId: string, reason: string | undefined): strin
 }
 
 function parseAgentTags(meta: AgentMeta | undefined): readonly string[] | undefined {
-  const raw = meta?.labels?.['tags'];
-  if (raw === undefined) return undefined;
-  const tags = raw
-    .split(',')
-    .map((tag) => tag.trim())
-    .filter((tag) => tag.length > 0);
+  if (meta === undefined) return undefined;
+  const tags = tagsOf(meta);
   return tags.length > 0 ? tags : undefined;
 }
 

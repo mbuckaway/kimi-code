@@ -57,7 +57,7 @@ import type {
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
 import type { ToolCall } from '#/kosong/contract/message';
-import type { ExecutableToolContext } from '#/tool/toolContract';
+import type { ExecutableToolContext, ExecutableToolResult } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
 import { IAgentLoopService } from '#/agent/loop/loop';
@@ -87,6 +87,11 @@ import { stubToolExecutorEvents, type ToolExecutorEventStubs } from '../../agent
 import { createTestAgent } from '../../harness';
 
 const signal = new AbortController().signal;
+
+function outputString(result: ExecutableToolResult): string {
+  expect(typeof result.output).toBe('string');
+  return result.output as string;
+}
 
 async function runInjectionBoundary(loop: IAgentLoopService): Promise<void> {
   await loop.hooks.onWillBeginStep.run({ turnId: 0, step: 1, firstStepOfTurn: true, signal });
@@ -1860,6 +1865,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('rejects names while the agent messaging flag is off', async () => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag(false), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(false), stubCallerProfile()), stubCallerProfile());
 
@@ -1898,6 +1904,7 @@ describe('AgentSwarmTool', () => {
       output: 'AgentSwarm names must match the number of items/prompts (expected 2, got 3).',
     },
   ])('rejects a names length mismatch for $case', async ({ input, output }) => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
 
@@ -1908,6 +1915,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('rejects names without items or prompts', async () => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
 
@@ -1928,6 +1936,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('rejects duplicate subagent names', async () => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
 
@@ -1949,6 +1958,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('threads names onto item spawn tasks, descriptions, and results', async () => {
+    expect.assertions(3);
     const run = vi.fn(
       async <T>({
         tasks,
@@ -2007,6 +2017,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('threads names onto prompt spawn tasks and results', async () => {
+    expect.assertions(3);
     const run = vi.fn(
       async <T>({
         tasks,
@@ -2062,6 +2073,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('keeps resumed subagents unnamed while naming the new cohort', async () => {
+    expect.assertions(7);
     const run = vi.fn(
       async <T>({
         tasks,
@@ -2096,7 +2108,7 @@ describe('AgentSwarmTool', () => {
     expect(tasks[0]).toMatchObject({ kind: 'resume', resumeAgentId: 'agent-old-1' });
     expect(tasks[0]?.name).toBeUndefined();
     expect(tasks[1]).toMatchObject({ kind: 'spawn', name: 'alpha' });
-    const output = typeof result.output === 'string' ? result.output : '';
+    const output = outputString(result);
     const lines = output.split('\n');
     expect(lines.find((line) => line.includes('mode="resume"'))).not.toContain('name=');
     expect(lines.find((line) => line.includes('agent-new'))).toContain('name="alpha"');
@@ -2113,6 +2125,7 @@ describe('AgentSwarmTool', () => {
       output: 'Agent name "has space" must be 1-64 characters of letters, digits, ".", "_" or "-".',
     },
   ])('rejects the invalid name $name through normalizeAgentName', async ({ name, output }) => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
 
@@ -2186,6 +2199,7 @@ describe('AgentSwarmTool', () => {
     { case: 'persona', args: { persona: 'reviewer' } },
     { case: 'personas', args: { personas: ['reviewer', 'checker'] } },
   ])('rejects $case while the agent_persona flag is off', async ({ args }) => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const tool = new AgentSwarmTool(
       host.swarmService,
@@ -2212,6 +2226,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('aborts the swarm before any subagent starts when a persona base does not match', async () => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const flags = personaSwarmFlag(true);
     const tool = new AgentSwarmTool(
@@ -2243,6 +2258,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('treats a blank shared persona as absent', async () => {
+    expect.assertions(3);
     const host = mockSwarmHost();
     const flags = personaSwarmFlag(true);
     const subagents = realSubagents(
@@ -2278,6 +2294,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('rejects persona combined with personas', async () => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const flags = personaSwarmFlag(true);
     const tool = new AgentSwarmTool(
@@ -2330,6 +2347,7 @@ describe('AgentSwarmTool', () => {
       output: 'AgentSwarm personas must match the number of items/prompts (expected 2, got 3).',
     },
   ])('rejects a personas length mismatch for $case', async ({ input, output }) => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const flags = personaSwarmFlag(true);
     const tool = new AgentSwarmTool(
@@ -2349,6 +2367,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('rejects personas without items or prompts', async () => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const flags = personaSwarmFlag(true);
     const tool = new AgentSwarmTool(
@@ -2378,6 +2397,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('rejects fork combined with persona', async () => {
+    expect.assertions(2);
     const host = mockSwarmHost();
     const flags = personaSwarmFlag(true, true);
     const tool = new AgentSwarmTool(
@@ -2406,6 +2426,7 @@ describe('AgentSwarmTool', () => {
   });
 
   it('applies a shared persona to every spawn through one resolved plan', async () => {
+    expect.assertions(5);
     const run = vi.fn(
       async <T>({
         tasks,
@@ -2466,11 +2487,12 @@ describe('AgentSwarmTool', () => {
     if (first?.kind !== 'spawn' || second?.kind !== 'spawn') {
       throw new Error('expected two spawn tasks');
     }
-    expect(first.plan.persona?.name).toBe('reviewer');
+    expect(first.plan.persona?.mode).toBe('overlay');
     expect(second.plan).toBe(first.plan);
   });
 
   it('resolves one plan per distinct persona aligned by prompt position', async () => {
+    expect.assertions(8);
     const run = vi.fn(
       async <T>({
         tasks,
@@ -2535,13 +2557,14 @@ describe('AgentSwarmTool', () => {
     if (first?.kind !== 'spawn' || second?.kind !== 'spawn' || third?.kind !== 'spawn') {
       throw new Error('expected three spawn tasks');
     }
-    expect(first.plan.persona?.name).toBe('reviewer');
-    expect(second.plan.persona?.name).toBe('checker');
+    expect(first.plan.persona?.mode).toBe('overlay');
+    expect(second.plan.persona?.text).toBe('Check test coverage and edge cases.');
     expect(second.plan.persona?.mode).toBe('replace');
     expect(third.plan).toBe(first.plan);
   });
 
   it('keeps resumed members on their existing role without a plan', async () => {
+    expect.assertions(7);
     const run = vi.fn(
       async <T>({
         tasks,
@@ -2599,7 +2622,7 @@ describe('AgentSwarmTool', () => {
     expect(resumeTask.resumeAgentId).toBe('agent-old-1');
     expect(resumeTask.profileName).toBe('subagent');
     expect('plan' in resumeTask).toBe(false);
-    expect(spawnTask.plan.persona?.name).toBe('reviewer');
+    expect(spawnTask.plan.persona?.mode).toBe('overlay');
     expect(planSpawn).toHaveBeenCalledWith(
       expect.objectContaining({ persona: 'reviewer', profileName: 'coder' }),
     );

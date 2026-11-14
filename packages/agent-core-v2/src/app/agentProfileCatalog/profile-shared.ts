@@ -271,26 +271,34 @@ function unionToolList(
   return merged.length > 0 ? merged : undefined;
 }
 
+export function renderPersonaSystemPrompt(
+  basePrompt: (context: AgentProfileContext) => SystemPromptRenderResult,
+  persona: Pick<PersonaBinding, 'mode' | 'text' | 'skills'>,
+  skillActive: boolean,
+): (context: AgentProfileContext) => SystemPromptRenderResult {
+  if (persona.mode === 'replace') {
+    const guidance = personaSkillsGuidance(persona.skills);
+    return (context) =>
+      renderPromptTemplateResult(
+        guidance.length > 0 ? `${persona.text}\n\n${guidance}` : persona.text,
+        context,
+        { skillActive },
+        basePrompt,
+      );
+  }
+  return (context) =>
+    basePrompt({ ...context, persona: persona.text, personaSkills: persona.skills });
+}
+
 export function withPersona(base: AgentProfile, persona: PersonaBinding): AgentProfile {
   const tools = narrowTools(base.tools, persona.tools);
   const disallowedTools = unionToolList(base.disallowedTools, persona.disallowedTools);
   const subagents = narrowSubagents(base.subagents, persona.subagents);
-  const renderSystemPrompt = (context: AgentProfileContext): SystemPromptRenderResult => {
-    if (persona.mode === 'replace') {
-      const guidance = personaSkillsGuidance(persona.skills);
-      return renderPromptTemplateResult(
-        guidance.length > 0 ? `${persona.text}\n\n${guidance}` : persona.text,
-        context,
-        { skillActive: skillActiveFor(tools ?? []) },
-        (ctx) => base.renderSystemPrompt(ctx),
-      );
-    }
-    return base.renderSystemPrompt({
-      ...context,
-      persona: persona.text,
-      personaSkills: persona.skills,
-    });
-  };
+  const renderSystemPrompt = renderPersonaSystemPrompt(
+    (context) => base.renderSystemPrompt(context),
+    persona,
+    skillActiveFor(tools ?? []),
+  );
   return {
     ...base,
     tools,

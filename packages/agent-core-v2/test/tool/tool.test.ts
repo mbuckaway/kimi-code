@@ -22,7 +22,7 @@ import { makeHookRunner } from '../features/externalHooks/runner-stub';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
-import { ToolAccesses, type ExecutableTool, type ExecutableToolContext, type ExecutableToolResult } from '#/tool/toolContract';
+import { ToolAccesses, type ExecutableTool } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentLoopService } from '#/agent/loop/loop';
@@ -440,6 +440,7 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
       return contextFor(agentId);
     }),
     notifyAgentTaskStopped: vi.fn(),
+    assertOwned: vi.fn(async () => {}),
     planSpawn: vi.fn(async () => {
       throw new Error('unexpected planSpawn');
     }),
@@ -3093,6 +3094,7 @@ describe('Agent tool execution contract', () => {
   });
 
   it('rejects a persona while the agent_persona flag is off', async () => {
+    expect.assertions(4);
     const lifecycle = createAgentLifecycleStub();
     const context = createAgentToolContext(lifecycle, personaFlags(false));
 
@@ -3109,6 +3111,7 @@ describe('Agent tool execution contract', () => {
   });
 
   it('rejects a persona when resuming an existing agent', async () => {
+    expect.assertions(3);
     const lifecycle = createAgentLifecycleStub();
     const context = createAgentToolContext(lifecycle, personaFlags());
 
@@ -3124,6 +3127,7 @@ describe('Agent tool execution contract', () => {
   });
 
   it('rejects a persona when forking the current context', async () => {
+    expect.assertions(3);
     const lifecycle = createAgentLifecycleStub();
     const context = createAgentToolContext(lifecycle, personaAndForkFlags());
 
@@ -3139,6 +3143,7 @@ describe('Agent tool execution contract', () => {
   });
 
   it('uses the persona extends as the base when subagent_type is omitted', async () => {
+    expect.assertions(5);
     const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
     const context = createAgentToolContext(
       lifecycle,
@@ -3165,7 +3170,7 @@ describe('Agent tool execution contract', () => {
       expect.objectContaining({
         binding: expect.objectContaining({
           profile: 'explore',
-          persona: expect.objectContaining({ name: 'auditor', base: 'explore' }),
+          persona: expect.objectContaining({ base: 'explore' }),
         }),
       }),
     );
@@ -3174,6 +3179,7 @@ describe('Agent tool execution contract', () => {
   });
 
   it('passes the trimmed persona to planSpawn and threads it into the created binding', async () => {
+    expect.assertions(5);
     const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
     const context = createAgentToolContext(
       lifecycle,
@@ -3202,7 +3208,6 @@ describe('Agent tool execution contract', () => {
         binding: expect.objectContaining({
           profile: 'explore',
           persona: expect.objectContaining({
-            name: 'auditor',
             mode: 'overlay',
             text: 'You audit changes.',
             base: 'explore',
@@ -3215,6 +3220,7 @@ describe('Agent tool execution contract', () => {
   });
 
   it('uses the persona in the resolved display name and description', async () => {
+    expect.assertions(4);
     const lifecycle = createAgentLifecycleStub();
     const context = createAgentToolContext(lifecycle, personaFlags());
 
@@ -3232,6 +3238,7 @@ describe('Agent tool execution contract', () => {
   });
 
   it('treats a blank persona as absent', async () => {
+    expect.assertions(2);
     const lifecycle = createAgentLifecycleStub();
     const context = createAgentToolContext(lifecycle, personaFlags(false));
 
@@ -3245,64 +3252,6 @@ describe('Agent tool execution contract', () => {
     if (execution.isError === true) throw new Error('expected runnable execution');
     expect(execution.description).toBe('Launching explore agent: Find cause');
   });
-
-  it.each([
-    {
-      case: 'the agent_persona flag off',
-      extras: (): TestAgentServiceOverride => personaFlags(false),
-      args: {
-        prompt: 'Audit',
-        description: 'Audit the diff',
-        subagent_type: 'explore',
-        persona: 'auditor',
-      },
-      output: PERSONA_EXPERIMENTAL_UNAVAILABLE,
-    },
-    {
-      case: 'a resume',
-      extras: (): TestAgentServiceOverride => personaFlags(),
-      args: {
-        prompt: 'Audit',
-        description: 'Audit the diff',
-        resume: 'agent-existing',
-        persona: 'auditor',
-      },
-      output: PERSONA_WITH_RESUME_UNAVAILABLE,
-    },
-    {
-      case: 'a fork',
-      extras: (): TestAgentServiceOverride => personaAndForkFlags(),
-      args: {
-        prompt: 'Audit',
-        description: 'Audit the diff',
-        fork: true,
-        persona: 'auditor',
-      },
-      output: PERSONA_WITH_FORK_UNAVAILABLE,
-    },
-  ])(
-    'rejects a persona before launch when execution meets $case',
-    async ({ extras, args, output }) => {
-      const lifecycle = createAgentLifecycleStub();
-      const context = createAgentToolContext(lifecycle, extras());
-      const probe = agentTool(context) as unknown as {
-        execution(
-          input: SubagentToolInput,
-          ctx: ExecutableToolContext,
-        ): Promise<ExecutableToolResult>;
-      };
-
-      const result = await probe.execution(args, {
-        turnId: 0,
-        toolCallId: 'call_agent',
-        signal,
-      });
-
-      expect(result).toEqual({ output, isError: true });
-      expect(lifecycle.create).not.toHaveBeenCalled();
-      expect(lifecycle.run).not.toHaveBeenCalled();
-    },
-  );
 });
 
 describe('AgentSwarmToolInputSchema', () => {

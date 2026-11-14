@@ -1139,8 +1139,8 @@ describe('AgentProfileService persona bind threading', () => {
   }
 
   it('renders an overlay persona into the base prompt without changing tools', async () => {
+    expect.assertions(4);
     const { record, svc } = await bindAndReadProfileBind(DEFAULT_AGENT_PROFILE_NAME, {
-      name: 'overlay-persona',
       mode: 'overlay',
       text: 'PERSONA-OVERLAY-MARKER',
     });
@@ -1152,8 +1152,8 @@ describe('AgentProfileService persona bind threading', () => {
   });
 
   it('dispatches the narrowed tools, the union denylist, and the narrowed subagents', async () => {
+    expect.assertions(1);
     const { record } = await bindAndReadProfileBind('persona-base', {
-      name: 'narrow-persona',
       mode: 'overlay',
       text: 'narrowed persona',
       tools: ['Read', 'Bash'],
@@ -1170,8 +1170,8 @@ describe('AgentProfileService persona bind threading', () => {
   });
 
   it('replaces the system prompt with the persona body while keeping base capabilities', async () => {
+    expect.assertions(3);
     const { record, svc } = await bindAndReadProfileBind(DEFAULT_AGENT_PROFILE_NAME, {
-      name: 'replace-persona',
       mode: 'replace',
       text: 'PERSONA-REPLACE-BODY',
     });
@@ -1182,8 +1182,8 @@ describe('AgentProfileService persona bind threading', () => {
   });
 
   it('computes skillActive from the persona-narrowed tool set', async () => {
+    expect.assertions(1);
     const { svc } = await bindAndReadProfileBind('persona-skill-probe', {
-      name: 'no-skill-persona',
       mode: 'overlay',
       text: 'no skill persona',
       tools: ['Read'],

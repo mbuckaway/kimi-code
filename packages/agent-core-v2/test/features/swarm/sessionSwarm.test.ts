@@ -921,6 +921,7 @@ describe('AgentRunBatch swarm item forwarding', () => {
   });
 
   it('forwards name from a spawn task to launcher.spawn', async () => {
+    expect.assertions(2);
     const { launcher, spawned } = recordingLauncher();
 
     await new AgentRunBatch(launcher, [spawnTask('src/a.ts', 'alpha')]).run();
@@ -934,6 +935,7 @@ describe('AgentRunBatch swarm item forwarding', () => {
   });
 
   it('leaves swarmItem and name undefined for spawn tasks without them', async () => {
+    expect.assertions(3);
     const { launcher, spawned } = recordingLauncher();
 
     await new AgentRunBatch(launcher, [spawnTask()]).run();
@@ -1084,6 +1086,7 @@ describe('SessionSwarmService metadata compatibility', () => {
   });
 
   it('forwards a subagent name to the subagent spawn', async () => {
+    expect.assertions(2);
     const service = ix.get(ISessionSwarmService);
 
     await expect(
@@ -1490,6 +1493,7 @@ function subagentStub(
       }),
     ),
     notifyAgentTaskStopped: () => {},
+    assertOwned: vi.fn(async () => {}),
   } as ISessionSubagentService;
 }
 

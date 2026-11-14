@@ -26,15 +26,19 @@ import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { ILogService } from '#/_base/log/log';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { RuntimeWorkspaceView } from '#/runtime/runtimeWorkspaceView';
 import { createHooks } from '#/hooks';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
+import {
+  isSubagentMeta,
+  subagentParentAgentId,
+  tagsOf,
+} from '#/session/agentLifecycle/subagentMetadata';
 import { agentContextOf } from '#/agent/scopeContext/scopeContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
-import { isSubagentMeta, subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
 import { agentNameOf, normalizeAgentName } from './agentNames';
 import { AGENT_PERSONA_FLAG_ID } from './flag';
 import { type ResolvedPersona, resolvePersona } from './persona';
@@ -267,6 +271,10 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     } finally {
       release();
     }
+  }
+
+  async assertOwned(callerAgentId: string, target: string): Promise<void> {
+    await this.resolveOwnedTarget(callerAgentId, target);
   }
 
   private async createSpawnedAgent(
@@ -526,11 +534,6 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
 
 function normalizeAgentTags(tags: readonly string[]): readonly string[] {
   return [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0))];
-}
-
-function tagsOf(meta: AgentMeta): readonly string[] {
-  const raw = meta.labels?.['tags'];
-  return raw === undefined ? [] : normalizeAgentTags(raw.split(','));
 }
 
 registerScopedService(

@@ -8,8 +8,6 @@ import {
 
 import { formatPlainObject } from '#/agent/task/tools/format';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { IFlagService } from '#/app/flag/flag';
-import { AGENT_FLEET_CONTROL_FLAG_ID } from '#/features/messaging/flag';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 
 import { ITagAgentTool, TagAgentInputSchema, type TagAgentToolInput } from './tag-agent';
@@ -26,7 +24,6 @@ export class TagAgentTool implements ITagAgentTool {
   constructor(
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @IAgentScopeContext scopeContext: IAgentScopeContext,
-    @IFlagService private readonly flags: IFlagService,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -42,12 +39,6 @@ export class TagAgentTool implements ITagAgentTool {
   }
 
   private async execution(args: TagAgentToolInput): Promise<ExecutableToolResult> {
-    if (!this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID)) {
-      return {
-        isError: true,
-        output: 'TagAgent is disabled: the agent_fleet_control experimental flag is off.',
-      };
-    }
     try {
       const result = await this.subagents.setAgentTags(
         this.callerAgentId,

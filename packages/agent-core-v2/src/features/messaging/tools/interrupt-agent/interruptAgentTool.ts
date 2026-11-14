@@ -9,8 +9,6 @@ import {
 
 import { formatPlainObject } from '#/agent/task/tools/format';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { IFlagService } from '#/app/flag/flag';
-import { AGENT_FLEET_CONTROL_FLAG_ID } from '#/features/messaging/flag';
 import { ISessionMessagingService } from '#/features/messaging/messaging';
 
 import {
@@ -34,7 +32,6 @@ export class InterruptAgentTool implements IInterruptAgentTool {
   constructor(
     @ISessionMessagingService private readonly messaging: ISessionMessagingService,
     @IAgentScopeContext scopeContext: IAgentScopeContext,
-    @IFlagService private readonly flags: IFlagService,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -53,12 +50,6 @@ export class InterruptAgentTool implements IInterruptAgentTool {
     args: InterruptAgentToolInput,
     ctx: ExecutableToolContext,
   ): Promise<ExecutableToolResult> {
-    if (!this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID)) {
-      return {
-        isError: true,
-        output: 'InterruptAgent is disabled: the agent_fleet_control experimental flag is off.',
-      };
-    }
     try {
       const result = await this.messaging.interruptAgent(
         this.callerAgentId,

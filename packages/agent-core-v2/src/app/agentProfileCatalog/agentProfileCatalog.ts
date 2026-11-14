@@ -45,7 +45,6 @@ export interface SystemPromptRenderResult {
 export type AgentProfileMode = 'overlay' | 'replace';
 
 export interface PersonaBinding {
-  readonly name: string;
   readonly mode: AgentProfileMode;
   readonly text: string;
   readonly skills?: readonly string[];

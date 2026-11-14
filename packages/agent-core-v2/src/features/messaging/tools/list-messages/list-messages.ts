@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { createDecorator } from '#/_base/di/instantiation';
-import { MAX_INBOX_MESSAGES } from '#/features/messaging/envelope';
+import { MAX_INBOX_MESSAGES } from '#/features/messaging/sessionInbox';
 import { type AgentTool } from '#/tool/toolContract';
 
 export const ListMessagesToolInputSchema = z.object({

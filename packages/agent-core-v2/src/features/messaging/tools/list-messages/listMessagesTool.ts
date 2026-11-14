@@ -11,7 +11,7 @@ import {
   type AgentInboxMessage,
 } from '#/features/messaging/messaging';
 
-import { MAX_MESSAGE_SUMMARY_CHARS } from '../send-message/send-message';
+import { previewOf } from '../send-message/send-message';
 import {
   IListMessagesTool,
   ListMessagesToolInputSchema,
@@ -71,13 +71,5 @@ function formatInbox(inbox: AgentInbox): string {
 function formatInboxMessage(message: AgentInboxMessage): string {
   const label = message.fromLabel ?? message.from;
   const truncated = message.truncated ? ' [truncated]' : '';
-  return `- ${message.id} · from ${label} (${message.from}) · ${message.delivery} · ${messagePreview(message.message)}${truncated}`;
-}
-
-function messagePreview(message: string): string {
-  const newline = message.indexOf('\n');
-  const firstLine = newline === -1 ? message : message.slice(0, newline);
-  return firstLine.length > MAX_MESSAGE_SUMMARY_CHARS
-    ? `${firstLine.slice(0, MAX_MESSAGE_SUMMARY_CHARS - 1)}…`
-    : firstLine;
+  return `- ${message.id} · from ${label} (${message.from}) · ${message.delivery} · ${previewOf(message.message)}${truncated}`;
 }

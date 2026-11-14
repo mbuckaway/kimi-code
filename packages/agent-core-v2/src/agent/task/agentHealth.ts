@@ -1,3 +1,4 @@
+import { BugIndicatingError } from '#/_base/errors/errors';
 import type { AgentTaskInfo } from './task';
 
 export type AgentHealthState =
@@ -37,6 +38,10 @@ export function deriveAgentHealth(input: AgentHealthInput): AgentHealthState {
       return 'timed_out';
     case 'killed':
       return 'killed';
+    default: {
+      const status: never = task.status;
+      throw new BugIndicatingError(`Unexpected task status: ${String(status)}`);
+    }
   }
 }
 

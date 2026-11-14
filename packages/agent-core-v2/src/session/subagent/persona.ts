@@ -1,4 +1,5 @@
-import { AGENTS_MD_RECOMMENDED_MAX_BYTES } from '#/agent/profile/context';
+import * as pathe from 'pathe';
+
 import type {
   AgentProfile,
   AgentProfileMode,
@@ -6,13 +7,18 @@ import type {
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { Error2, ErrorCodes } from '#/errors';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { HostFsError, OsFsErrors } from '#/os/interface/hostFsErrors';
 import type { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { isSensitiveFile } from '#/tool/path-access';
+import { isSensitiveFile, isWithinDirectory } from '#/tool/path-access';
 import {
   AgentFileParseError,
   parseAgentFileText,
 } from '#/workspace/workspaceAgentProfileLoader/internal/agentFile';
 import type { AgentFileDefinition } from '#/workspace/workspaceAgentProfileLoader/internal/types';
+
+export const PERSONA_FILE_MAX_BYTES = 32 * 1024;
+
+const MAX_REALPATH_WALK = 256;
 
 export interface ResolvedPersona extends PersonaBinding {
   readonly base: string;
@@ -30,7 +36,6 @@ export interface ResolvePersonaOptions {
 }
 
 interface PersonaSource {
-  readonly name: string;
   readonly mode: AgentProfileMode;
   readonly text: string;
   readonly skills?: readonly string[];
@@ -40,8 +45,6 @@ interface PersonaSource {
   readonly declaredBase: string;
 }
 
-type PersonaFileDefinition = AgentFileDefinition & { readonly extends: string };
-
 export async function resolvePersona(options: ResolvePersonaOptions): Promise<ResolvedPersona> {
   const reference = options.reference.trim();
   const catalogProfile = options.catalog.get(reference);
@@ -50,7 +53,6 @@ export async function resolvePersona(options: ResolvePersonaOptions): Promise<Re
       ? await personaFromPath(reference, options)
       : personaFromCatalogProfile(reference, catalogProfile);
   return {
-    name: source.name,
     mode: source.mode,
     text: source.text,
     skills: source.skills,
@@ -78,7 +80,6 @@ function personaFromCatalogProfile(reference: string, profile: AgentProfile): Pe
     );
   }
   return {
-    name: profile.name,
     mode: profile.mode ?? 'overlay',
     text,
     skills: profile.skills,
@@ -107,30 +108,26 @@ async function personaFromPath(
   }
   const resolved = options.workspace.resolve(reference);
   const path = options.workspace.assertAllowed(resolved, 'read');
-  if (isSensitiveFile(path)) {
-    throw new Error2(
-      ErrorCodes.VALIDATION_FAILED,
-      `Persona file "${path}" matches a sensitive-file pattern (env / credential / SSH key); access is blocked to protect secrets.`,
-      { details: { persona: reference, path } },
-    );
-  }
+  const realPath = await realpathExistingPrefix(options.fs, path);
+  await assertRealPathInsideWorkspace(path, realPath, reference, options);
+  await assertParentNotSymlinked(path, reference, options.fs);
+  assertNotSensitive(path, realPath, reference);
   const stat = await options.fs.lstat(path);
   if (!stat.isFile || stat.isSymbolicLink === true) {
     throw new Error2(ErrorCodes.VALIDATION_FAILED, `Persona file "${path}" is not a regular file.`, {
       details: { persona: reference, path },
     });
   }
-  if (stat.size > AGENTS_MD_RECOMMENDED_MAX_BYTES) {
+  if (stat.size > PERSONA_FILE_MAX_BYTES) {
     throw new Error2(
       ErrorCodes.VALIDATION_FAILED,
-      `Persona file "${path}" is too large: ${stat.size} bytes (limit ${AGENTS_MD_RECOMMENDED_MAX_BYTES} bytes).`,
+      `Persona file "${path}" is too large: ${stat.size} bytes (limit ${PERSONA_FILE_MAX_BYTES} bytes).`,
       { details: { persona: reference, path } },
     );
   }
-  const text = await readPersonaText(path, reference, options.fs);
+  const text = await readPersonaText(realPath, reference, options.fs);
   const definition = parsePersonaText(path, reference, text);
   return {
-    name: path,
     mode: definition.mode,
     text: definition.prompt,
     skills: definition.skills,
@@ -139,6 +136,102 @@ async function personaFromPath(
     subagents: definition.subagents,
     declaredBase: definition.extends,
   };
+}
+
+async function realpathExistingPrefix(fs: IHostFileSystem, abs: string): Promise<string> {
+  const tail: string[] = [];
+  let current = abs;
+  for (let i = 0; i < MAX_REALPATH_WALK; i++) {
+    try {
+      const real = await fs.realpath(current);
+      return tail.length === 0 ? real : pathe.join(real, ...tail.toReversed());
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+      const parent = pathe.dirname(current);
+      if (parent === current) return abs;
+      tail.push(pathe.basename(current));
+      current = parent;
+    }
+  }
+  return abs;
+}
+
+async function assertRealPathInsideWorkspace(
+  path: string,
+  realPath: string,
+  reference: string,
+  options: ResolvePersonaOptions,
+): Promise<void> {
+  const roots = await workspaceRealRoots(options.fs, options.workspace);
+  if (roots.some((root) => isWithinDirectory(realPath, root))) return;
+  throw personaSymlinkError(reference, path, realPath, 'symlink_outside');
+}
+
+async function workspaceRealRoots(
+  fs: IHostFileSystem,
+  workspace: ISessionWorkspaceContext,
+): Promise<readonly string[]> {
+  const roots: string[] = [];
+  for (const dir of [workspace.workDir, ...workspace.additionalDirs]) {
+    roots.push(await realpathOrSelf(fs, dir));
+  }
+  return roots;
+}
+
+async function realpathOrSelf(fs: IHostFileSystem, path: string): Promise<string> {
+  try {
+    return await fs.realpath(path);
+  } catch {
+    return path;
+  }
+}
+
+async function assertParentNotSymlinked(
+  path: string,
+  reference: string,
+  fs: IHostFileSystem,
+): Promise<void> {
+  const parent = pathe.normalize(pathe.dirname(path));
+  let realParent: string;
+  try {
+    realParent = await fs.realpath(parent);
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
+  const normalizedRealParent = pathe.normalize(realParent);
+  if (normalizedRealParent === parent) return;
+  throw personaSymlinkError(reference, path, normalizedRealParent, 'symlink_parent');
+}
+
+function assertNotSensitive(path: string, realPath: string, reference: string): void {
+  if (!isSensitiveFile(path) && !isSensitiveFile(realPath)) return;
+  throw new Error2(
+    ErrorCodes.VALIDATION_FAILED,
+    `Persona file "${path}" matches a sensitive-file pattern (env / credential / SSH key); access is blocked to protect secrets.`,
+    { details: { persona: reference, path } },
+  );
+}
+
+function personaSymlinkError(
+  reference: string,
+  path: string,
+  realPath: string,
+  reason: 'symlink_outside' | 'symlink_parent',
+): Error2 {
+  return new Error2(
+    ErrorCodes.FS_PATH_ESCAPES,
+    `Persona file "${path}" escapes the workspace through a symlink`,
+    { details: { persona: reference, path, realPath, reason } },
+  );
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    error instanceof HostFsError &&
+    (error.code === OsFsErrors.codes.OS_FS_NOT_FOUND ||
+      error.code === OsFsErrors.codes.OS_FS_NOT_DIRECTORY)
+  );
 }
 
 async function readPersonaText(
@@ -161,14 +254,14 @@ function parsePersonaText(
   path: string,
   reference: string,
   text: string,
-): PersonaFileDefinition {
+): AgentFileDefinition & { readonly extends: string } {
   try {
     return parseAgentFileText({
       path,
       source: 'explicit',
       text,
       requireExtends: true,
-    }) as PersonaFileDefinition;
+    });
   } catch (error) {
     if (error instanceof AgentFileParseError) {
       throw new Error2(ErrorCodes.VALIDATION_FAILED, error.message, {

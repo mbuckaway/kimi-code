@@ -23,8 +23,13 @@ import { IEventBus } from '#/app/event/eventBus';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { Error2, ErrorCodes, isError2 } from '#/errors';
 import { abortError, userCancellationReason } from '#/_base/utils/abort';
+import {
+  resetUnexpectedErrorHandler,
+  setUnexpectedErrorHandler,
+} from '#/_base/errors/unexpectedError';
+import { MAX_STOP_REASON_CHARS } from '#/agent/task/types';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
-import { labelsFromAgentMeta } from '#/session/agentLifecycle/subagentMetadata';
+import { labelsFromAgentMeta, tagsOf } from '#/session/agentLifecycle/subagentMetadata';
 import {
   ISessionMetadata,
   type AgentMeta,
@@ -37,11 +42,9 @@ import {
   DEFAULT_INBOX_LIMIT,
   MAX_AGENT_MESSAGE_CHARS,
   MAX_BUFFERED_AGENT_MESSAGES,
-  MAX_INBOX_MESSAGES,
   MAX_RECENT_SENDS,
   MESSAGING_INSTRUCTIONS,
   AGENT_MESSAGING_VARIANT,
-  appendInboxEntry,
   formatAgentRoster,
   formatRosterChangeNotice,
   neutralizeAgentMessageBody,
@@ -49,6 +52,7 @@ import {
   truncateAgentMessage,
   wrapAgentMessage,
 } from '#/features/messaging/envelope';
+import { MAX_INBOX_MESSAGES, appendInboxEntry } from '#/features/messaging/sessionInbox';
 import {
   AGENT_FLEET_CONTROL_FLAG_ENV,
   AGENT_FLEET_CONTROL_FLAG_ID,
@@ -83,11 +87,11 @@ import {
   InterruptAgentInputSchema,
   type InterruptAgentToolInput,
 } from '#/features/messaging/tools/interrupt-agent/interrupt-agent';
-import { DismissAgentsTool } from '#/features/messaging/tools/dismiss-agent/dismissAgentsTool';
+import { DismissAgentsTool } from '#/features/messaging/tools/dismiss-agents/dismissAgentsTool';
 import {
   DismissAgentsInputSchema,
   type DismissAgentsToolInput,
-} from '#/features/messaging/tools/dismiss-agent/dismiss-agent';
+} from '#/features/messaging/tools/dismiss-agents/dismiss-agents';
 import { TagAgentTool } from '#/features/messaging/tools/tag-agent/tagAgentTool';
 import {
   TagAgentInputSchema,
@@ -283,6 +287,10 @@ interface AgentTurnState {
   };
 }
 
+interface SessionMetadataStub extends ISessionMetadata {
+  readonly read: Mock<() => Promise<SessionMeta>>;
+}
+
 interface Harness {
   readonly ix: TestInstantiationService;
   readonly service: SessionMessagingService;
@@ -290,6 +298,11 @@ interface Harness {
   readonly metadata: Record<string, AgentMeta>;
   readonly turnStates: Map<string, AgentTurnState>;
   readonly createdAgents: string[];
+  readonly flags: IFlagService;
+  readonly sessionMetadata: SessionMetadataStub;
+  readonly subagents: {
+    readonly assertOwned: Mock<(callerAgentId: string, target: string) => Promise<void>>;
+  };
   readonly agentLifecycleCreate: Mock<
     (input?: { readonly agentId?: string }) => Promise<unknown>
   >;
@@ -316,6 +329,10 @@ function createHarness(options: {
   }[];
   readonly seedMetadata?: Readonly<Record<string, AgentMeta>>;
   readonly seedTurnStates?: Readonly<Record<string, AgentTurnState>>;
+  readonly seams?: {
+    readonly flags?: IFlagService;
+    readonly sessionMetadata?: ISessionMetadata;
+  };
 } = {}): Harness {
   const ix = new TestInstantiationService();
   const agents = new Map<string, AgentStub>();
@@ -442,7 +459,7 @@ function createHarness(options: {
     attachRuntimes: vi.fn(),
   } as unknown as IAgentLifecycleService;
 
-  const sessionMetadata: ISessionMetadata = {
+  const sessionMetadata = (options.seams?.sessionMetadata ?? {
     _serviceBrand: undefined,
     ready: Promise.resolve(),
     onDidChangeMetadata: onDidChangeMetadata.event,
@@ -453,7 +470,11 @@ function createHarness(options: {
     setArchived: vi.fn(async () => {}),
     registerAgent: vi.fn(async () => {}),
     unregisterAgent: vi.fn(async () => {}),
-  };
+  }) as SessionMetadataStub;
+  const flags =
+    options.seams?.flags ??
+    stubFlag((id) => (options.flagEnabled ?? true) && id === AGENT_MESSAGING_FLAG_ID);
+  const assertOwned = vi.fn(async (_callerAgentId: string, _target: string) => {});
 
   for (const seed of options.seedAgents ?? []) createAgentStub(seed.id, seed);
 
@@ -467,10 +488,11 @@ function createHarness(options: {
         ? { timeoutMs: options.timeoutMs }
         : undefined,
   } as unknown as IConfigService);
-  ix.stub(
-    IFlagService,
-    stubFlag((id) => (options.flagEnabled ?? true) && id === AGENT_MESSAGING_FLAG_ID),
-  );
+  ix.stub(IFlagService, flags);
+  ix.stub(ISessionSubagentService, {
+    _serviceBrand: undefined,
+    assertOwned,
+  } as unknown as ISessionSubagentService);
   ix.set(ISessionMessagingService, new SyncDescriptor(SessionMessagingService));
 
   const harness: Harness = {
@@ -480,6 +502,9 @@ function createHarness(options: {
     metadata,
     turnStates,
     createdAgents,
+    flags,
+    sessionMetadata,
+    subagents: { assertOwned },
     agentLifecycleCreate: lifecycle.create as unknown as Mock<
       (input?: { readonly agentId?: string }) => Promise<unknown>
     >,
@@ -814,6 +839,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('marks a profile-named agent so it reads differently from an explicit name', async () => {
+    expect.assertions(4);
     seedRoster();
     harness.metadata['agent-4'] = {
       type: 'sub',
@@ -830,6 +856,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('reports a metadata-only addressable agent as orphaned', async () => {
+    expect.assertions(1);
     harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
 
     const roster = await harness.service.listAgents('agent-2');
@@ -846,6 +873,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('surfaces the parent agent id and tags from metadata labels', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     harness.metadata['agent-2'] = {
       type: 'sub',
@@ -861,6 +889,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('trims tags and drops empty entries', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     harness.metadata['agent-2'] = {
       type: 'sub',
@@ -873,6 +902,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('omits tags when every tag entry is blank', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     harness.metadata['agent-2'] = {
       type: 'sub',
@@ -885,6 +915,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('derives the role from the agent metadata type', async () => {
+    expect.assertions(1);
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'agent-9' } };
     harness.metadata['agent-9'] = { type: 'independent' };
 
@@ -894,6 +925,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('reports idle for a live agent without a task', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
@@ -904,6 +936,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('reports running when the target loop is running', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     const running = harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
@@ -919,6 +952,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('reports stalled when the caller holds a running task but the target loop is idle', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
@@ -930,6 +964,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('reports lost for a lost task of a live agent', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
@@ -941,6 +976,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('reports completed for a completed task of a live agent', async () => {
+    expect.assertions(1);
     harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
@@ -949,6 +985,20 @@ describe('SessionMessagingService roster', () => {
     const roster = await harness.service.listAgents(MAIN_AGENT_ID);
 
     expect(roster.find((entry) => entry.agentId === 'agent-2')?.state).toBe('completed');
+  });
+});
+
+describe('agent metadata tags', () => {
+  it('reads no tags when the label is missing', () => {
+    expect(tagsOf({ type: 'sub' })).toEqual([]);
+  });
+
+  it('splits, trims, drops blanks, and de-duplicates the tags label', () => {
+    expect(tagsOf({ type: 'sub', labels: { tags: ' a, ,b , a ' } })).toEqual(['a', 'b']);
+  });
+
+  it('returns no tags for a blank label', () => {
+    expect(tagsOf({ type: 'sub', labels: { tags: ' , ' } })).toEqual([]);
   });
 });
 
@@ -2519,6 +2569,12 @@ describe('inbox append policy', () => {
     };
   }
 
+  function fillInboxMap(inbox: Map<string, AgentInboxMessage[]>, count: number): void {
+    for (let index = 1; index <= count; index++) {
+      appendInboxEntry(inbox, 'agent-2', entry(index));
+    }
+  }
+
   it('appends an entry to a new inbox', () => {
     const inbox = new Map<string, AgentInboxMessage[]>();
 
@@ -2529,9 +2585,7 @@ describe('inbox append policy', () => {
 
   it('keeps exactly MAX_INBOX_MESSAGES entries', () => {
     const inbox = new Map<string, AgentInboxMessage[]>();
-    for (let index = 1; index <= MAX_INBOX_MESSAGES; index++) {
-      appendInboxEntry(inbox, 'agent-2', entry(index));
-    }
+    fillInboxMap(inbox, MAX_INBOX_MESSAGES);
 
     expect(inbox.get('agent-2')).toHaveLength(MAX_INBOX_MESSAGES);
     expect(inbox.get('agent-2')?.[0]?.id).toBe('message-1');
@@ -2539,9 +2593,7 @@ describe('inbox append policy', () => {
 
   it('evicts the oldest entry past MAX_INBOX_MESSAGES', () => {
     const inbox = new Map<string, AgentInboxMessage[]>();
-    for (let index = 1; index <= MAX_INBOX_MESSAGES + 1; index++) {
-      appendInboxEntry(inbox, 'agent-2', entry(index));
-    }
+    fillInboxMap(inbox, MAX_INBOX_MESSAGES + 1);
 
     expect(inbox.get('agent-2')).toHaveLength(MAX_INBOX_MESSAGES);
     expect(inbox.get('agent-2')?.[0]?.id).toBe('message-2');
@@ -2580,6 +2632,7 @@ describe('SessionMessagingService inbox', () => {
   }
 
   it('records a steered delivery with the sender and pending count', async () => {
+    expect.assertions(3);
     addTarget({ running: true });
 
     const sent = await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'hello', signal);
@@ -2600,6 +2653,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('records a new-turn delivery for main', async () => {
+    expect.assertions(3);
     addTarget();
 
     const sent = await harness.service.sendMessage('agent-2', 'main', 'status?', signal);
@@ -2611,6 +2665,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('records a resumed delivery', async () => {
+    expect.assertions(4);
     const sub = addTarget();
 
     const sending = harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'dig in', signal);
@@ -2626,6 +2681,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('does not record a duplicate delivery', async () => {
+    expect.assertions(2);
     addTarget({ running: true });
 
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'once', signal);
@@ -2637,6 +2693,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('records the truncation flag and marker', async () => {
+    expect.assertions(2);
     addTarget({ running: true });
     const long = 'a'.repeat(MAX_AGENT_MESSAGE_CHARS + 1);
 
@@ -2648,6 +2705,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('lists the newest message first', async () => {
+    expect.assertions(2);
     addTarget({ running: true });
 
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'first', signal);
@@ -2659,6 +2717,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('defaults the limit to DEFAULT_INBOX_LIMIT', async () => {
+    expect.assertions(3);
     const sub = addTarget();
     await fillInbox(sub, DEFAULT_INBOX_LIMIT + 5);
 
@@ -2670,6 +2729,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('honours an explicit limit of one', async () => {
+    expect.assertions(1);
     const sub = addTarget();
     await fillInbox(sub, 3);
 
@@ -2679,6 +2739,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('clamps a zero limit to one', async () => {
+    expect.assertions(1);
     const sub = addTarget();
     await fillInbox(sub, 3);
 
@@ -2688,6 +2749,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('clamps a limit above MAX_INBOX_MESSAGES', async () => {
+    expect.assertions(1);
     const sub = addTarget();
     await fillInbox(sub, 3);
 
@@ -2699,6 +2761,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('accepts a limit of MAX_INBOX_MESSAGES', async () => {
+    expect.assertions(1);
     const sub = addTarget();
     await fillInbox(sub, 3);
 
@@ -2710,6 +2773,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('evicts the oldest inbox entry past MAX_INBOX_MESSAGES', async () => {
+    expect.assertions(3);
     const sub = addTarget();
     await fillInbox(sub, MAX_INBOX_MESSAGES + 1);
 
@@ -2721,6 +2785,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('filters by sender agent id', async () => {
+    expect.assertions(3);
     addTarget({ running: true });
     harness.addAgent('agent-3', { profileName: 'explore', running: true });
     harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'builder' } };
@@ -2731,9 +2796,15 @@ describe('SessionMessagingService inbox', () => {
 
     expect(inbox.messages.map((message) => message.message)).toEqual(['from builder']);
     expect(harness.agents.get('agent-2')!.loop.enqueue).toHaveBeenCalledTimes(2);
+    const request = harness.agents.get('agent-2')!.loop.turns[1]?.request;
+    const delivered = (
+      request as unknown as { resolveContextMessages(): readonly ContextMessage[] }
+    ).resolveContextMessages()[0];
+    expect(textOf(delivered)).toContain('from builder');
   });
 
   it('filters by sender label', async () => {
+    expect.assertions(1);
     addTarget({ running: true });
     harness.addAgent('agent-3', { profileName: 'explore', running: true });
     harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'builder' } };
@@ -2746,6 +2817,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('returns no messages for an unknown sender filter', async () => {
+    expect.assertions(2);
     addTarget({ running: true });
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'hello', signal);
 
@@ -2756,6 +2828,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('ignores a blank sender filter', async () => {
+    expect.assertions(1);
     addTarget({ running: true });
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'hello', signal);
 
@@ -2765,6 +2838,7 @@ describe('SessionMessagingService inbox', () => {
   });
 
   it('reports zero pending for an agent without queued messages', async () => {
+    expect.assertions(1);
     addTarget();
 
     const inbox = await harness.service.listMessages('agent-2');
@@ -2788,6 +2862,7 @@ describe('SessionMessagingService replyMessage', () => {
   }
 
   it('answers the original sender and stamps the reply envelope', async () => {
+    expect.assertions(4);
     runningTarget();
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'first', signal);
 
@@ -2805,6 +2880,7 @@ describe('SessionMessagingService replyMessage', () => {
   });
 
   it('rejects an unknown inbox message id', async () => {
+    expect.assertions(2);
     runningTarget();
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'first', signal);
 
@@ -2817,6 +2893,7 @@ describe('SessionMessagingService replyMessage', () => {
   });
 
   it('rejects a blank reply body', async () => {
+    expect.assertions(1);
     runningTarget();
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'first', signal);
 
@@ -2828,6 +2905,7 @@ describe('SessionMessagingService replyMessage', () => {
   });
 
   it('does not find a message id from another agent inbox', async () => {
+    expect.assertions(2);
     runningTarget();
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'first', signal);
 
@@ -2856,6 +2934,7 @@ describe('SessionMessagingService broadcastMessage', () => {
   }
 
   it('fans out to main and the addressable siblings with per-recipient delivery', async () => {
+    expect.assertions(4);
     seedBroadcast();
 
     const result = await harness.service.broadcastMessage('agent-2', 'all hands', signal);
@@ -2873,6 +2952,7 @@ describe('SessionMessagingService broadcastMessage', () => {
   });
 
   it('records each successful delivery in the recipient inbox', async () => {
+    expect.assertions(2);
     seedBroadcast();
 
     await harness.service.broadcastMessage('agent-2', 'all hands', signal);
@@ -2884,6 +2964,7 @@ describe('SessionMessagingService broadcastMessage', () => {
   });
 
   it('returns a per-recipient failure while the others still deliver', async () => {
+    expect.assertions(6);
     seedBroadcast();
     harness.agents.get('agent-2')!.loop.status.mockReturnValue({
       state: 'idle',
@@ -2940,6 +3021,7 @@ describe('SessionMessagingService broadcastMessage', () => {
   });
 
   it('rejects a pre-aborted broadcast without delivering anything', async () => {
+    expect.assertions(3);
     seedBroadcast();
     const controller = new AbortController();
     controller.abort(new Error('stop broadcast'));
@@ -2952,6 +3034,7 @@ describe('SessionMessagingService broadcastMessage', () => {
   });
 
   it('rethrows when the caller aborts in the middle of the fan-out', async () => {
+    expect.assertions(4);
     seedBroadcast();
     const idle = harness.addAgent('agent-4', { profileName: 'coder' });
     harness.metadata['agent-4'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'worker' } };
@@ -2968,6 +3051,7 @@ describe('SessionMessagingService broadcastMessage', () => {
   });
 
   it('returns two empty arrays for an empty roster', async () => {
+    expect.assertions(1);
     const empty = createHarness();
 
     const result = await empty.service.broadcastMessage(MAIN_AGENT_ID, 'nobody here', signal);
@@ -2976,6 +3060,7 @@ describe('SessionMessagingService broadcastMessage', () => {
   });
 
   it('rejects a blank broadcast body', async () => {
+    expect.assertions(2);
     seedBroadcast();
 
     const error = await harness.service
@@ -3009,6 +3094,7 @@ describe('SessionMessagingService roster sync', () => {
   }
 
   it('seeds a baseline on the first sync without notifying', async () => {
+    expect.assertions(1);
     const harness = seedRoster();
 
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
@@ -3017,6 +3103,7 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('notifies existing live agents when a new agent appears', async () => {
+    expect.assertions(2);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.reminderNotify.mockClear();
@@ -3033,6 +3120,7 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('notifies the remaining agents when an agent closes and prunes its inbox and baseline', async () => {
+    expect.assertions(3);
     const harness = seedRoster();
     const closing = harness.agents.get('agent-2')!;
     closing.loop.status.mockReturnValue({
@@ -3058,6 +3146,7 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('notifies on an agents metadata change', async () => {
+    expect.assertions(2);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.reminderNotify.mockClear();
@@ -3080,6 +3169,7 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('ignores a metadata change that does not touch agents', async () => {
+    expect.assertions(1);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.reminderNotify.mockClear();
@@ -3091,6 +3181,7 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('does nothing while the flag is off', async () => {
+    expect.assertions(1);
     const harness = seedRoster(false);
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.reminderNotify.mockClear();
@@ -3103,6 +3194,7 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('skips an agent without a live context', async () => {
+    expect.assertions(2);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.liveContexts.delete(MAIN_AGENT_ID);
@@ -3119,6 +3211,7 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('skips an agent whose reminder runtime is unavailable', async () => {
+    expect.assertions(2);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.setRuntimeUnavailable(true);
@@ -3134,31 +3227,50 @@ describe('SessionMessagingService roster sync', () => {
   });
 
   it('clears the baseline when roster instructions are unavailable', async () => {
+    expect.assertions(2);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.reminderNotify.mockClear();
-    const instructions = vi
-      .spyOn(harness.service, 'rosterInstructions')
-      .mockResolvedValueOnce(undefined);
+    const answers = [true, false];
+    harness.flags.enabled = stubFlag(() => answers.shift() ?? false).enabled;
 
     await expect(harness.service.syncRoster(MAIN_AGENT_ID)).resolves.toBeUndefined();
 
-    expect(instructions).toHaveBeenCalledWith(MAIN_AGENT_ID);
     expect(harness.reminderNotify).not.toHaveBeenCalled();
-    instructions.mockRestore();
   });
 
   it('keeps the sync chain usable after a failed roster read', async () => {
+    expect.assertions(2);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    const instructions = vi
-      .spyOn(harness.service, 'rosterInstructions')
-      .mockRejectedValueOnce(new Error('roster read failed'));
+    setUnexpectedErrorHandler(() => {});
+    try {
+      harness.sessionMetadata.read.mockRejectedValueOnce(new Error('roster read failed'));
 
-    await expect(harness.service.syncRoster(MAIN_AGENT_ID)).rejects.toThrow('roster read failed');
+      await expect(harness.service.syncRoster(MAIN_AGENT_ID)).rejects.toThrow('roster read failed');
+    } finally {
+      resetUnexpectedErrorHandler();
+    }
 
-    instructions.mockRestore();
     await expect(harness.service.syncRoster(MAIN_AGENT_ID)).resolves.toBeUndefined();
+  });
+
+  it('reports a background roster sync failure and still rejects the caller', async () => {
+    expect.assertions(3);
+    const harness = seedRoster();
+    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
+    const reported: unknown[] = [];
+    setUnexpectedErrorHandler((error) => reported.push(error));
+    try {
+      harness.sessionMetadata.read.mockRejectedValueOnce(new Error('roster read failed'));
+
+      await expect(harness.service.syncRoster(MAIN_AGENT_ID)).rejects.toThrow('roster read failed');
+
+      expect(reported).toHaveLength(1);
+      expect((reported[0] as Error).message).toBe('roster read failed');
+    } finally {
+      resetUnexpectedErrorHandler();
+    }
   });
 });
 
@@ -3205,6 +3317,7 @@ describe('ListMessages tool', () => {
   });
 
   it('forwards the caller id and the filter options', async () => {
+    expect.assertions(1);
     const listMessages = vi.fn().mockResolvedValue({ messages: [], pending: 0 });
 
     await run(toolWith(listMessages, 'agent-9'), { from: 'scout', limit: 2 });
@@ -3213,6 +3326,7 @@ describe('ListMessages tool', () => {
   });
 
   it('formats messages with ids, labels, delivery, preview, and pending count', async () => {
+    expect.assertions(1);
     const listMessages = vi.fn().mockResolvedValue({
       messages: [
         {
@@ -3246,6 +3360,7 @@ describe('ListMessages tool', () => {
   });
 
   it('reports an empty inbox with the pending count', async () => {
+    expect.assertions(1);
     const listMessages = vi.fn().mockResolvedValue({ messages: [], pending: 2 });
 
     const result = await run(toolWith(listMessages), {});
@@ -3254,6 +3369,7 @@ describe('ListMessages tool', () => {
   });
 
   it('truncates a long preview at the summary limit', async () => {
+    expect.assertions(1);
     const listMessages = vi.fn().mockResolvedValue({
       messages: [
         {
@@ -3276,6 +3392,7 @@ describe('ListMessages tool', () => {
   });
 
   it('returns an error result when the inbox read fails', async () => {
+    expect.assertions(2);
     const listMessages = vi.fn().mockRejectedValue(new Error('inbox unavailable'));
 
     const result = await run(toolWith(listMessages), {});
@@ -3285,6 +3402,7 @@ describe('ListMessages tool', () => {
   });
 
   it('returns the raw failure text for a non-error rejection', async () => {
+    expect.assertions(2);
     const listMessages = vi.fn().mockRejectedValue('inbox offline');
 
     const result = await run(toolWith(listMessages), {});
@@ -3294,6 +3412,7 @@ describe('ListMessages tool', () => {
   });
 
   it('previews only the first line of a multi-line message', async () => {
+    expect.assertions(2);
     const listMessages = vi.fn().mockResolvedValue({
       messages: [
         {
@@ -3376,6 +3495,7 @@ describe('ReplyMessage tool', () => {
   });
 
   it('forwards the caller id, inbox id, body, and signal', async () => {
+    expect.assertions(1);
     const replyMessage = vi.fn().mockResolvedValue({
       inReplyTo: 'message-3',
       delivery: 'steered',
@@ -3425,6 +3545,7 @@ describe('ReplyMessage tool', () => {
   });
 
   it('appends the truncation note when the reply was truncated', async () => {
+    expect.assertions(1);
     const replyMessage = vi.fn().mockResolvedValue({
       inReplyTo: 'message-3',
       delivery: 'steered',
@@ -3444,6 +3565,7 @@ describe('ReplyMessage tool', () => {
   });
 
   it('returns an error result when the inbox id is unknown', async () => {
+    expect.assertions(2);
     const replyMessage = vi
       .fn()
       .mockRejectedValue(new Error2(ErrorCodes.MESSAGE_NOT_FOUND, 'Unknown inbox message "message-9".'));
@@ -3481,6 +3603,7 @@ describe('ReplyMessage tool', () => {
   });
 
   it('returns the raw failure text for a non-error rejection', async () => {
+    expect.assertions(2);
     const replyMessage = vi.fn().mockRejectedValue('reply channel closed');
 
     const result = await run(toolWith(replyMessage), {
@@ -3534,6 +3657,7 @@ describe('BroadcastMessage tool', () => {
   });
 
   it('forwards the caller id, body, and signal', async () => {
+    expect.assertions(1);
     const broadcastMessage = vi.fn().mockResolvedValue({ delivered: [], failed: [] });
 
     await run(toolWith(broadcastMessage, 'agent-9'), { message: 'hello' });
@@ -3542,6 +3666,7 @@ describe('BroadcastMessage tool', () => {
   });
 
   it('formats delivered and failed recipients', async () => {
+    expect.assertions(1);
     const broadcastMessage = vi.fn().mockResolvedValue({
       delivered: [
         { agentId: 'agent-2', label: 'scout', delivery: 'steered' },
@@ -3570,6 +3695,7 @@ describe('BroadcastMessage tool', () => {
   });
 
   it('reports an empty roster', async () => {
+    expect.assertions(1);
     const broadcastMessage = vi.fn().mockResolvedValue({ delivered: [], failed: [] });
 
     const result = await run(toolWith(broadcastMessage), { message: 'hello' });
@@ -3578,6 +3704,7 @@ describe('BroadcastMessage tool', () => {
   });
 
   it('appends the truncation note for an over-limit body', async () => {
+    expect.assertions(1);
     const broadcastMessage = vi.fn().mockResolvedValue({
       delivered: [{ agentId: 'agent-2', label: 'scout', delivery: 'steered' }],
       failed: [],
@@ -3593,6 +3720,7 @@ describe('BroadcastMessage tool', () => {
   });
 
   it('returns an error result when the broadcast fails', async () => {
+    expect.assertions(2);
     const broadcastMessage = vi
       .fn()
       .mockRejectedValue(new Error2(ErrorCodes.MESSAGE_EMPTY, 'Cannot send an empty message.'));
@@ -3604,6 +3732,7 @@ describe('BroadcastMessage tool', () => {
   });
 
   it('returns the raw failure text for a non-error rejection', async () => {
+    expect.assertions(2);
     const broadcastMessage = vi.fn().mockRejectedValue('broadcast offline');
 
     const result = await run(toolWith(broadcastMessage), { message: 'hello' });
@@ -3676,6 +3805,32 @@ describe('SessionMessagingService fleet control', () => {
     });
   }
 
+  it('stopAgent_ownedTarget_checksOwnershipWithTheCallerAndResolvedId', async () => {
+    expect.assertions(1);
+    addTarget();
+
+    await harness.service.stopAgent(MAIN_AGENT_ID, 'scout');
+
+    expect(harness.subagents.assertOwned).toHaveBeenCalledWith(MAIN_AGENT_ID, 'agent-2');
+  });
+
+  it('stopAgent_targetNotOwned_preservesTheOwnershipErrorAndDoesNotStop', async () => {
+    expect.assertions(3);
+    const sub = addTarget();
+    setStatus('agent-2', 'running', [7]);
+    harness.subagents.assertOwned.mockRejectedValueOnce(
+      new Error2(ErrorCodes.AGENT_NOT_OWNED, 'Agent "agent-2" is not owned by "main".'),
+    );
+
+    const failure = await harness.service
+      .stopAgent(MAIN_AGENT_ID, 'scout')
+      .catch((error: unknown) => error);
+
+    expect(isMessagingError(failure, ErrorCodes.AGENT_NOT_OWNED)).toBe(true);
+    expect((failure as Error).message).toBe('Agent "agent-2" is not owned by "main".');
+    expect(sub.loop.cancel).not.toHaveBeenCalled();
+  });
+
   it.each(['agent-2', 'scout'])(
     'stopAgent_resolves_%s_target_returnsScoutLabelWithoutCancel',
     async (address) => {
@@ -3694,6 +3849,7 @@ describe('SessionMessagingService fleet control', () => {
   );
 
   it('stopAgent_runningTarget_cancelsEveryPendingTurnWithAbortError', async () => {
+    expect.assertions(4);
     const sub = addTarget();
     setStatus('agent-2', 'running', [7, 8]);
     const reason = expect.objectContaining({
@@ -3733,6 +3889,7 @@ describe('SessionMessagingService fleet control', () => {
   );
 
   it('stopAgent_absentHandle_returnsNotStoppedWithoutMaterializing', async () => {
+    expect.assertions(2);
     harness.metadata['agent-7'] = {
       type: 'sub',
       labels: { parentAgentId: 'main', name: 'ghost' },
@@ -3750,6 +3907,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('stopAgent_preAbortedSignal_rejectsBeforeResolving', async () => {
+    expect.assertions(3);
     const sub = addTarget();
     const controller = new AbortController();
     controller.abort(new Error('stop now'));
@@ -3764,6 +3922,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('stopAgent_inFlightDelivery_abortsTheRunControllerAndSettlesTheSend', async () => {
+    expect.assertions(6);
     const sub = addTarget();
     const assigned = createControlledPromise<StepAssignment>();
     sub.loop.enqueue.mockImplementationOnce(() => ({
@@ -3796,6 +3955,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('stopAgent_abortErrorLeavesTheTargetResumable_deliversResumed', async () => {
+    expect.assertions(3);
     const sub = addTarget();
     setStatus('agent-2', 'running', [1]);
     await harness.service.stopAgent(MAIN_AGENT_ID, 'scout');
@@ -3854,6 +4014,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_runningTarget_registersAFinishStepHookThatStopsTheTurn', async () => {
+    expect.assertions(4);
     const sub = addTarget();
     setStatus('agent-2', 'running');
 
@@ -3871,6 +4032,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_idleTarget_returnsNotInterruptedWithoutRegistering', async () => {
+    expect.assertions(2);
     const sub = addTarget();
 
     const result = await harness.service.interruptAgent(MAIN_AGENT_ID, 'scout');
@@ -3880,6 +4042,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_absentHandle_returnsNotInterruptedWithoutMaterializing', async () => {
+    expect.assertions(2);
     harness.metadata['agent-7'] = {
       type: 'sub',
       labels: { parentAgentId: 'main', name: 'ghost' },
@@ -3892,6 +4055,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_preAbortedSignal_rejectsBeforeResolving', async () => {
+    expect.assertions(3);
     const sub = addTarget();
     const controller = new AbortController();
     controller.abort(new Error('stop now'));
@@ -3906,6 +4070,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_turnEnded_disposesThePendingHook', async () => {
+    expect.assertions(2);
     const sub = addTarget();
     setStatus('agent-2', 'running');
     await harness.service.interruptAgent(MAIN_AGENT_ID, 'scout');
@@ -3918,6 +4083,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_repeatedCall_disposesThePreviousHook', async () => {
+    expect.assertions(5);
     const sub = addTarget();
     setStatus('agent-2', 'running');
     await harness.service.interruptAgent(MAIN_AGENT_ID, 'scout');
@@ -3941,6 +4107,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_agentClosed_disposesThePendingHook', async () => {
+    expect.assertions(1);
     const sub = addTarget();
     setStatus('agent-2', 'running');
     await harness.service.interruptAgent(MAIN_AGENT_ID, 'scout');
@@ -3952,6 +4119,7 @@ describe('SessionMessagingService fleet control', () => {
   });
 
   it('interruptAgent_serviceDisposed_disposesThePendingHook', async () => {
+    expect.assertions(1);
     const sub = addTarget();
     setStatus('agent-2', 'running');
     await harness.service.interruptAgent(MAIN_AGENT_ID, 'scout');
@@ -3964,10 +4132,7 @@ describe('SessionMessagingService fleet control', () => {
 });
 
 describe('StopAgent tool', () => {
-  function toolWith(
-    stopAgent: ReturnType<typeof vi.fn>,
-    options: { enabled?: boolean } = {},
-  ): StopAgentTool {
+  function toolWith(stopAgent: ReturnType<typeof vi.fn>): StopAgentTool {
     const ix = new TestInstantiationService();
     ix.stub(ISessionMessagingService, {
       _serviceBrand: undefined,
@@ -3978,7 +4143,6 @@ describe('StopAgent tool', () => {
       IAgentScopeContext,
       makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
     );
-    ix.stub(IFlagService, stubFlag(options.enabled ?? true));
     return ix.createInstance(StopAgentTool);
   }
 
@@ -4013,7 +4177,19 @@ describe('StopAgent tool', () => {
     });
   });
 
+  it('stopAgentTool_schema_acceptsAReasonAtTheLimitAndRejectsOneOver', () => {
+    const atLimit = 'a'.repeat(MAX_STOP_REASON_CHARS);
+
+    expect(StopAgentInputSchema.safeParse({ agent_id: 'agent-2', reason: atLimit }).success).toBe(
+      true,
+    );
+    expect(
+      StopAgentInputSchema.safeParse({ agent_id: 'agent-2', reason: `${atLimit}a` }).success,
+    ).toBe(false);
+  });
+
   it('stopAgentTool_execution_callsTheServiceWithCallerReasonAndSignal', async () => {
+    expect.assertions(3);
     const stopAgent = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       label: 'scout',
@@ -4041,6 +4217,7 @@ describe('StopAgent tool', () => {
   });
 
   it('stopAgentTool_execution_withoutReason_passesUndefinedReason', async () => {
+    expect.assertions(1);
     const stopAgent = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       label: 'scout',
@@ -4054,6 +4231,7 @@ describe('StopAgent tool', () => {
   });
 
   it('stopAgentTool_execution_formatsAnAlreadyIdleTarget', async () => {
+    expect.assertions(1);
     const stopAgent = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       label: 'scout',
@@ -4075,19 +4253,8 @@ describe('StopAgent tool', () => {
     );
   });
 
-  it('stopAgentTool_flagOff_returnsTheDisabledMessageWithoutCallingTheService', async () => {
-    const stopAgent = vi.fn();
-
-    const result = await execute(toolWith(stopAgent, { enabled: false }), { agent_id: 'agent-2' });
-
-    expect(result.isError).toBe(true);
-    expect(result.output).toBe(
-      'StopAgent is disabled: the agent_fleet_control experimental flag is off.',
-    );
-    expect(stopAgent).not.toHaveBeenCalled();
-  });
-
   it('stopAgentTool_serviceError_surfacesTheMessage', async () => {
+    expect.assertions(2);
     const stopAgent = vi
       .fn()
       .mockRejectedValue(new Error2(ErrorCodes.STOP_SELF, 'An agent cannot stop itself.'));
@@ -4099,6 +4266,7 @@ describe('StopAgent tool', () => {
   });
 
   it('stopAgentTool_nonErrorRejection_stringifiesTheValue', async () => {
+    expect.assertions(2);
     const stopAgent = vi.fn().mockRejectedValue('plain failure');
 
     const result = await execute(toolWith(stopAgent), { agent_id: 'agent-2' });
@@ -4109,10 +4277,7 @@ describe('StopAgent tool', () => {
 });
 
 describe('InterruptAgent tool', () => {
-  function toolWith(
-    interruptAgent: ReturnType<typeof vi.fn>,
-    options: { enabled?: boolean } = {},
-  ): InterruptAgentTool {
+  function toolWith(interruptAgent: ReturnType<typeof vi.fn>): InterruptAgentTool {
     const ix = new TestInstantiationService();
     ix.stub(ISessionMessagingService, {
       _serviceBrand: undefined,
@@ -4123,7 +4288,6 @@ describe('InterruptAgent tool', () => {
       IAgentScopeContext,
       makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
     );
-    ix.stub(IFlagService, stubFlag(options.enabled ?? true));
     return ix.createInstance(InterruptAgentTool);
   }
 
@@ -4152,6 +4316,7 @@ describe('InterruptAgent tool', () => {
   });
 
   it('interruptAgentTool_execution_callsTheServiceWithCallerAndSignal', async () => {
+    expect.assertions(3);
     const interruptAgent = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       label: 'scout',
@@ -4174,6 +4339,7 @@ describe('InterruptAgent tool', () => {
   });
 
   it('interruptAgentTool_execution_formatsAnIdleTarget', async () => {
+    expect.assertions(1);
     const interruptAgent = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       label: 'scout',
@@ -4193,21 +4359,8 @@ describe('InterruptAgent tool', () => {
     );
   });
 
-  it('interruptAgentTool_flagOff_returnsTheDisabledMessageWithoutCallingTheService', async () => {
-    const interruptAgent = vi.fn();
-
-    const result = await execute(toolWith(interruptAgent, { enabled: false }), {
-      agent_id: 'agent-2',
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.output).toBe(
-      'InterruptAgent is disabled: the agent_fleet_control experimental flag is off.',
-    );
-    expect(interruptAgent).not.toHaveBeenCalled();
-  });
-
   it('interruptAgentTool_serviceError_surfacesTheMessage', async () => {
+    expect.assertions(2);
     const interruptAgent = vi
       .fn()
       .mockRejectedValue(
@@ -4221,6 +4374,7 @@ describe('InterruptAgent tool', () => {
   });
 
   it('interruptAgentTool_nonErrorRejection_stringifiesTheValue', async () => {
+    expect.assertions(2);
     const interruptAgent = vi.fn().mockRejectedValue('plain failure');
 
     const result = await execute(toolWith(interruptAgent), { agent_id: 'agent-2' });
@@ -4231,10 +4385,7 @@ describe('InterruptAgent tool', () => {
 });
 
 describe('DismissAgents tool', () => {
-  function toolWith(
-    dismissAgents: ReturnType<typeof vi.fn>,
-    options: { enabled?: boolean } = {},
-  ): DismissAgentsTool {
+  function toolWith(dismissAgents: ReturnType<typeof vi.fn>): DismissAgentsTool {
     const ix = new TestInstantiationService();
     ix.stub(ISessionSubagentService, {
       _serviceBrand: undefined,
@@ -4246,7 +4397,6 @@ describe('DismissAgents tool', () => {
       IAgentScopeContext,
       makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
     );
-    ix.stub(IFlagService, stubFlag(options.enabled ?? true));
     return ix.createInstance(DismissAgentsTool);
   }
 
@@ -4318,6 +4468,7 @@ describe('DismissAgents tool', () => {
   });
 
   it('dismissAgentsTool_execution_dismissesIdsAndFormatsEveryRow', async () => {
+    expect.assertions(3);
     const dismissAgents = vi.fn().mockResolvedValue({
       dismissed: [
         { agentId: 'agent-2', name: 'scout', ghost: false },
@@ -4344,6 +4495,7 @@ describe('DismissAgents tool', () => {
   });
 
   it('dismissAgentsTool_execution_passesNamesOnly', async () => {
+    expect.assertions(1);
     const dismissAgents = vi.fn().mockResolvedValue({
       dismissed: [{ agentId: 'agent-2', name: 'scout', ghost: false }],
     });
@@ -4354,6 +4506,7 @@ describe('DismissAgents tool', () => {
   });
 
   it('dismissAgentsTool_execution_passesAllOnly', async () => {
+    expect.assertions(1);
     const dismissAgents = vi.fn().mockResolvedValue({ dismissed: [] });
 
     await execute(toolWith(dismissAgents), { all: true });
@@ -4362,6 +4515,7 @@ describe('DismissAgents tool', () => {
   });
 
   it('dismissAgentsTool_execution_reportsAnEmptyDismissal', async () => {
+    expect.assertions(1);
     const dismissAgents = vi.fn().mockResolvedValue({ dismissed: [] });
 
     const result = await execute(toolWith(dismissAgents), { ids: ['agent-2'] });
@@ -4369,21 +4523,8 @@ describe('DismissAgents tool', () => {
     expect(result.output).toBe('dismissed: 0');
   });
 
-  it('dismissAgentsTool_flagOff_returnsTheDisabledMessageWithoutCallingTheService', async () => {
-    const dismissAgents = vi.fn();
-
-    const result = await execute(toolWith(dismissAgents, { enabled: false }), {
-      ids: ['agent-2'],
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.output).toBe(
-      'DismissAgents is disabled: the agent_fleet_control experimental flag is off.',
-    );
-    expect(dismissAgents).not.toHaveBeenCalled();
-  });
-
   it('dismissAgentsTool_serviceError_surfacesTheMessage', async () => {
+    expect.assertions(2);
     const dismissAgents = vi
       .fn()
       .mockRejectedValue(
@@ -4397,6 +4538,7 @@ describe('DismissAgents tool', () => {
   });
 
   it('dismissAgentsTool_nonErrorRejection_stringifiesTheValue', async () => {
+    expect.assertions(2);
     const dismissAgents = vi.fn().mockRejectedValue('plain failure');
 
     const result = await execute(toolWith(dismissAgents), { ids: ['agent-2'] });
@@ -4407,10 +4549,7 @@ describe('DismissAgents tool', () => {
 });
 
 describe('TagAgent tool', () => {
-  function toolWith(
-    setAgentTags: ReturnType<typeof vi.fn>,
-    options: { enabled?: boolean } = {},
-  ): TagAgentTool {
+  function toolWith(setAgentTags: ReturnType<typeof vi.fn>): TagAgentTool {
     const ix = new TestInstantiationService();
     ix.stub(ISessionSubagentService, {
       _serviceBrand: undefined,
@@ -4422,7 +4561,6 @@ describe('TagAgent tool', () => {
       IAgentScopeContext,
       makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
     );
-    ix.stub(IFlagService, stubFlag(options.enabled ?? true));
     return ix.createInstance(TagAgentTool);
   }
 
@@ -4492,6 +4630,7 @@ describe('TagAgent tool', () => {
   });
 
   it('tagAgentTool_execution_setsTagsAndFormatsThem', async () => {
+    expect.assertions(3);
     const setAgentTags = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       name: 'scout',
@@ -4508,6 +4647,7 @@ describe('TagAgent tool', () => {
   });
 
   it('tagAgentTool_execution_clearsTagsAndFormatsNone', async () => {
+    expect.assertions(2);
     const setAgentTags = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       name: 'scout',
@@ -4520,22 +4660,8 @@ describe('TagAgent tool', () => {
     expect(result.output).toBe(['agent_id: agent-2', 'name: scout', 'tags: (none)'].join('\n'));
   });
 
-  it('tagAgentTool_flagOff_returnsTheDisabledMessageWithoutCallingTheService', async () => {
-    const setAgentTags = vi.fn();
-
-    const result = await execute(toolWith(setAgentTags, { enabled: false }), {
-      agent_id: 'agent-2',
-      tags: ['a'],
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.output).toBe(
-      'TagAgent is disabled: the agent_fleet_control experimental flag is off.',
-    );
-    expect(setAgentTags).not.toHaveBeenCalled();
-  });
-
   it('tagAgentTool_serviceError_surfacesTheMessage', async () => {
+    expect.assertions(2);
     const setAgentTags = vi
       .fn()
       .mockRejectedValue(
@@ -4549,6 +4675,7 @@ describe('TagAgent tool', () => {
   });
 
   it('tagAgentTool_nonErrorRejection_stringifiesTheValue', async () => {
+    expect.assertions(2);
     const setAgentTags = vi.fn().mockRejectedValue('plain failure');
 
     const result = await execute(toolWith(setAgentTags), { agent_id: 'agent-2', tags: ['a'] });
@@ -4559,10 +4686,7 @@ describe('TagAgent tool', () => {
 });
 
 describe('RenameAgent tool', () => {
-  function toolWith(
-    renameAgent: ReturnType<typeof vi.fn>,
-    options: { enabled?: boolean } = {},
-  ): RenameAgentTool {
+  function toolWith(renameAgent: ReturnType<typeof vi.fn>): RenameAgentTool {
     const ix = new TestInstantiationService();
     ix.stub(ISessionSubagentService, {
       _serviceBrand: undefined,
@@ -4574,7 +4698,6 @@ describe('RenameAgent tool', () => {
       IAgentScopeContext,
       makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
     );
-    ix.stub(IFlagService, stubFlag(options.enabled ?? true));
     return ix.createInstance(RenameAgentTool);
   }
 
@@ -4611,6 +4734,7 @@ describe('RenameAgent tool', () => {
   });
 
   it('renameAgentTool_execution_renamesAndFormatsTheExistingTags', async () => {
+    expect.assertions(3);
     const renameAgent = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       name: 'scout',
@@ -4627,6 +4751,7 @@ describe('RenameAgent tool', () => {
   });
 
   it('renameAgentTool_execution_omitsTheTagLineWhenTheAgentHasNoTags', async () => {
+    expect.assertions(1);
     const renameAgent = vi.fn().mockResolvedValue({
       agentId: 'agent-2',
       name: 'scout',
@@ -4638,22 +4763,8 @@ describe('RenameAgent tool', () => {
     expect(result.output).toBe(['agent_id: agent-2', 'name: scout'].join('\n'));
   });
 
-  it('renameAgentTool_flagOff_returnsTheDisabledMessageWithoutCallingTheService', async () => {
-    const renameAgent = vi.fn();
-
-    const result = await execute(toolWith(renameAgent, { enabled: false }), {
-      agent_id: 'agent-2',
-      name: 'scout',
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.output).toBe(
-      'RenameAgent is disabled: the agent_fleet_control experimental flag is off.',
-    );
-    expect(renameAgent).not.toHaveBeenCalled();
-  });
-
   it('renameAgentTool_serviceError_surfacesTheMessage', async () => {
+    expect.assertions(2);
     const renameAgent = vi
       .fn()
       .mockRejectedValue(
@@ -4667,6 +4778,7 @@ describe('RenameAgent tool', () => {
   });
 
   it('renameAgentTool_nonErrorRejection_stringifiesTheValue', async () => {
+    expect.assertions(2);
     const renameAgent = vi.fn().mockRejectedValue('plain failure');
 
     const result = await execute(toolWith(renameAgent), { agent_id: 'agent-2', name: 'scout' });

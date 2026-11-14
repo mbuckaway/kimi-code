@@ -252,6 +252,18 @@ describe('parseAgentFileText', () => {
 
     expect(def.extends).toBe('coder');
   });
+
+  it('types extends as a required string when requireExtends is set', () => {
+    const def = parseAgentFileText({
+      path: '/tmp/agents/reviewer.md',
+      source: 'explicit',
+      text: '---\nname: reviewer\ndescription: d\nextends: coder\n---\n\nbody\n',
+      requireExtends: true,
+    });
+    const declaredBase: string = def.extends;
+
+    expect(declaredBase).toBe('coder');
+  });
 });
 
 describe('agentProfileFromFile', () => {

@@ -197,6 +197,7 @@ describe('AgentTaskService', () => {
   });
 
   it('capacity reports zero running tasks and no max when the task config is absent', () => {
+    expect.assertions(1);
     const get = vi.fn(() => undefined);
     ix.stub(IConfigService, { get: get as IConfigService['get'] });
     const svc = ix.get(IAgentTaskService);
@@ -205,6 +206,7 @@ describe('AgentTaskService', () => {
   });
 
   it('capacity reports the configured maxRunningTasks for the task section', () => {
+    expect.assertions(1);
     const get = vi.fn((domain: string) =>
       domain === TASK_SECTION ? { maxRunningTasks: 2 } : undefined,
     );
@@ -215,6 +217,7 @@ describe('AgentTaskService', () => {
   });
 
   it('capacity counts a detached task while it runs and drops it once stopped', async () => {
+    expect.assertions(2);
     const get = vi.fn((domain: string) =>
       domain === TASK_SECTION ? { maxRunningTasks: 2 } : undefined,
     );
@@ -230,6 +233,7 @@ describe('AgentTaskService', () => {
   });
 
   it('capacity does not count a foreground task', () => {
+    expect.assertions(1);
     const get = vi.fn((domain: string) =>
       domain === TASK_SECTION ? { maxRunningTasks: 2 } : undefined,
     );

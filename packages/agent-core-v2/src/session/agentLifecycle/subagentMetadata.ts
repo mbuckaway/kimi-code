@@ -45,6 +45,19 @@ export function subagentSwarmItem(meta: AgentMeta | undefined): string | undefin
   return firstNonEmpty(meta.labels?.['swarmItem'], meta.swarmItem);
 }
 
+export function tagsOf(meta: AgentMeta): readonly string[] {
+  const raw = meta.labels?.['tags'];
+  if (raw === undefined) return [];
+  return [
+    ...new Set(
+      raw
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0),
+    ),
+  ];
+}
+
 function firstNonEmpty(...values: readonly (string | undefined)[]): string | undefined {
   return values.find((value) => value !== undefined && value.length > 0);
 }

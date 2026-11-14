@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { createDecorator } from '#/_base/di/instantiation';
+import { MAX_STOP_REASON_CHARS } from '#/agent/task/types';
 import { type AgentTool } from '#/tool/toolContract';
 
 export const StopAgentsInputSchema = z
@@ -23,7 +24,12 @@ export const StopAgentsInputSchema = z
       .boolean()
       .optional()
       .describe('Also stop foreground tasks. Defaults to false.'),
-    reason: z.string().optional().describe('Short reason recorded when each task is stopped.'),
+    reason: z
+      .string()
+      .trim()
+      .max(MAX_STOP_REASON_CHARS)
+      .optional()
+      .describe('Short reason recorded when each task is stopped.'),
   })
   .refine(
     (value) =>

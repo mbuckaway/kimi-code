@@ -5,6 +5,11 @@ import { registerAgentToolService } from '#/agent/toolRegistry/toolContribution'
 
 import { IAgentTaskService } from '#/agent/task/task';
 import { TERMINAL_STATUSES } from '#/agent/task/types';
+import {
+  applyStop,
+  resolveStopReason,
+  terminalStopReason,
+} from '#/agent/tools/task/taskStopOps';
 import { ITaskStopTool, TaskStopInputSchema, type TaskStopInput } from './task-stop';
 import TASK_STOP_DESCRIPTION from './task-stop.md?raw';
 
@@ -27,24 +32,19 @@ export class TaskStopTool implements ITaskStopTool {
           return { isError: true, output: `Task not found: ${args.task_id}` };
         }
 
-        const trimmedReason = args.reason?.trim();
-        const reason =
-          trimmedReason === undefined || trimmedReason.length === 0
-            ? 'Stopped by TaskStop'
-            : trimmedReason;
+        const reason = resolveStopReason(args.reason, 'Stopped by TaskStop');
 
         if (TERMINAL_STATUSES.has(info.status)) {
           return {
             output:
               `task_id: ${info.taskId}\n` +
               `status: ${info.status}\n` +
-              `reason: ${terminalStopReason(info.stopReason)}`,
+              `reason: ${terminalStopReason(info, 'Task already in terminal state')}`,
             isError: false,
           };
         }
 
-        await this.tasks.suppressTerminalNotification(args.task_id);
-        const result = await this.tasks.stop(args.task_id, reason);
+        const result = await applyStop(this.tasks, info, reason);
         if (!result) {
           return { isError: true, output: `Failed to stop task: ${args.task_id}` };
         }
@@ -62,8 +62,3 @@ export class TaskStopTool implements ITaskStopTool {
 }
 
 registerAgentToolService(ITaskStopTool, TaskStopTool, { name: 'TaskStop', domain: 'agentTask' });
-
-function terminalStopReason(reason: string | undefined): string {
-  const trimmed = reason?.trim();
-  return trimmed === undefined || trimmed.length === 0 ? 'Task already in terminal state' : trimmed;
-}

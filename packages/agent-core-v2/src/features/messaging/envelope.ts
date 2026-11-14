@@ -1,14 +1,12 @@
 import type { AgentMessageOrigin } from '#/agent/contextMemory/types';
 
-import type { AgentInboxMessage, AgentRosterEntry } from './messaging';
+import type { AgentRosterEntry } from './messaging';
 
 export const MAX_AGENT_MESSAGE_CHARS = 100_000;
 
 export const MAX_BUFFERED_AGENT_MESSAGES = 50;
 
 export const MAX_RECENT_SENDS = 100;
-
-export const MAX_INBOX_MESSAGES = 100;
 
 export const DEFAULT_INBOX_LIMIT = 20;
 
@@ -156,17 +154,4 @@ export function formatRosterChangeNotice(previous: string, next: string): string
 
 function rosterLines(text: string): readonly string[] {
   return text.split('\n').filter((line) => line.startsWith('- '));
-}
-
-export function appendInboxEntry(
-  inbox: Map<string, AgentInboxMessage[]>,
-  agentId: string,
-  entry: AgentInboxMessage,
-): void {
-  const entries = inbox.get(agentId) ?? [];
-  entries.push(entry);
-  if (entries.length > MAX_INBOX_MESSAGES) {
-    entries.splice(0, entries.length - MAX_INBOX_MESSAGES);
-  }
-  inbox.set(agentId, entries);
 }

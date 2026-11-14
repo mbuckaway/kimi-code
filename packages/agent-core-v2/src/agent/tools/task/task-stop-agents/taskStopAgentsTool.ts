@@ -8,8 +8,11 @@ import { agentTaskFor } from '#/agent/task/agentTaskLookup';
 import { TERMINAL_STATUSES, type AgentTaskKind } from '#/agent/task/types';
 import { formatBackgroundCapacity } from '#/agent/task/agentHealth';
 import { formatPlainObject } from '#/agent/task/tools/format';
-import { IFlagService } from '#/app/flag/flag';
-import { AGENT_FLEET_CONTROL_FLAG_ID } from '#/features/messaging/flag';
+import {
+  applyStop,
+  resolveStopReason,
+  terminalStopReason,
+} from '#/agent/tools/task/taskStopOps';
 import { IStopAgentsTool, StopAgentsInputSchema, type StopAgentsInput } from './task-stop-agents';
 import STOP_AGENTS_DESCRIPTION from './task-stop-agents.md?raw';
 
@@ -32,8 +35,6 @@ interface StopAgentsRow {
 const DEFAULT_STOP_REASON = 'Stopped by StopAgents';
 const FOREGROUND_SKIPPED_REASON =
   'Foreground task skipped; set include_foreground=true to stop it.';
-const DISABLED_MESSAGE =
-  'StopAgents is disabled: the agent_fleet_control experimental flag is off.';
 
 function stopTargetLabel(args: StopAgentsInput): string {
   if (args.task_ids !== undefined) {
@@ -43,16 +44,6 @@ function stopTargetLabel(args: StopAgentsInput): string {
     return `${String(args.agent_ids.length)} agent${args.agent_ids.length === 1 ? '' : 's'}`;
   }
   return 'all background tasks';
-}
-
-function resolveStopReason(reason: string | undefined): string {
-  const trimmed = reason?.trim();
-  return trimmed === undefined || trimmed.length === 0 ? DEFAULT_STOP_REASON : trimmed;
-}
-
-function terminalReason(info: AgentTaskInfo): string {
-  const stored = info.stopReason?.trim();
-  return stored === undefined || stored.length === 0 ? `Task already ${info.status}` : stored;
 }
 
 function outcomeRow(
@@ -81,10 +72,7 @@ export class StopAgentsTool implements IStopAgentsTool {
   readonly description: string = STOP_AGENTS_DESCRIPTION;
   readonly parameters: Record<string, unknown> = toInputJsonSchema(StopAgentsInputSchema);
 
-  constructor(
-    @IAgentTaskService private readonly tasks: IAgentTaskService,
-    @IFlagService private readonly flags: IFlagService,
-  ) {}
+  constructor(@IAgentTaskService private readonly tasks: IAgentTaskService) {}
 
   resolveExecution(args: StopAgentsInput): ToolExecution {
     const subject = args.task_ids?.join(',') ?? args.agent_ids?.join(',') ?? 'all';
@@ -98,11 +86,7 @@ export class StopAgentsTool implements IStopAgentsTool {
   }
 
   private async execute(args: StopAgentsInput): Promise<ExecutableToolResult> {
-    if (!this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID)) {
-      return { isError: true, output: DISABLED_MESSAGE };
-    }
-
-    const reason = resolveStopReason(args.reason);
+    const reason = resolveStopReason(args.reason, DEFAULT_STOP_REASON);
     const requested = this.resolveRequested(args);
     const includeForeground = args.include_foreground === true;
     const rows: StopAgentsRow[] = [];
@@ -115,15 +99,20 @@ export class StopAgentsTool implements IStopAgentsTool {
         continue;
       }
       if (TERMINAL_STATUSES.has(info.status)) {
-        rows.push(outcomeRow(info, 'already_terminal', terminalReason(info)));
+        rows.push(
+          outcomeRow(
+            info,
+            'already_terminal',
+            terminalStopReason(info, `Task already ${info.status}`),
+          ),
+        );
         continue;
       }
       if (!includeForeground && info.detached === false) {
         rows.push(outcomeRow(info, 'skipped_foreground', FOREGROUND_SKIPPED_REASON));
         continue;
       }
-      await this.tasks.suppressTerminalNotification(info.taskId);
-      await this.tasks.stop(info.taskId, reason);
+      await applyStop(this.tasks, info, reason);
       stopped += 1;
       rows.push(outcomeRow(info, 'stopped', reason));
     }

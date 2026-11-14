@@ -365,7 +365,7 @@ describe('AgentPlanService plan-guard listener', () => {
     );
 
     it.each([
-      ['TagAgent', { agent_id: 'agent-2', tag: 'reviewer' }],
+      ['TagAgent', { agent_id: 'agent-2', tags: ['reviewer'] }],
       ['RenameAgent', { agent_id: 'agent-2', name: 'planner' }],
     ] as const)(
       'planGuard_%s_keepsRosterEditsAvailableWhilePlanModeIsActive',

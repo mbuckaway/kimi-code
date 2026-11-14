@@ -96,6 +96,8 @@ export interface ISessionSubagentService {
     name: string,
   ): Promise<AgentLabelUpdate>;
 
+  assertOwned(callerAgentId: string, target: string): Promise<void>;
+
   notifyAgentTaskStopped(context: AgentTaskStopHookContext): void;
 }
 

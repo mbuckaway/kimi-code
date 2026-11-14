@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { BugIndicatingError } from '#/errors';
 import {
   deriveAgentHealth,
   formatBackgroundCapacity,
@@ -7,6 +8,7 @@ import {
 } from '#/agent/task/agentHealth';
 import { agentTaskFor } from '#/agent/task/agentTaskLookup';
 import type { AgentTaskInfo } from '#/agent/task/task';
+import type { AgentTaskStatus } from '#/agent/task/types';
 import type { SubagentTaskInfo } from '#/agent/tools/agent/subagent-task';
 import type { ProcessTaskInfo } from '#/agent/tools/os/bash/process-task';
 
@@ -134,15 +136,38 @@ describe('agentTaskFor', () => {
     );
   });
 
-  it('treats a lost task as terminal', () => {
+  it('prefers a later-ended completed task over a lost task', () => {
     const lost = agentTask({
       taskId: 'agent-lost0001',
       status: 'lost',
       startedAt: 0,
       endedAt: 10,
     });
+    const completedLater = agentTask({
+      taskId: 'agent-cmp00002',
+      status: 'completed',
+      startedAt: 0,
+      endedAt: 20,
+    });
 
-    expect(agentTaskFor([lost], 'agent-1')).toBe(lost);
+    expect(agentTaskFor([lost, completedLater], 'agent-1')).toBe(completedLater);
+  });
+
+  it('keeps the first task when terminal endedAt values tie', () => {
+    const first = agentTask({
+      taskId: 'agent-tie00001',
+      status: 'completed',
+      startedAt: 0,
+      endedAt: 10,
+    });
+    const second = agentTask({
+      taskId: 'agent-tie00002',
+      status: 'failed',
+      startedAt: 0,
+      endedAt: 10,
+    });
+
+    expect(agentTaskFor([first, second], 'agent-1')).toBe(first);
   });
 
   it('ignores process tasks and other agents', () => {
@@ -277,6 +302,15 @@ const healthCases: HealthCase[] = [
 describe('deriveAgentHealth', () => {
   it.each(healthCases)('$name', ({ hasHandle, loopState, task, expected }) => {
     expect(deriveAgentHealth({ hasHandle, loopState, task })).toBe(expected);
+  });
+
+  it('throws a bug-indicating error for a task status outside the union', () => {
+    const task = agentTask({ status: 'bogus' as AgentTaskStatus });
+    const act = (): AgentHealthState =>
+      deriveAgentHealth({ hasHandle: true, loopState: 'idle', task });
+
+    expect(act).toThrow(BugIndicatingError);
+    expect(act).toThrow(/Unexpected task status: bogus/);
   });
 });
 
