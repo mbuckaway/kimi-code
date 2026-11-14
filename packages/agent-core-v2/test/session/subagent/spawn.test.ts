@@ -8,6 +8,7 @@ import { LifecycleScope } from '#/app/scopes';
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
+import { getContributedFlags } from '#/app/flag/flagRegistry';
 import { ILogService } from '#/_base/log/log';
 import {
   normalizeAgentProfile,
@@ -1901,6 +1902,20 @@ describe('SessionSubagentService planSpawn and spawn', () => {
         thinking: 'high',
         fork: false,
       });
+    });
+  });
+});
+
+describe('agent persona flag', () => {
+  it('agentPersonaFlag_registeredDefaultsOn', () => {
+    const flag = getContributedFlags().find((entry) => entry.id === AGENT_PERSONA_FLAG_ID);
+
+    expect(flag).toMatchObject({
+      id: 'agent_persona',
+      title: 'Agent persona',
+      env: 'KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA',
+      default: true,
+      surface: 'core',
     });
   });
 });

@@ -336,6 +336,7 @@ describe('KimiHarness config API', () => {
   });
 
   it('returns experimental feature metadata through the harness', async () => {
+    expect.assertions(1);
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
     const homeDir = await makeTempDir();
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
@@ -349,8 +350,8 @@ describe('KimiHarness config API', () => {
           'Keep MCP tool schemas out of the immutable top-level tools[]; the model loads them on demand via the select_tools tool. Only takes effect on models whose capability catalog declares dynamically loaded tools.',
         surface: 'core',
         env: 'KIMI_CODE_EXPERIMENTAL_TOOL_SELECT',
-        defaultEnabled: false,
-        enabled: false,
+        defaultEnabled: true,
+        enabled: true,
         source: 'default',
       },
       {
@@ -387,6 +388,22 @@ describe('KimiHarness config API', () => {
         source: 'default',
       },
     ]);
+  });
+
+  it('reports a config-disabled flag through the harness', async () => {
+    expect.assertions(1);
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
+    const homeDir = await makeTempDir();
+    const configPath = join(homeDir, 'config.toml');
+    await writeFile(configPath, '[experimental]\ntool-select = false\n', 'utf-8');
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    const features = await harness.getExperimentalFeatures();
+    expect(features.find((feature) => feature.id === 'tool-select')).toMatchObject({
+      defaultEnabled: true,
+      enabled: false,
+      source: 'config',
+    });
   });
 
   it('can create the default config scaffold without selecting a model', async () => {

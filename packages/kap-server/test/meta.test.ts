@@ -60,37 +60,41 @@ describe('/api/v1/meta experimental_flags', () => {
     return body.data.experimental_flags as Record<string, boolean>;
   }
 
-  it('reports registered flags as off by default', async () => {
+  it('reports registered flags as on by default', async () => {
+    expect.assertions(4);
+    const base = await boot();
+    const flags = await getMetaFlags(base);
+    expect(flags['tool-select']).toBe(true);
+  });
+
+  it('reports a config-disabled flag from the very first response', async () => {
+    expect.assertions(4);
+    const base = await boot('[experimental]\ntool-select = false\n');
+    const flags = await getMetaFlags(base);
+    expect(flags['tool-select']).toBe(false);
+  });
+
+  it('reports a flag disabled via its KIMI_CODE_EXPERIMENTAL_* env var', async () => {
+    expect.assertions(4);
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_TOOL_SELECT', '0');
     const base = await boot();
     const flags = await getMetaFlags(base);
     expect(flags['tool-select']).toBe(false);
   });
 
-  it('reports a config-enabled flag from the very first response', async () => {
-    const base = await boot('[experimental]\ntool-select = true\n');
-    const flags = await getMetaFlags(base);
-    expect(flags['tool-select']).toBe(true);
-  });
-
-  it('reflects a flag enabled via its KIMI_CODE_EXPERIMENTAL_* env var', async () => {
-    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_TOOL_SELECT', '1');
+  it('flips live when the [experimental] config section disables it via POST /config', async () => {
+    expect.assertions(9);
     const base = await boot();
-    const flags = await getMetaFlags(base);
-    expect(flags['tool-select']).toBe(true);
-  });
-
-  it('flips live when the [experimental] config section is written via POST /config', async () => {
-    const base = await boot();
-    expect((await getMetaFlags(base))['tool-select']).toBe(false);
+    expect((await getMetaFlags(base))['tool-select']).toBe(true);
 
     const res = await authedFetch(server as RunningServer, base, '/api/v1/config', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ experimental: { 'tool-select': true } }),
+      body: JSON.stringify({ experimental: { 'tool-select': false } }),
     });
     expect(res.status).toBe(200);
 
-    expect((await getMetaFlags(base))['tool-select']).toBe(true);
+    expect((await getMetaFlags(base))['tool-select']).toBe(false);
   });
 
   it('keeps an env-forced flag on when the config section disables it', async () => {

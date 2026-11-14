@@ -29,7 +29,7 @@ export const FLAG_DEFINITIONS = [
     description:
       'Keep MCP tool schemas out of the immutable top-level tools[]; the model loads them on demand via the select_tools tool. Only takes effect on models whose capability catalog declares dynamically loaded tools.',
     env: 'KIMI_CODE_EXPERIMENTAL_TOOL_SELECT',
-    default: false,
+    default: true,
     surface: 'core',
   },
   {

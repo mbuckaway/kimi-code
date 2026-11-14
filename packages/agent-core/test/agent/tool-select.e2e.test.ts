@@ -52,13 +52,18 @@ const INLINE_CAPABILITIES = {
 const GRAFANA_TOOL = 'mcp__grafana__query_range';
 const DASHBOARD_TOOL = 'dashboard_create';
 
+/** Relies on the registry default for `tool-select`, so the default is the input under test. */
 function toolSelectFlagOn(): FlagResolver {
-  return new FlagResolver({}, FLAG_DEFINITIONS, { 'tool-select': true });
+  return new FlagResolver({}, FLAG_DEFINITIONS, {});
 }
 
-/** Empty env so an ambient KIMI_CODE_EXPERIMENTAL_FLAG cannot force flags on. */
+/**
+ * Explicitly closes the gate with a config override, so this helper still means
+ * OFF regardless of the registry default. Empty env keeps an ambient
+ * KIMI_CODE_EXPERIMENTAL_FLAG from forcing flags on.
+ */
 function toolSelectFlagOff(): FlagResolver {
-  return new FlagResolver({}, FLAG_DEFINITIONS, {});
+  return new FlagResolver({}, FLAG_DEFINITIONS, { 'tool-select': false });
 }
 
 function grafanaClient(callLog: Array<[string, unknown]> = []): MCPClient {
@@ -749,8 +754,9 @@ describe('disclosure mode — compaction', () => {
     expect(disclosureCall.tools.map((t) => t.name).some((n) => n.startsWith('mcp__'))).toBe(false);
     expect(callLog).toEqual([['query_range', { query: 'errors' }]]);
 
-    // Flip back off: inline again, select_tools gone from the wire.
-    resolver.setConfigOverrides({});
+    // Flip back off: inline again, select_tools gone from the wire. The
+    // override is explicit so the gate closes regardless of the registry default.
+    resolver.setConfigOverrides({ 'tool-select': false });
     ctx.mockNextResponse({ type: 'text', text: 'inline again' });
     await runTurn(ctx, 'back');
     const backCall = ctx.llmCalls.at(-1)!;

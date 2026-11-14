@@ -493,7 +493,13 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 | --- | --- | --- | --- |
 | `kimi_oauth` | `boolean` | `false` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI; token/apiKey auth remains the default |
 | `agent_messaging` | `boolean` | `true` | Agent-to-agent messaging and read-only fleet visibility: the `SendMessage`, `ListAgents`, `AgentResult`, `AgentHealth` and `WaitForAll` tools, and the `name` parameter on the `Agent` tool; set to `false` to disable |
-| `agent_fleet_control` | `boolean` | `false` | Destructive fleet lifecycle control: the `StopAgent`, `InterruptAgent`, `StopAgents`, `DismissAgents`, `TagAgent` and `RenameAgent` tools; off by default |
+| `agent_fleet_control` | `boolean` | `true` | Destructive fleet lifecycle control: the `StopAgent`, `InterruptAgent`, `StopAgents`, `DismissAgents`, `TagAgent` and `RenameAgent` tools; enabled by default, set to `false` to disable |
+| `agent_persona` | `boolean` | `true` | Layer a Markdown persona (overlay or replace) onto a spawned agent profile through the `persona`/`personas` parameters on `Agent` and `AgentSwarm`; enabled by default, set to `false` to disable |
+| `tool-select` | `boolean` | `true` | Keep MCP tool schemas out of the top-level tool list and let the model load them on demand with `select_tools`; only affects models that support dynamically loaded tools. Enabled by default |
+| `secondary-model` | `boolean` | `false` | Let newly spawned subagents use a separately configured secondary model by default, with an explicit primary-model override for quality-sensitive tasks; off by default |
+| `subagent_fork` | `boolean` | `false` | Let `Agent` and `AgentSwarm` start a subagent with a snapshot of the caller's conversation history through the `fork` parameter; off by default |
+| `wait_for` | `boolean` | `true` | Give the model the `WaitFor` tool so it can wait for background tasks inside the current turn instead of ending the turn; enabled by default |
+| `tower` | `boolean` | `false` | Enable tower mode, which coordinates multiple agents on a shared objective and is toggled with `/tower`; off by default |
 
 ## `services`
 

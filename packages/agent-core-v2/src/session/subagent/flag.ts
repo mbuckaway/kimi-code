@@ -39,7 +39,7 @@ export const agentPersonaFlag: FlagDefinitionInput = {
   description:
     'Let the Agent and AgentSwarm tools layer a Markdown persona (overlay or replace) onto a spawned agent profile via the persona/personas parameters.',
   env: AGENT_PERSONA_FLAG_ENV,
-  default: false,
+  default: true,
   surface: 'core',
 };
 

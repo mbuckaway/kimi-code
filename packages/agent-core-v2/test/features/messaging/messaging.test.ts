@@ -3747,7 +3747,7 @@ describe('BroadcastMessage tool', () => {
 });
 
 describe('agent fleet control flag', () => {
-  it('agentFleetControlFlag_registered_defaultsOffUnderItsEnv', () => {
+  it('agentFleetControlFlag_registeredDefaultsOn', () => {
     const flag = getContributedFlags().find(
       (entry) => entry.id === AGENT_FLEET_CONTROL_FLAG_ID,
     );
@@ -3756,7 +3756,7 @@ describe('agent fleet control flag', () => {
       id: 'agent_fleet_control',
       title: 'Agent fleet control',
       env: 'KIMI_CODE_EXPERIMENTAL_AGENT_FLEET_CONTROL',
-      default: false,
+      default: true,
       surface: 'both',
     });
   });
