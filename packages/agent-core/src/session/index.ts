@@ -550,6 +550,19 @@ export class Session {
     if (main !== undefined && main.config.systemPrompt === '') {
       await this.bootstrapAgentProfile(main, profile);
     }
+    // Surface the restored subagents as a roster change (v2 parity): seed the
+    // empty baseline, then sync so each restored subagent reads as an addition.
+    // The post-restoring window makes the injected reminder durable (it lands in
+    // the replayed message list, matching v2's restore-time roster notice).
+    if (main !== undefined && main.subagentHost !== undefined) {
+      main.subagentHost.seedRosterBaseline();
+      main.replayBuilder.postRestoring = true;
+      try {
+        await main.subagentHost.syncRosterForAll();
+      } finally {
+        main.replayBuilder.postRestoring = false;
+      }
+    }
     await this.triggerSessionStart('resume');
     return { warning };
   }

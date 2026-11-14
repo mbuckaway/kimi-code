@@ -23,9 +23,15 @@ tools:
   - Skill
   - WebSearch
   - Agent
+  - AgentHealth
+  - AgentResult
   - AgentSwarm
+  - BroadcastMessage
   - ListAgents
+  - ListMessages
+  - ReplyMessage
   - SendMessage
+  - WaitForAll
   - FetchURL
   - AskUserQuestion
   - EnterPlanMode

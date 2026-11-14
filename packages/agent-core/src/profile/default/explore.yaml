@@ -33,7 +33,11 @@ tools:
   - ReadMediaFile
   - Glob
   - Grep
+  - AgentHealth
+  - AgentResult
   - ListAgents
+  - ListMessages
   - SendMessage
+  - WaitForAll
   - WebSearch
   - FetchURL

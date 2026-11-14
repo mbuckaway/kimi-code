@@ -1390,6 +1390,10 @@ function replayMessageTexts(resumed: ResumedSessionSummary): readonly string[] {
   for (const record of resumed.agents['main']?.replay ?? []) {
     if (record.type !== 'message') continue;
     const message = record.message;
+    // Injected reminders (e.g. the roster-change notice) are not conversation
+    // turns; the compared `replay` already covers them, so keep them out of the
+    // turn-text projection.
+    if (message.origin?.kind === 'injection') continue;
     entries.push(
       `${message.role}:${message.content
         .filter((part) => part.type === 'text')
@@ -5350,16 +5354,18 @@ describe('v1↔v2 residual surface parity', () => {
             key === 'origin' ? undefined : value,
           ),
         );
-      // Both engines materialize the side-question reminder while forking:
-      // v2 appends it at the fork event point (a past-tense one-off fact),
-      // so the inherited contexts are already identical right after fork.
-      expect(v1Context.history).toHaveLength(2);
-      expect(v2Context.history).toHaveLength(2);
+      // Both engines materialize the side-question reminder while forking, and
+      // both inject the roster-change reminder for the forked child ahead of it:
+      // v2 appends the roster reminder during the fork and the side-question
+      // reminder at the fork event point, so the inherited contexts are
+      // identical right after fork.
+      expect(v1Context.history).toHaveLength(3);
+      expect(v2Context.history).toHaveLength(3);
       expect(stripOrigins(v2Context)).toEqual(stripOrigins(v1Context));
-      // Non-vacuous: the inherited import plus the side-question reminder
-      // (byte-identical template on both engines).
+      // Non-vacuous: the inherited import plus the roster-change reminder plus
+      // the side-question reminder (byte-identical templates on both engines).
       const v1History = v1Context.history;
-      expect(v1History.length).toBeGreaterThanOrEqual(2);
+      expect(v1History.length).toBeGreaterThanOrEqual(3);
       const reminder = v1History.at(-1);
       expect(JSON.stringify(reminder)).toContain('side-channel conversation');
     } finally {

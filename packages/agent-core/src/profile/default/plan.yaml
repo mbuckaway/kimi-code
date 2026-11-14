@@ -19,7 +19,10 @@ tools:
   - ReadMediaFile
   - Glob
   - Grep
+  - BroadcastMessage
   - ListAgents
+  - ListMessages
+  - ReplyMessage
   - SendMessage
   - WebSearch
   - FetchURL

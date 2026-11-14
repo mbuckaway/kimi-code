@@ -48,6 +48,8 @@ mark the row `merged-upstream` (keep the row as history).
 | AgentSwarm names | `feat/agent-fleet-and-persona` | Add per-item `names` to `AgentSwarm` with length/duplicate validation and flag-gated schema stripping; resumed members keep their name | — | — | local |
 | agent persona | `feat/agent-fleet-and-persona` | Add `agent_persona` (default off): `persona`/`personas` on `Agent`/`AgentSwarm` with overlay/replace, `extends` base-match, skills, capability clamping, and realpath-checked path personas | — | — | local |
 
+The agent fleet/messaging features above ship in both engines (`agent-core` v1 and `agent-core-v2`).
+
 Changesets under `.changeset/` deliberately name the upstream package
 `@moonshot-ai/kimi-code`, not the fork's `@mbuckaway/kimi-code`, so a change can
 be cherry-picked into an upstream PR verbatim. The fork's release pipeline
