@@ -775,6 +775,27 @@ describe('SubagentToolInputSchema', () => {
     expect(parsed.persona).toBe('auditor');
     expect(agentSchemaProperties<{ type?: string }>()['persona']?.type).toBe('string');
   });
+
+  it('does not default subagent_type when a persona is present', () => {
+    const withPersona = SubagentToolInputSchema.parse({
+      prompt: 'Audit',
+      description: 'Audit the diff',
+      persona: 'auditor',
+    });
+    const withoutPersona = SubagentToolInputSchema.parse({
+      prompt: 'Investigate',
+      description: 'Find cause',
+    });
+    const blankPersona = SubagentToolInputSchema.safeParse({
+      prompt: 'Audit',
+      description: 'Audit the diff',
+      persona: '   ',
+    });
+
+    expect(withPersona.subagent_type).toBeUndefined();
+    expect(withoutPersona.subagent_type).toBe('coder');
+    expect(blankPersona.success).toBe(false);
+  });
 });
 
 describe('Agent tool description', () => {
@@ -3115,6 +3136,41 @@ describe('Agent tool execution contract', () => {
 
     expect(result).toEqual({ output: PERSONA_WITH_FORK_UNAVAILABLE, isError: true });
     expect(lifecycle.create).not.toHaveBeenCalled();
+  });
+
+  it('uses the persona extends as the base when subagent_type is omitted', async () => {
+    const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
+    const context = createAgentToolContext(
+      lifecycle,
+      personaFlags(),
+      sessionService(ISessionAgentProfileCatalog, personaCatalog()),
+    );
+    const subagents = context.get(ISessionSubagentService);
+    const planSpawn = vi.spyOn(subagents, 'planSpawn');
+
+    const result = await executeAgentTool(context, {
+      prompt: 'Audit',
+      description: 'Audit the diff',
+      persona: 'auditor',
+    });
+
+    expect(planSpawn).toHaveBeenCalledWith({
+      callerAgentId: 'main',
+      profileName: undefined,
+      model: undefined,
+      fork: false,
+      persona: 'auditor',
+    });
+    expect(lifecycle.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: expect.objectContaining({
+          profile: 'explore',
+          persona: expect.objectContaining({ name: 'auditor', base: 'explore' }),
+        }),
+      }),
+    );
+    expect(result.output).toContain('actual_subagent_type: explore');
+    expect(result.isError).toBeUndefined();
   });
 
   it('passes the trimmed persona to planSpawn and threads it into the created binding', async () => {

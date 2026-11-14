@@ -19,7 +19,9 @@ export const SubagentToolInputSchema = z.preprocess(
     const hasSubagentType =
       typeof normalized['subagent_type'] === 'string' && normalized['subagent_type'].length > 0;
     const hasFork = normalized['fork'] === true;
-    if (!hasSubagentType && !hasResumeId && !hasFork) {
+    const hasPersona =
+      typeof normalized['persona'] === 'string' && normalized['persona'].trim().length > 0;
+    if (!hasSubagentType && !hasResumeId && !hasFork && !hasPersona) {
       normalized['subagent_type'] = DEFAULT_PROFILE_NAME;
     } else if (!hasSubagentType) {
       delete normalized['subagent_type'];
