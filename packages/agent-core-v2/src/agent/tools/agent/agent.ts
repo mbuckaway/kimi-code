@@ -35,6 +35,14 @@ export const SubagentToolInputSchema = z.preprocess(
       .describe(
         'One of the available agent types (see "Available agent types" in this tool description). Defaults to "coder" when omitted.',
       ),
+    persona: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Persona for the new subagent: a catalog agent name, or a workspace .md file path. A persona declares mode (overlay or replace) and extends (its base profile). When subagent_type is also set, it must match extends. A persona adds identity and expertise and never grants tools or subagents. Rejected with resume and fork.',
+      ),
     resume: z
       .string()
       .optional()
@@ -96,6 +104,8 @@ export const USER_INTERRUPTED_SUBAGENT_MESSAGE =
 export const SUBAGENT_STOPPED_MESSAGE = 'The subagent was stopped before it finished.';
 export const NAME_EXPERIMENTAL_UNAVAILABLE =
   'name is disabled: the agent_messaging experimental flag is off.';
+export const PERSONA_WITH_RESUME_UNAVAILABLE =
+  'Cannot set persona when resuming an existing agent. A persona is bound when the agent is spawned; resume keeps the agent\'s existing role.';
 
 export interface ISubagentTool extends AgentTool<SubagentToolInput> {
   readonly _serviceBrand: undefined;

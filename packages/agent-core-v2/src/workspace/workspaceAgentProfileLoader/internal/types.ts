@@ -1,3 +1,4 @@
+import type { AgentProfileMode } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { SkippedAgentFile } from '#/app/agentProfileCatalog/agentProfileContribution';
 
 export type { SkippedAgentFile } from '#/app/agentProfileCatalog/agentProfileContribution';
@@ -14,6 +15,9 @@ export interface AgentFileDefinition {
   readonly description: string;
   readonly whenToUse?: string;
   readonly override: boolean;
+  readonly mode: AgentProfileMode;
+  readonly extends?: string;
+  readonly skills?: readonly string[];
   readonly tools?: readonly string[];
   readonly disallowedTools?: readonly string[];
   readonly subagents?: readonly string[];

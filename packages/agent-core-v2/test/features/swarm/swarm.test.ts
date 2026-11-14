@@ -30,17 +30,26 @@ import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
 import { AgentSwarmService } from '#/features/swarm/agent/swarmService';
 import SWARM_MODE_ENTER_REMINDER from '../../../src/features/swarm/agent/enter-reminder.md?raw';
 import { swarmKey } from '#/features/swarm/swarmOps';
-import { AgentSwarmToolInputSchema } from '#/features/swarm/tools/agent-swarm/agent-swarm';
+import {
+  AgentSwarmToolInputSchema,
+  NAMES_EXPERIMENTAL_UNAVAILABLE,
+} from '#/features/swarm/tools/agent-swarm/agent-swarm';
 import { AgentSwarmTool } from '#/features/swarm/tools/agent-swarm/agentSwarmTool';
+import { AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
 import {
   FORK_EXPERIMENTAL_UNAVAILABLE,
   FORK_WITH_MODEL_UNAVAILABLE,
   FORK_WITH_RESUME_UNAVAILABLE,
   FORK_WITH_TYPE_UNAVAILABLE,
+  PERSONA_EXPERIMENTAL_UNAVAILABLE,
+  PERSONA_WITH_FORK_UNAVAILABLE,
 } from '#/session/subagent/spawn';
+import { AGENT_PERSONA_FLAG_ID, SUBAGENT_FORK_FLAG_ID } from '#/session/subagent/flag';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 import { SessionSubagentService } from '#/session/subagent/subagentService';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type {
@@ -213,6 +222,35 @@ const SWARM_MODEL_ALIASES: ReadonlySet<string> = new Set([
   'provider/smart',
 ]);
 
+function personaSwarmCatalog(): ISessionAgentProfileCatalog {
+  return stubSwarmCatalog(DEFAULT_CALLER_PROFILE, [
+    ...DEFAULT_SWARM_TARGET_PROFILES,
+    normalizeAgentProfile({
+      name: 'reviewer',
+      description: 'Review persona',
+      extends: 'coder',
+      mode: 'overlay',
+      persona: 'Review code changes for correctness and regressions.',
+      systemPrompt: () => 'reviewer',
+    }),
+    normalizeAgentProfile({
+      name: 'checker',
+      description: 'Test persona',
+      extends: 'coder',
+      mode: 'replace',
+      persona: 'Check test coverage and edge cases.',
+      systemPrompt: () => 'checker',
+    }),
+  ]);
+}
+
+function personaSwarmFlag(enabled = true, fork = false): IFlagService {
+  return stubFlag(
+    (id) =>
+      enabled && (id === AGENT_PERSONA_FLAG_ID || (fork && id === SUBAGENT_FORK_FLAG_ID)),
+  );
+}
+
 function realSubagents(
   catalog: ISessionAgentProfileCatalog,
   config: IConfigService,
@@ -293,6 +331,15 @@ function realSubagents(
     sessionContext,
     sessionMetadata,
     stubLog(),
+    {
+      _serviceBrand: undefined,
+      workDir: '/repo',
+      additionalDirs: [],
+      resolve: (rel: string) => `/repo/${rel}`,
+      isWithin: () => true,
+      assertAllowed: (path: string) => path,
+    } as unknown as ISessionWorkspaceContext,
+    { _serviceBrand: undefined } as unknown as IHostFileSystem,
   );
 }
 
@@ -1775,6 +1822,786 @@ describe('AgentSwarmTool', () => {
           }),
         ],
       }),
+    );
+  });
+
+  it('advertises the names parameter only when the agent messaging flag is on', () => {
+    const host = mockSwarmHost();
+    const messagingOn = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+    const messagingOff = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag(false), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(false), stubCallerProfile()), stubCallerProfile());
+
+    expect(Object.keys(messagingOn.parameters['properties'] as Record<string, unknown>)).toContain(
+      'names',
+    );
+    expect(Object.keys(messagingOff.parameters['properties'] as Record<string, unknown>)).not.toContain(
+      'names',
+    );
+  });
+
+  it('enforces the names length boundaries in the schema', () => {
+    const input = {
+      description: 'Review files',
+      prompt_template: 'Review {{item}}',
+      items: ['src/a.ts', 'src/b.ts'],
+    };
+
+    expect(
+      AgentSwarmToolInputSchema.safeParse({ ...input, names: ['a', 'b'] }).success,
+    ).toBe(true);
+    expect(
+      AgentSwarmToolInputSchema.safeParse({ ...input, names: ['a'.repeat(64), 'b'] }).success,
+    ).toBe(true);
+    expect(
+      AgentSwarmToolInputSchema.safeParse({ ...input, names: ['', 'b'] }).success,
+    ).toBe(false);
+    expect(
+      AgentSwarmToolInputSchema.safeParse({ ...input, names: ['a'.repeat(65), 'b'] }).success,
+    ).toBe(false);
+  });
+
+  it('rejects names while the agent messaging flag is off', async () => {
+    const host = mockSwarmHost();
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag(false), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(false), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: ['alpha', 'beta'],
+      }),
+    );
+
+    expect(result).toMatchObject({ isError: true, output: NAMES_EXPERIMENTAL_UNAVAILABLE });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      case: 'items',
+      input: {
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: ['alpha'],
+      },
+      output: 'AgentSwarm names must match the number of items/prompts (expected 2, got 1).',
+    },
+    {
+      case: 'prompts',
+      input: {
+        description: 'Ship two features',
+        prompts: ['Implement the parser.', 'Write the changelog.'],
+        names: ['parser', 'changelog', 'release'],
+      },
+      output: 'AgentSwarm names must match the number of items/prompts (expected 2, got 3).',
+    },
+  ])('rejects a names length mismatch for $case', async ({ input, output }) => {
+    const host = mockSwarmHost();
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(tool, context(input));
+
+    expect(result).toMatchObject({ isError: true, output });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('rejects names without items or prompts', async () => {
+    const host = mockSwarmHost();
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Resume review',
+        resume_agent_ids: { 'agent-old-1': 'Continue previous review A' },
+        names: ['alpha'],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      output: 'names requires items or prompts; resumed subagents keep their existing names.',
+    });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate subagent names', async () => {
+    const host = mockSwarmHost();
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: ['alpha', 'alpha'],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      output: 'Duplicate subagent names. AgentSwarm requires distinct names.',
+    });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('threads names onto item spawn tasks, descriptions, and results', async () => {
+    const run = vi.fn(
+      async <T>({
+        tasks,
+      }: {
+        tasks: readonly SessionSwarmTask<T>[];
+      }): Promise<Array<SessionSwarmRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: `agent-named-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSwarmHost({ run });
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: ['alpha', 'beta'],
+      }),
+    );
+
+    expect(host.swarmService.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tasks: [
+          expect.objectContaining({
+            kind: 'spawn',
+            name: 'alpha',
+            swarmItem: 'src/a.ts',
+            description: 'Review files #1 (alpha)',
+          }),
+          expect.objectContaining({
+            kind: 'spawn',
+            name: 'beta',
+            swarmItem: 'src/b.ts',
+            description: 'Review files #2 (beta)',
+          }),
+        ],
+      }),
+    );
+    expect(result.output).toBe(
+      [
+        '<agent_swarm_result>',
+        '<summary>completed: 2</summary>',
+        '<subagent agent_id="agent-named-1" name="alpha" item="src/a.ts" outcome="completed">result 1</subagent>',
+        '<subagent agent_id="agent-named-2" name="beta" item="src/b.ts" outcome="completed">result 2</subagent>',
+        '</agent_swarm_result>',
+      ].join('\n'),
+    );
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('threads names onto prompt spawn tasks and results', async () => {
+    const run = vi.fn(
+      async <T>({
+        tasks,
+      }: {
+        tasks: readonly SessionSwarmTask<T>[];
+      }): Promise<Array<SessionSwarmRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: `agent-prompt-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSwarmHost({ run });
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Ship two features',
+        prompts: ['Implement the parser.', 'Write the changelog.'],
+        names: ['parser', 'changelog'],
+      }),
+    );
+
+    expect(host.swarmService.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tasks: [
+          expect.objectContaining({
+            kind: 'spawn',
+            name: 'parser',
+            description: 'Ship two features #1 (parser)',
+          }),
+          expect.objectContaining({
+            kind: 'spawn',
+            name: 'changelog',
+            description: 'Ship two features #2 (changelog)',
+          }),
+        ],
+      }),
+    );
+    expect(result.output).toBe(
+      [
+        '<agent_swarm_result>',
+        '<summary>completed: 2</summary>',
+        '<subagent agent_id="agent-prompt-1" name="parser" outcome="completed">result 1</subagent>',
+        '<subagent agent_id="agent-prompt-2" name="changelog" outcome="completed">result 2</subagent>',
+        '</agent_swarm_result>',
+      ].join('\n'),
+    );
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('keeps resumed subagents unnamed while naming the new cohort', async () => {
+    const run = vi.fn(
+      async <T>({
+        tasks,
+      }: {
+        tasks: readonly SessionSwarmTask<T>[];
+      }): Promise<Array<SessionSwarmRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: task.kind === 'resume' ? task.resumeAgentId : `agent-new-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const getSwarmItem = vi.fn(async () => 'src/old.ts');
+    const host = mockSwarmHost({ run, getSwarmItem });
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Finish review',
+        prompt_template: 'Review {{item}}',
+        items: ['src/new.ts'],
+        resume_agent_ids: { 'agent-old-1': 'Continue previous review A' },
+        names: ['alpha'],
+      }),
+    );
+
+    const calls = vi.mocked(run).mock.calls;
+    const tasks = calls[0]![0].tasks;
+    expect(tasks[0]).toMatchObject({ kind: 'resume', resumeAgentId: 'agent-old-1' });
+    expect(tasks[0]?.name).toBeUndefined();
+    expect(tasks[1]).toMatchObject({ kind: 'spawn', name: 'alpha' });
+    const output = typeof result.output === 'string' ? result.output : '';
+    const lines = output.split('\n');
+    expect(lines.find((line) => line.includes('mode="resume"'))).not.toContain('name=');
+    expect(lines.find((line) => line.includes('agent-new'))).toContain('name="alpha"');
+    expect(result.isError).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: 'main',
+      output: 'The name "main" is reserved for the root agent.',
+    },
+    {
+      name: 'has space',
+      output: 'Agent name "has space" must be 1-64 characters of letters, digits, ".", "_" or "-".',
+    },
+  ])('rejects the invalid name $name through normalizeAgentName', async ({ name, output }) => {
+    const host = mockSwarmHost();
+    const tool = new AgentSwarmTool(host.swarmService, makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }), mockSwarmMode(), stubConfig(), stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID), realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(true), stubCallerProfile()), stubCallerProfile());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: [name, 'beta'],
+      }),
+    );
+
+    expect(result).toMatchObject({ isError: true, output });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('accepts persona and personas in the schema and rejects an empty persona', () => {
+    const input = {
+      description: 'Review files',
+      prompt_template: 'Review {{item}}',
+      items: ['src/a.ts', 'src/b.ts'],
+    };
+
+    expect(AgentSwarmToolInputSchema.safeParse({ ...input, persona: 'reviewer' }).success).toBe(
+      true,
+    );
+    expect(
+      AgentSwarmToolInputSchema.safeParse({ ...input, personas: ['reviewer', 'checker'] }).success,
+    ).toBe(true);
+    expect(AgentSwarmToolInputSchema.safeParse({ ...input, persona: '' }).success).toBe(false);
+    expect(AgentSwarmToolInputSchema.safeParse({ ...input, persona: '   ' }).success).toBe(false);
+    expect(
+      AgentSwarmToolInputSchema.safeParse({ ...input, personas: ['reviewer', ''] }).success,
+    ).toBe(false);
+  });
+
+  it('advertises persona and personas only when the agent_persona flag is on', () => {
+    const host = mockSwarmHost();
+    const enabledFlags = personaSwarmFlag(true);
+    const personaOn = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      enabledFlags,
+      realSubagents(personaSwarmCatalog(), stubConfig(), enabledFlags, stubCallerProfile()),
+      stubCallerProfile(),
+    );
+    const personaOff = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      stubFlag(false),
+      realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(false), stubCallerProfile()),
+      stubCallerProfile(),
+    );
+
+    expect(
+      Object.keys(personaOn.parameters['properties'] as Record<string, unknown>),
+    ).toEqual(expect.arrayContaining(['persona', 'personas']));
+    const offProperties = Object.keys(
+      personaOff.parameters['properties'] as Record<string, unknown>,
+    );
+    expect(offProperties).not.toContain('persona');
+    expect(offProperties).not.toContain('personas');
+  });
+
+  it.each([
+    { case: 'persona', args: { persona: 'reviewer' } },
+    { case: 'personas', args: { personas: ['reviewer', 'checker'] } },
+  ])('rejects $case while the agent_persona flag is off', async ({ args }) => {
+    const host = mockSwarmHost();
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      stubFlag(false),
+      realSubagents(stubSwarmCatalog(), stubConfig(), stubFlag(false), stubCallerProfile()),
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        ...args,
+      }),
+    );
+
+    expect(result).toMatchObject({ isError: true, output: PERSONA_EXPERIMENTAL_UNAVAILABLE });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('aborts the swarm before any subagent starts when a persona base does not match', async () => {
+    const host = mockSwarmHost();
+    const flags = personaSwarmFlag(true);
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      realSubagents(personaSwarmCatalog(), stubConfig(), flags, stubCallerProfile()),
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        subagent_type: 'explore',
+        persona: 'reviewer',
+      }),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      output: expect.stringContaining('persona.base_mismatch'),
+    });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('treats a blank shared persona as absent', async () => {
+    const host = mockSwarmHost();
+    const flags = personaSwarmFlag(true);
+    const subagents = realSubagents(
+      personaSwarmCatalog(),
+      stubConfig(),
+      flags,
+      stubCallerProfile(),
+    );
+    const planSpawn = vi.spyOn(subagents, 'planSpawn');
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      subagents,
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        persona: '   ',
+      }),
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(planSpawn).toHaveBeenCalledTimes(1);
+    expect(planSpawn.mock.calls[0]?.[0].persona).toBeUndefined();
+  });
+
+  it('rejects persona combined with personas', async () => {
+    const host = mockSwarmHost();
+    const flags = personaSwarmFlag(true);
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      realSubagents(personaSwarmCatalog(), stubConfig(), flags, stubCallerProfile()),
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        persona: 'reviewer',
+        personas: ['reviewer', 'checker'],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      output:
+        'persona and personas cannot be combined; use persona for every member or personas per item/prompt.',
+    });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      case: 'items',
+      input: {
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        personas: ['reviewer'],
+      },
+      output: 'AgentSwarm personas must match the number of items/prompts (expected 2, got 1).',
+    },
+    {
+      case: 'prompts',
+      input: {
+        description: 'Ship two features',
+        prompts: ['Implement the parser.', 'Write the changelog.'],
+        personas: ['reviewer', 'checker', 'release'],
+      },
+      output: 'AgentSwarm personas must match the number of items/prompts (expected 2, got 3).',
+    },
+  ])('rejects a personas length mismatch for $case', async ({ input, output }) => {
+    const host = mockSwarmHost();
+    const flags = personaSwarmFlag(true);
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      realSubagents(personaSwarmCatalog(), stubConfig(), flags, stubCallerProfile()),
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(tool, context(input));
+
+    expect(result).toMatchObject({ isError: true, output });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('rejects personas without items or prompts', async () => {
+    const host = mockSwarmHost();
+    const flags = personaSwarmFlag(true);
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      realSubagents(personaSwarmCatalog(), stubConfig(), flags, stubCallerProfile()),
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Resume review',
+        resume_agent_ids: { 'agent-old-1': 'Continue previous review A' },
+        personas: ['reviewer'],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      output: 'personas requires items or prompts; resumed subagents keep their existing roles.',
+    });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('rejects fork combined with persona', async () => {
+    const host = mockSwarmHost();
+    const flags = personaSwarmFlag(true, true);
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      realSubagents(personaSwarmCatalog(), stubConfig(), flags, stubCallerProfile()),
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        persona: 'reviewer',
+        fork: true,
+      }),
+    );
+
+    expect(result).toMatchObject({ isError: true, output: PERSONA_WITH_FORK_UNAVAILABLE });
+    expect(host.swarmService.run).not.toHaveBeenCalled();
+  });
+
+  it('applies a shared persona to every spawn through one resolved plan', async () => {
+    const run = vi.fn(
+      async <T>({
+        tasks,
+      }: {
+        tasks: readonly SessionSwarmTask<T>[];
+      }): Promise<Array<SessionSwarmRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: `agent-persona-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSwarmHost({ run });
+    const flags = personaSwarmFlag(true);
+    const subagents = realSubagents(
+      personaSwarmCatalog(),
+      stubConfig(),
+      flags,
+      stubCallerProfile(),
+    );
+    const planSpawn = vi.spyOn(subagents, 'planSpawn');
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      subagents,
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        subagent_type: 'coder',
+        persona: ' reviewer ',
+      }),
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(planSpawn).toHaveBeenCalledTimes(1);
+    expect(planSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callerAgentId: 'main',
+        profileName: 'coder',
+        fork: false,
+        persona: 'reviewer',
+      }),
+    );
+    const tasks = vi.mocked(run).mock.calls[0]![0].tasks;
+    const first = tasks[0];
+    const second = tasks[1];
+    if (first?.kind !== 'spawn' || second?.kind !== 'spawn') {
+      throw new Error('expected two spawn tasks');
+    }
+    expect(first.plan.persona?.name).toBe('reviewer');
+    expect(second.plan).toBe(first.plan);
+  });
+
+  it('resolves one plan per distinct persona aligned by prompt position', async () => {
+    const run = vi.fn(
+      async <T>({
+        tasks,
+      }: {
+        tasks: readonly SessionSwarmTask<T>[];
+      }): Promise<Array<SessionSwarmRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: `agent-persona-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSwarmHost({ run });
+    const flags = personaSwarmFlag(true);
+    const subagents = realSubagents(
+      personaSwarmCatalog(),
+      stubConfig(),
+      flags,
+      stubCallerProfile(),
+    );
+    const planSpawn = vi.spyOn(subagents, 'planSpawn');
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      subagents,
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Ship three features',
+        prompts: [
+          'Implement the parser.',
+          'Write the changelog.',
+          'Review the parser implementation.',
+        ],
+        personas: ['reviewer', 'checker', 'reviewer'],
+        subagent_type: 'coder',
+      }),
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(planSpawn).toHaveBeenCalledTimes(2);
+    expect(planSpawn).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ persona: 'reviewer', profileName: 'coder' }),
+    );
+    expect(planSpawn).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ persona: 'checker', profileName: 'coder' }),
+    );
+    const tasks = vi.mocked(run).mock.calls[0]![0].tasks;
+    const first = tasks[0];
+    const second = tasks[1];
+    const third = tasks[2];
+    if (first?.kind !== 'spawn' || second?.kind !== 'spawn' || third?.kind !== 'spawn') {
+      throw new Error('expected three spawn tasks');
+    }
+    expect(first.plan.persona?.name).toBe('reviewer');
+    expect(second.plan.persona?.name).toBe('checker');
+    expect(second.plan.persona?.mode).toBe('replace');
+    expect(third.plan).toBe(first.plan);
+  });
+
+  it('keeps resumed members on their existing role without a plan', async () => {
+    const run = vi.fn(
+      async <T>({
+        tasks,
+      }: {
+        tasks: readonly SessionSwarmTask<T>[];
+      }): Promise<Array<SessionSwarmRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: task.kind === 'resume' ? task.resumeAgentId : `agent-new-${String(index)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const getSwarmItem = vi.fn(async () => 'src/old.ts');
+    const host = mockSwarmHost({ run, getSwarmItem });
+    const flags = personaSwarmFlag(true);
+    const subagents = realSubagents(
+      personaSwarmCatalog(),
+      stubConfig(),
+      flags,
+      stubCallerProfile(),
+    );
+    const planSpawn = vi.spyOn(subagents, 'planSpawn');
+    const tool = new AgentSwarmTool(
+      host.swarmService,
+      makeAgentScopeContext({ agentId: host.callerAgentId, agentScope: '' }),
+      mockSwarmMode(),
+      stubConfig(),
+      flags,
+      subagents,
+      stubCallerProfile(),
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Finish review',
+        prompt_template: 'Review {{item}}',
+        items: ['src/new.ts'],
+        resume_agent_ids: { 'agent-old-1': 'Continue previous review A' },
+        subagent_type: 'coder',
+        persona: 'reviewer',
+      }),
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(planSpawn).toHaveBeenCalledTimes(1);
+    const tasks = vi.mocked(run).mock.calls[0]![0].tasks;
+    const resumeTask = tasks[0];
+    const spawnTask = tasks[1];
+    if (resumeTask?.kind !== 'resume' || spawnTask?.kind !== 'spawn') {
+      throw new Error('expected a resume task followed by a spawn task');
+    }
+    expect(resumeTask.resumeAgentId).toBe('agent-old-1');
+    expect(resumeTask.profileName).toBe('subagent');
+    expect('plan' in resumeTask).toBe(false);
+    expect(spawnTask.plan.persona?.name).toBe('reviewer');
+    expect(planSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({ persona: 'reviewer', profileName: 'coder' }),
     );
   });
 });

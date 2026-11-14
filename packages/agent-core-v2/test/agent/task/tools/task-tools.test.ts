@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   IAgentTaskService,
   type AgentTask,
+  type AgentTaskCapacity,
   type AgentTaskInfo,
   type AgentTaskOutputSnapshot,
   type AgentTaskTrackOptions,
@@ -24,6 +25,33 @@ import { TaskStopTool } from '#/agent/tools/task/task-stop/taskStopTool';
 import { WaitForInputSchema } from '#/agent/tools/task/task-wait/task-wait';
 import { WaitForTool, startWaitProgress, waitForProgressUpdate } from '#/agent/tools/task/task-wait/taskWaitTool';
 import { abortError } from '#/_base/utils/abort';
+import type { ServiceIdentifier } from '#/_base/di/instantiation';
+import type { IAgentScopeHandle } from '#/_base/di/scope';
+import { IAgentActivityView, type AgentActivityState } from '#/agent/activityView/activityView';
+import { makeAgentScopeContext, IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import type { UsageStatus } from '#/agent/usage/usage';
+import { AgentResultInputSchema } from '#/agent/tools/task/agent-result/agent-result';
+import { AgentResultTool } from '#/agent/tools/task/agent-result/agentResultTool';
+import { AgentHealthInputSchema } from '#/agent/tools/task/agent-status/agent-status';
+import { AgentHealthTool } from '#/agent/tools/task/agent-status/agentStatusTool';
+import {
+  WAIT_FOR_ALL_MAX_TIMEOUT_S,
+  WaitForAllInputSchema,
+  type WaitForAllInput,
+} from '#/agent/tools/task/task-wait-all/wait-for-all';
+import { WaitForAllTool } from '#/agent/tools/task/task-wait-all/waitForAllTool';
+import { WAIT_FOR_FLAG_ID } from '#/agent/tools/task/task-wait/flag';
+import {
+  StopAgentsInputSchema,
+  type StopAgentsInput,
+} from '#/agent/tools/task/task-stop-agents/task-stop-agents';
+import { StopAgentsTool } from '#/agent/tools/task/task-stop-agents/taskStopAgentsTool';
+import { AGENT_FLEET_CONTROL_FLAG_ID, AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
+import type { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import type { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
+import type { ISessionUsageService } from '#/session/usage/sessionUsage';
+import type { TokenUsage } from '#/kosong/contract/usage';
+import type { ToolExecution } from '#/tool/toolContract';
 import type { ITaskHandle } from '#/app/task/task';
 import type { IHostProcess } from '#/os/interface/hostProcess';
 import { compileToolArgsValidator, validateToolArgs } from '#/tool/args-validator';
@@ -165,6 +193,19 @@ class FakeTaskService implements IAgentTaskService {
       if (limit !== undefined && result.length >= limit) break;
     }
     return result;
+  }
+
+  capacityOverride: AgentTaskCapacity | undefined;
+
+  capacity(): AgentTaskCapacity {
+    if (this.capacityOverride !== undefined) return this.capacityOverride;
+    let running = 0;
+    for (const entry of this.entries.values()) {
+      if (TERMINAL_STATUSES.has(entry.info.status)) continue;
+      if (entry.info.detached === false) continue;
+      running++;
+    }
+    return { running };
   }
 
   persistOutput(_taskId: string): void {}
@@ -1245,5 +1286,1154 @@ describe('WaitForTool (harness)', () => {
     } finally {
       await ctx.dispose();
     }
+  });
+});
+
+describe('AgentResultTool', () => {
+  it('has name and accepts the current schema', () => {
+    const tool = new AgentResultTool(new FakeTaskService(), stubFlag(true));
+
+    expect(tool.name).toBe('AgentResult');
+    expect(tool.description).toContain('agent id');
+    expect(AgentResultInputSchema.safeParse({ agent_id: 'agent-child' }).success).toBe(true);
+    expect(AgentResultInputSchema.safeParse({ agent_id: '' }).success).toBe(false);
+    expect(AgentResultInputSchema.safeParse({}).success).toBe(false);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['agent_id'],
+      properties: { agent_id: { type: 'string' } },
+    });
+  });
+
+  it('resolves execution metadata and matches the agent id', () => {
+    const tool = new AgentResultTool(new FakeTaskService(), stubFlag(true));
+
+    const execution = tool.resolveExecution({ agent_id: 'agent-child' }) as Extract<
+      ToolExecution,
+      { execute: unknown }
+    >;
+
+    expect(execution.description).toBe('Reading result of agent agent-child');
+    expect(execution.accesses).toEqual([]);
+    expect(execution.approvalRule).toBe('AgentResult');
+    expect(execution.matchesRule?.('agent-*')).toBe(true);
+    expect(execution.matchesRule?.('other-agent')).toBe(false);
+  });
+
+  it('returns the agent result snapshot with the preview', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(
+      agentTaskInfo(),
+      outputSnapshot('SUBAGENT-ANSWER\n', {
+        outputPath: '/tmp/session/tasks/agent-abc12345/output.log',
+        fullOutputAvailable: true,
+      }),
+    );
+
+    const result = await executeTool(
+      new AgentResultTool(tasks, stubFlag(true)),
+      context('agent_result_ok', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('retrieval_status: success');
+    expect(output).toContain('agent_id: agent-child');
+    expect(output).toContain('status: completed');
+    expect(output).toContain('output_path: /tmp/session/tasks/agent-abc12345/output.log');
+    expect(output).toContain('output_size_bytes: 16');
+    expect(output).toContain('[output]\nSUBAGENT-ANSWER');
+    expect(output).not.toContain('[Truncated.');
+  });
+
+  it('prefers the running task over an older finished task', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(
+      agentTaskInfo({
+        taskId: 'agent-old00001',
+        status: 'completed',
+        startedAt: 1_700_000_000_000,
+        endedAt: 1_700_000_001_000,
+      }),
+      outputSnapshot('OLD-RESULT\n'),
+    );
+    tasks.add(
+      agentTaskInfo({
+        taskId: 'agent-live0001',
+        status: 'running',
+        startedAt: 1_700_000_002_000,
+        endedAt: null,
+      }),
+      outputSnapshot('LIVE-RESULT\n', { outputPath: '/tmp/live.log', fullOutputAvailable: true }),
+    );
+
+    const result = await executeTool(
+      new AgentResultTool(tasks, stubFlag(true)),
+      context('agent_result_running', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('retrieval_status: not_ready');
+    expect(output).toContain('task_id: agent-live0001');
+    expect(output).toContain('[output]\nLIVE-RESULT');
+    expect(output).not.toContain('OLD-RESULT');
+  });
+
+  it('reports an empty preview', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
+
+    const result = await executeTool(
+      new AgentResultTool(tasks, stubFlag(true)),
+      context('agent_result_empty', { agent_id: 'agent-child' }),
+    );
+
+    expect(outputString(result)).toContain('[output]\n[no output available]');
+  });
+
+  it.each([
+    {
+      label: 'a persisted full log',
+      snapshot: outputSnapshot('TAIL\n', {
+        outputPath: '/tmp/full.log',
+        truncated: true,
+        fullOutputAvailable: true,
+      }),
+      banner: '[Truncated. Full output: /tmp/full.log]',
+    },
+    {
+      label: 'no persisted full log',
+      snapshot: outputSnapshot('TAIL\n', { truncated: true }),
+      banner: '[Truncated. Full output: unavailable]',
+    },
+  ])('points at the full output when truncated with $label', async ({ snapshot, banner }) => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo(), snapshot);
+
+    const result = await executeTool(
+      new AgentResultTool(tasks, stubFlag(true)),
+      context('agent_result_truncated', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('output_truncated: true');
+    expect(output).toContain(banner);
+  });
+
+  it('returns an error for an unknown agent', async () => {
+    const result = await executeTool(
+      new AgentResultTool(new FakeTaskService(), stubFlag(true)),
+      context('agent_result_unknown', { agent_id: 'agent-missing' }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toBe('No task found for agent: agent-missing');
+  });
+
+  it('rejects execution when the agent_messaging flag is off', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo());
+
+    const result = await executeTool(
+      new AgentResultTool(tasks, stubFlag(false)),
+      context('agent_result_flag_off', { agent_id: 'agent-child' }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toContain('agent_messaging experimental flag is off');
+  });
+
+  it('succeeds when the agent_messaging flag is on', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo(), outputSnapshot('FLAG-ON\n'));
+
+    const result = await executeTool(
+      new AgentResultTool(tasks, stubFlag(true)),
+      context('agent_result_flag_on', { agent_id: 'agent-child' }),
+    );
+
+    expect(result.isError ?? false).toBe(false);
+    expect(outputString(result)).toContain('FLAG-ON');
+  });
+});
+
+describe('AgentHealthTool', () => {
+  type LoopState = 'idle' | 'running';
+
+  function tokenUsage(overrides: Partial<TokenUsage> = {}): TokenUsage {
+    return {
+      inputOther: 10,
+      output: 20,
+      inputCacheRead: 30,
+      inputCacheCreation: 40,
+      ...overrides,
+    };
+  }
+
+  function agentHandle(options: {
+    readonly loopState?: LoopState;
+    readonly activity?: AgentActivityState;
+  } = {}): IAgentScopeHandle {
+    const agentId = 'agent-child';
+    const scope = makeAgentScopeContext({ agentId, agentScope: agentId });
+    const services = new Map<unknown, unknown>([
+      [IAgentLoopService, { status: vi.fn(() => ({ state: options.loopState ?? 'idle' })) }],
+      [IAgentActivityView, { state: vi.fn(() => options.activity ?? { lifecycle: 'ready' }) }],
+      [IAgentScopeContext, scope],
+    ]);
+    return {
+      id: agentId,
+      kind: 'agent',
+      accessor: {
+        get: <T>(id: ServiceIdentifier<T>): T => services.get(id) as T,
+      },
+      dispose: vi.fn(),
+    };
+  }
+
+  function makeHealthTool(options: {
+    readonly tasks?: FakeTaskService;
+    readonly handle?: boolean;
+    readonly loopState?: LoopState;
+    readonly activity?: AgentActivityState;
+    readonly usageStatus?: UsageStatus;
+    readonly flagsOn?: boolean;
+  } = {}) {
+    const tasks = options.tasks ?? new FakeTaskService();
+    const handleOf = vi.fn(() =>
+      options.handle === false
+        ? undefined
+        : agentHandle({ loopState: options.loopState, activity: options.activity }),
+    );
+    const status = vi.fn(() => options.usageStatus ?? { total: tokenUsage() });
+    const statusSize = vi.fn(() => 1234);
+    const agents = { _serviceBrand: undefined, handleOf } as unknown as IAgentLifecycleService;
+    const usage = { _serviceBrand: undefined, status } as unknown as ISessionUsageService;
+    const tokenCounting = {
+      _serviceBrand: undefined,
+      statusSize,
+    } as unknown as ISessionTokenCountingService;
+    const tool = new AgentHealthTool(
+      tasks,
+      agents,
+      usage,
+      tokenCounting,
+      stubFlag(options.flagsOn ?? true),
+    );
+    return { tool, tasks, handleOf, status, statusSize };
+  }
+
+  it('has name and accepts the current schema', () => {
+    const { tool } = makeHealthTool();
+
+    expect(tool.name).toBe('AgentHealth');
+    expect(tool.description).toContain('health');
+    expect(AgentHealthInputSchema.safeParse({ agent_id: 'agent-child' }).success).toBe(true);
+    expect(AgentHealthInputSchema.safeParse({ agent_id: '' }).success).toBe(false);
+    expect(AgentHealthInputSchema.safeParse({}).success).toBe(false);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['agent_id'],
+      properties: { agent_id: { type: 'string' } },
+    });
+  });
+
+  it('resolves execution metadata and matches the agent id', () => {
+    const { tool } = makeHealthTool();
+
+    const execution = tool.resolveExecution({ agent_id: 'agent-child' }) as Extract<
+      ToolExecution,
+      { execute: unknown }
+    >;
+
+    expect(execution.description).toBe('Inspecting health of agent agent-child');
+    expect(execution.accesses).toEqual([]);
+    expect(execution.approvalRule).toBe('AgentHealth');
+    expect(execution.matchesRule?.('agent-*')).toBe(true);
+    expect(execution.matchesRule?.('other-agent')).toBe(false);
+  });
+
+  it('reports idle for a live agent with no task', async () => {
+    const { tool, status, statusSize } = makeHealthTool();
+
+    const result = await executeTool(
+      tool,
+      context('agent_health_idle', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('state: idle');
+    expect(output).toContain('loop_state: idle');
+    expect(output).not.toContain('task_id:');
+    expect(output).toContain('context_tokens: 1234');
+    expect(output).toContain('total_input_tokens: 80');
+    expect(output).toContain('total_output_tokens: 20');
+    expect(output).not.toContain('turn_phase:');
+    expect(status).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-child' }));
+    expect(statusSize).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-child' }));
+  });
+
+  it('reports running when the loop is running', async () => {
+    const result = await executeTool(
+      makeHealthTool({ loopState: 'running' }).tool,
+      context('agent_health_running', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('state: running');
+    expect(output).toContain('loop_state: running');
+  });
+
+  it('reports stalled when a running agent task exists but the loop is idle', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
+
+    const result = await executeTool(
+      makeHealthTool({ tasks }).tool,
+      context('agent_health_stalled', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('state: stalled');
+    expect(output).toContain('task_id: agent-abc12345');
+    expect(output).toContain('task_status: running');
+    expect(output).toContain('task_kind: agent');
+    expect(output).toContain('task_started_at: 1700000000000');
+  });
+
+  it('reports orphaned when the agent has no live handle', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
+
+    const result = await executeTool(
+      makeHealthTool({ tasks, handle: false }).tool,
+      context('agent_health_orphaned', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('state: orphaned');
+    expect(output).toContain('task_id: agent-abc12345');
+    expect(output).not.toContain('loop_state:');
+    expect(output).not.toContain('context_tokens:');
+  });
+
+  it('reports lost for a lost task', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo({ status: 'lost' }));
+
+    const result = await executeTool(
+      makeHealthTool({ tasks }).tool,
+      context('agent_health_lost', { agent_id: 'agent-child' }),
+    );
+
+    expect(outputString(result)).toContain('state: lost');
+  });
+
+  it('reports completed for a completed task', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo());
+
+    const result = await executeTool(
+      makeHealthTool({ tasks }).tool,
+      context('agent_health_completed', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('state: completed');
+    expect(output).toContain('task_status: completed');
+    expect(output).toContain('task_ended_at: 1700000001000');
+  });
+
+  it('includes turn activity and background capacity', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo({ status: 'running', endedAt: null }));
+    tasks.capacityOverride = { running: 1, max: 3 };
+    const activity: AgentActivityState = {
+      lifecycle: 'ready',
+      turn: {
+        turnId: 3,
+        origin: { kind: 'user' },
+        phase: 'tool_call',
+        step: 2,
+        ending: false,
+        pendingApprovals: [{ approvalId: 'approval-1', since: 1 }],
+        activeToolCalls: [
+          { toolCallId: 'toolcall-1', name: 'Bash', since: 1 },
+          { toolCallId: 'toolcall-2', name: 'Read', since: 2 },
+        ],
+        since: 1,
+      },
+      lastTurn: { turnId: 2, reason: 'completed', at: 1 },
+      background: [],
+    };
+
+    const result = await executeTool(
+      makeHealthTool({ tasks, loopState: 'running', activity }).tool,
+      context('agent_health_activity', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('turn_phase: tool_call');
+    expect(output).toContain('turn_step: 2');
+    expect(output).toContain('active_tools: Bash, Read');
+    expect(output).toContain('pending_approvals: 1');
+    expect(output).toContain('last_turn_reason: completed');
+    expect(output).toContain('background_capacity: 1/3');
+  });
+
+  it('omits active tools when no tool call is running', async () => {
+    const activity: AgentActivityState = {
+      lifecycle: 'ready',
+      turn: {
+        turnId: 1,
+        origin: { kind: 'user' },
+        phase: 'running',
+        step: 1,
+        ending: false,
+        pendingApprovals: [],
+        activeToolCalls: [],
+        since: 1,
+      },
+      background: [],
+    };
+
+    const result = await executeTool(
+      makeHealthTool({ activity, loopState: 'running' }).tool,
+      context('agent_health_no_tools', { agent_id: 'agent-child' }),
+    );
+
+    expect(outputString(result)).not.toContain('active_tools:');
+  });
+
+  it('omits token totals when no usage is recorded', async () => {
+    const result = await executeTool(
+      makeHealthTool({ usageStatus: {} }).tool,
+      context('agent_health_no_usage', { agent_id: 'agent-child' }),
+    );
+    const output = outputString(result);
+
+    expect(output).toContain('context_tokens: 1234');
+    expect(output).not.toContain('total_input_tokens:');
+    expect(output).not.toContain('total_output_tokens:');
+  });
+
+  it('returns an error when neither a handle nor a task exists', async () => {
+    const result = await executeTool(
+      makeHealthTool({ handle: false }).tool,
+      context('agent_health_missing', { agent_id: 'agent-child' }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toBe('Agent not found: agent-child');
+  });
+
+  it('rejects execution when the agent_messaging flag is off', async () => {
+    const result = await executeTool(
+      makeHealthTool({ flagsOn: false }).tool,
+      context('agent_health_flag_off', { agent_id: 'agent-child' }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toContain('agent_messaging experimental flag is off');
+  });
+});
+
+describe('WaitForAllTool', () => {
+  it('has name and enforces the schema boundaries', () => {
+    const tool = new WaitForAllTool(new FakeTaskService(), stubFlag(true));
+
+    expect(tool.name).toBe('WaitForAll');
+    expect(tool.description).toContain('cohort');
+    expect(WaitForAllInputSchema.safeParse({ timeout: 60 }).success).toBe(true);
+    expect(
+      WaitForAllInputSchema.safeParse({ timeout: 60, agent_ids: ['agent-a'] }).success,
+    ).toBe(true);
+    expect(
+      WaitForAllInputSchema.safeParse({ timeout: 60, task_ids: ['bash-a'] }).success,
+    ).toBe(true);
+    expect(
+      WaitForAllInputSchema.safeParse({
+        timeout: 60,
+        agent_ids: ['agent-a'],
+        task_ids: ['bash-a'],
+      }).success,
+    ).toBe(false);
+    expect(WaitForAllInputSchema.safeParse({}).success).toBe(false);
+    expect(WaitForAllInputSchema.safeParse({ timeout: 0 }).success).toBe(false);
+    expect(WaitForAllInputSchema.safeParse({ timeout: -5 }).success).toBe(false);
+    expect(
+      WaitForAllInputSchema.safeParse({ timeout: WAIT_FOR_ALL_MAX_TIMEOUT_S }).success,
+    ).toBe(true);
+    expect(
+      WaitForAllInputSchema.safeParse({ timeout: WAIT_FOR_ALL_MAX_TIMEOUT_S + 1 }).success,
+    ).toBe(false);
+    expect(WaitForAllInputSchema.safeParse({ timeout: 1.5 }).success).toBe(false);
+    expect(WaitForAllInputSchema.safeParse({ timeout: 60, agent_ids: [] }).success).toBe(false);
+    expect(WaitForAllInputSchema.safeParse({ timeout: 60, task_ids: [] }).success).toBe(false);
+    expect(WaitForAllInputSchema.safeParse({ timeout: 60, task_ids: [''] }).success).toBe(false);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['timeout'],
+      properties: {
+        timeout: { type: 'integer' },
+        agent_ids: { type: 'array' },
+        task_ids: { type: 'array' },
+      },
+    });
+  });
+
+  it.each<{ readonly args: WaitForAllInput; readonly expected: string }>([
+    {
+      args: { timeout: 10, task_ids: ['bash-a', 'bash-b'] },
+      expected: 'Waiting up to 10s for 2 tasks',
+    },
+    {
+      args: { timeout: 10, agent_ids: ['agent-a'] },
+      expected: 'Waiting up to 10s for 1 agent',
+    },
+    {
+      args: { timeout: 10, agent_ids: ['agent-a', 'agent-b'] },
+      expected: 'Waiting up to 10s for 2 agents',
+    },
+    { args: { timeout: 10 }, expected: 'Waiting up to 10s for all background tasks' },
+  ])('describes the cohort as $expected', ({ args, expected }) => {
+    const tool = new WaitForAllTool(new FakeTaskService(), stubFlag(true));
+
+    const execution = tool.resolveExecution(args) as Extract<
+      ToolExecution,
+      { execute: unknown }
+    >;
+
+    expect(execution.description).toBe(expected);
+    expect(execution.accesses).toEqual([]);
+    expect(execution.approvalRule).toBe('WaitForAll');
+  });
+
+  it('matches the unfiltered cohort subject', () => {
+    const tool = new WaitForAllTool(new FakeTaskService(), stubFlag(true));
+
+    const execution = tool.resolveExecution({ timeout: 10 }) as Extract<
+      ToolExecution,
+      { execute: unknown }
+    >;
+
+    expect(execution.matchesRule?.('all')).toBe(true);
+    expect(execution.matchesRule?.('other')).toBe(false);
+  });
+
+  it('waits on every running task with a bounded shared timeout', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(processTask({ taskId: 'bash-wa-many1' }));
+    tasks.add(processTask({ taskId: 'bash-wa-many2' }));
+    tasks.waitDelegate = async (taskId) => {
+      tasks.settle(taskId);
+      return tasks.getTask(taskId);
+    };
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_many', { timeout: 600 }),
+    );
+
+    expect(result.isError).toBe(false);
+    expect(tasks.waitCalls.map((call) => call.taskId)).toEqual([
+      'bash-wa-many1',
+      'bash-wa-many2',
+    ]);
+    expect(
+      tasks.waitCalls.every(
+        (call) =>
+          call.timeoutMs !== undefined && call.timeoutMs > 0 && call.timeoutMs <= 600_000,
+      ),
+    ).toBe(true);
+  });
+
+  it('reports completed and marks every finished task delivered', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(processTask({ taskId: 'bash-wa-done1' }));
+    tasks.add(processTask({ taskId: 'bash-wa-done2' }));
+    tasks.capacityOverride = { running: 1, max: 3 };
+    tasks.waitDelegate = async (taskId) => {
+      tasks.settle(taskId);
+      return tasks.getTask(taskId);
+    };
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_completed', { timeout: 600 }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('wait_status: completed');
+    expect(output).toContain('cohort_count: 2');
+    expect(output).toContain('finished_count: 2');
+    expect(output).toContain('background_capacity: 1/3');
+    expect(output).toContain('[finished]');
+    expect(output).toContain('task_id: bash-wa-done1');
+    expect(output).not.toMatch(/^agent_id:/m);
+    expect(output).toContain('Use AgentResult with the agent_id or TaskOutput with the task_id');
+    expect(output).not.toContain('[still_running]');
+    expect(tasks.waitDeliveries).toEqual([
+      [
+        { taskId: 'bash-wa-done1', status: 'completed' },
+        { taskId: 'bash-wa-done2', status: 'completed' },
+      ],
+    ]);
+  });
+
+  it('reports partial and marks only the finished tasks delivered', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(processTask({ taskId: 'bash-wa-fin1' }));
+    tasks.add(processTask({ taskId: 'bash-wa-run1', description: 'still going' }));
+    tasks.waitDelegate = async (taskId) => {
+      if (taskId === 'bash-wa-fin1') tasks.settle(taskId);
+      return tasks.getTask(taskId);
+    };
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_partial', { timeout: 600 }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('wait_status: partial');
+    expect(output).toContain('finished_count: 1');
+    expect(output).toContain('[finished]');
+    expect(output).toContain('[still_running]');
+    expect(output).toContain('bash-wa-run1');
+    expect(tasks.waitDeliveries).toEqual([[{ taskId: 'bash-wa-fin1', status: 'completed' }]]);
+  });
+
+  it('reports timed_out without marking anything delivered', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(processTask({ taskId: 'bash-wa-time1' }));
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_timeout', { timeout: 10, task_ids: ['bash-wa-time1'] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('wait_status: timed_out');
+    expect(output).toContain('finished_count: 0');
+    expect(output).toContain('[still_running]');
+    expect(output).not.toContain('[finished]');
+    expect(tasks.waitDeliveries).toEqual([]);
+  });
+
+  it('resolves an agent cohort and reports the agent id for finished tasks', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(agentTaskInfo({ taskId: 'agent-cohort1', agentId: 'agent-a' }));
+    tasks.add(agentTaskInfo({ taskId: 'agent-cohort2', agentId: 'agent-b' }));
+    tasks.waitDelegate = async (taskId) => {
+      tasks.settle(taskId);
+      return tasks.getTask(taskId);
+    };
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_agents', { timeout: 60, agent_ids: ['agent-a'] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('wait_status: completed');
+    expect(output).toContain('task_id: agent-cohort1');
+    expect(output).toContain('agent_id: agent-a');
+    expect(output).not.toContain('agent-cohort2');
+    expect(tasks.waitCalls.map((call) => call.taskId)).toEqual(['agent-cohort1']);
+  });
+
+  it.each([
+    { args: { timeout: 10, task_ids: ['bash-missing'] }, message: 'Task not found: bash-missing' },
+    { args: { timeout: 10, agent_ids: ['agent-missing'] }, message: 'Agent not found: agent-missing' },
+  ])('returns an error for an unknown cohort member ($message)', async ({ args, message }) => {
+    const tasks = new FakeTaskService();
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_unknown', args),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toBe(message);
+    expect(tasks.waitCalls).toEqual([]);
+  });
+
+  it('returns no_tasks without waiting when nothing is running', async () => {
+    const tasks = new FakeTaskService();
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_none', { timeout: 10 }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('wait_status: no_tasks');
+    expect(output).toContain('waited_ms: 0');
+    expect(output).toContain('timeout_ms: 10000');
+    expect(output).toContain('No background tasks are running');
+    expect(tasks.waitCalls).toEqual([]);
+    expect(tasks.waitDeliveries).toEqual([]);
+  });
+
+  it('rejects execution when the wait_for flag is off', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(processTask({ taskId: 'bash-wa-flag1' }));
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag((id) => id === AGENT_MESSAGING_FLAG_ID)),
+      context('wait_all_flag_wait_for', { timeout: 10 }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toContain('wait_for experimental flag is off');
+    expect(tasks.waitCalls).toEqual([]);
+  });
+
+  it('rejects execution when the agent_messaging flag is off', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(processTask({ taskId: 'bash-wa-flag2' }));
+
+    const result = await executeTool(
+      new WaitForAllTool(tasks, stubFlag((id) => id === WAIT_FOR_FLAG_ID)),
+      context('wait_all_flag_messaging', { timeout: 10 }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toContain('agent_messaging experimental flag is off');
+    expect(tasks.waitCalls).toEqual([]);
+  });
+
+  it('propagates an abort while waiting', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(processTask({ taskId: 'bash-wa-abort' }));
+    tasks.waitDelegate = (_taskId, _timeoutMs, waitSignal) =>
+      new Promise<AgentTaskInfo | undefined>((_resolve, reject) => {
+        waitSignal?.addEventListener('abort', () => {
+          reject(abortError());
+        }, { once: true });
+      });
+
+    const controller = new AbortController();
+    const pending = executeTool(
+      new WaitForAllTool(tasks, stubFlag(true)),
+      context('wait_all_abort', { timeout: 600 }, controller.signal),
+    );
+    controller.abort();
+
+    await expect(pending).rejects.toThrow('Aborted');
+    expect(tasks.waitDeliveries).toEqual([]);
+  });
+});
+
+describe('StopAgentsTool', () => {
+  it('stopAgentsTool_schema_requiresExactlyOneSelector', () => {
+    const tool = new StopAgentsTool(new FakeTaskService(), stubFlag(true));
+
+    expect(tool.name).toBe('StopAgents');
+    expect(tool.description).toContain('background tasks');
+    expect(StopAgentsInputSchema.safeParse({ task_ids: ['bash-a'] }).success).toBe(true);
+    expect(StopAgentsInputSchema.safeParse({ agent_ids: ['agent-a'] }).success).toBe(true);
+    expect(StopAgentsInputSchema.safeParse({ all: true }).success).toBe(true);
+    expect(
+      StopAgentsInputSchema.safeParse({
+        task_ids: ['bash-a'],
+        reason: 'cleanup',
+        include_foreground: true,
+      }).success,
+    ).toBe(true);
+    expect(StopAgentsInputSchema.safeParse({}).success).toBe(false);
+    expect(StopAgentsInputSchema.safeParse({ reason: 'cleanup' }).success).toBe(false);
+    expect(
+      StopAgentsInputSchema.safeParse({ task_ids: ['bash-a'], agent_ids: ['agent-a'] }).success,
+    ).toBe(false);
+    expect(StopAgentsInputSchema.safeParse({ all: true, agent_ids: ['agent-a'] }).success).toBe(
+      false,
+    );
+    expect(StopAgentsInputSchema.safeParse({ all: true, task_ids: ['bash-a'] }).success).toBe(
+      false,
+    );
+    expect(
+      StopAgentsInputSchema.safeParse({
+        all: true,
+        agent_ids: ['agent-a'],
+        task_ids: ['bash-a'],
+      }).success,
+    ).toBe(false);
+    expect(StopAgentsInputSchema.safeParse({ all: false }).success).toBe(false);
+    expect(StopAgentsInputSchema.safeParse({ task_ids: [] }).success).toBe(false);
+    expect(StopAgentsInputSchema.safeParse({ agent_ids: [] }).success).toBe(false);
+    expect(StopAgentsInputSchema.safeParse({ task_ids: [''] }).success).toBe(false);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        agent_ids: { type: 'array' },
+        task_ids: { type: 'array' },
+        all: { type: 'boolean' },
+        include_foreground: { type: 'boolean' },
+        reason: { type: 'string' },
+      },
+    });
+  });
+
+  it.each<{
+    readonly label: string;
+    readonly args: StopAgentsInput;
+    readonly expected: string;
+    readonly subject: string;
+  }>([
+    {
+      label: 'OneTaskId',
+      args: { task_ids: ['bash-a'] },
+      expected: 'Stopping 1 task',
+      subject: 'bash-a',
+    },
+    {
+      label: 'ManyTaskIds',
+      args: { task_ids: ['bash-a', 'bash-b'] },
+      expected: 'Stopping 2 tasks',
+      subject: 'bash-a,bash-b',
+    },
+    {
+      label: 'OneAgentId',
+      args: { agent_ids: ['agent-a'] },
+      expected: 'Stopping 1 agent',
+      subject: 'agent-a',
+    },
+    {
+      label: 'ManyAgentIds',
+      args: { agent_ids: ['agent-a', 'agent-b'] },
+      expected: 'Stopping 2 agents',
+      subject: 'agent-a,agent-b',
+    },
+    {
+      label: 'All',
+      args: { all: true },
+      expected: 'Stopping all background tasks',
+      subject: 'all',
+    },
+  ])('stopAgentsTool_resolveExecution_setsMetadataFor$label', ({ args, expected, subject }) => {
+    const tool = new StopAgentsTool(new FakeTaskService(), stubFlag(true));
+
+    const execution = tool.resolveExecution(args) as Extract<ToolExecution, { execute: unknown }>;
+
+    expect(execution.description).toBe(expected);
+    expect(execution.accesses).toEqual([]);
+    expect(execution.approvalRule).toBe('StopAgents');
+    expect(execution.matchesRule?.(subject)).toBe(true);
+    expect(execution.matchesRule?.('unrelated')).toBe(false);
+  });
+
+  it('stopAgentsTool_taskIds_stopsRunningDetachedTaskAfterSuppressing', async () => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(processTask({ taskId: 'bash-sa-run0001' }));
+    const order: string[] = [];
+    const suppress = tasks.suppressTerminalNotification.bind(tasks);
+    const stop = tasks.stop.bind(tasks);
+    vi.spyOn(tasks, 'suppressTerminalNotification').mockImplementation(async (id) => {
+      order.push(`suppress:${id}`);
+      return suppress(id);
+    });
+    vi.spyOn(tasks, 'stop').mockImplementation(async (id, reason) => {
+      order.push(`stop:${id}`);
+      return stop(id, reason);
+    });
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_task_stop', { task_ids: [taskId] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 1/1');
+    expect(output).toContain(
+      `task_id: ${taskId}\nkind: process\nstatus: stopped\nreason: Stopped by StopAgents`,
+    );
+    expect(tasks.stopCalls).toEqual([{ taskId, reason: 'Stopped by StopAgents' }]);
+    expect(order).toEqual([`suppress:${taskId}`, `stop:${taskId}`]);
+  });
+
+  it('stopAgentsTool_taskIds_reportsTerminalTaskWithoutStopping', async () => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(
+      processTask({
+        taskId: 'bash-sa-done001',
+        status: 'completed',
+        endedAt: 1_700_000_001_000,
+        exitCode: 0,
+        stopReason: 'finished cleanly',
+      }),
+    );
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_task_terminal', { task_ids: [taskId] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 0/1');
+    expect(output).toContain(
+      `task_id: ${taskId}\nkind: process\nstatus: already_terminal\nreason: finished cleanly`,
+    );
+    expect(tasks.stopCalls).toEqual([]);
+    expect(tasks.suppressCalls).toEqual([]);
+  });
+
+  it.each<{
+    readonly label: string;
+    readonly stopReason: string | undefined;
+    readonly expected: string;
+  }>([
+    { label: 'WithStopReason', stopReason: 'killed elsewhere', expected: 'killed elsewhere' },
+    { label: 'WithoutStopReason', stopReason: undefined, expected: 'Task already completed' },
+    { label: 'WithBlankStopReason', stopReason: '   ', expected: 'Task already completed' },
+  ])('stopAgentsTool_taskIds_reportsTerminalReason$label', async ({ stopReason, expected }) => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(
+      processTask({
+        taskId: 'bash-sa-done002',
+        status: 'completed',
+        endedAt: 1_700_000_001_000,
+        exitCode: 0,
+        stopReason,
+      }),
+    );
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_task_terminal_reason', { task_ids: [taskId] }),
+    );
+
+    expect(outputString(result)).toContain(`status: already_terminal\nreason: ${expected}`);
+  });
+
+  it('stopAgentsTool_taskIds_reportsUnknownTaskAsNotFound', async () => {
+    const tasks = new FakeTaskService();
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_task_missing', { task_ids: ['bash-sa-missing1'] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 0/1');
+    expect(output).toContain('task_id: bash-sa-missing1\nstatus: not_found\nreason: Task not found');
+    expect(tasks.stopCalls).toEqual([]);
+    expect(tasks.suppressCalls).toEqual([]);
+  });
+
+  it('stopAgentsTool_agentIds_resolvesLatestTaskViaAgentTaskFor', async () => {
+    const tasks = new FakeTaskService();
+    tasks.add(
+      agentTaskInfo({
+        taskId: 'agent-sa-old0001',
+        agentId: 'agent-child',
+        status: 'completed',
+        startedAt: 1_700_000_000_000,
+        endedAt: 1_700_000_001_000,
+      }),
+    );
+    const liveId = tasks.add(
+      agentTaskInfo({
+        taskId: 'agent-sa-live001',
+        agentId: 'agent-child',
+        status: 'running',
+        startedAt: 1_700_000_002_000,
+        endedAt: null,
+      }),
+    );
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_agent_latest', { agent_ids: ['agent-child'] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 1/1');
+    expect(output).toContain(
+      `task_id: ${liveId}\nagent_id: agent-child\nkind: agent\nstatus: stopped\nreason: Stopped by StopAgents`,
+    );
+    expect(output).not.toContain('agent-sa-old0001');
+    expect(tasks.stopCalls).toEqual([{ taskId: liveId, reason: 'Stopped by StopAgents' }]);
+    expect(tasks.suppressCalls).toEqual([liveId]);
+  });
+
+  it('stopAgentsTool_agentIds_reportsUnknownAgentAsNotFound', async () => {
+    const tasks = new FakeTaskService();
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_agent_missing', { agent_ids: ['agent-missing'] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 0/1');
+    expect(output).toContain(
+      'agent_id: agent-missing\nstatus: not_found\nreason: No task found for agent',
+    );
+    expect(tasks.stopCalls).toEqual([]);
+  });
+
+  it('stopAgentsTool_foreground_skipsByDefault', async () => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(processTask({ taskId: 'bash-sa-fg00001', detached: false }));
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_foreground_default', { task_ids: [taskId] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 0/1');
+    expect(output).toContain(
+      `task_id: ${taskId}\nkind: process\nstatus: skipped_foreground\nreason: Foreground task skipped; set include_foreground=true to stop it.`,
+    );
+    expect(tasks.stopCalls).toEqual([]);
+    expect(tasks.suppressCalls).toEqual([]);
+  });
+
+  it('stopAgentsTool_foreground_stopsWhenIncludeForegroundIsTrue', async () => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(processTask({ taskId: 'bash-sa-fg00002', detached: false }));
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_foreground_included', {
+        task_ids: [taskId],
+        include_foreground: true,
+      }),
+    );
+
+    expect(result.isError).toBe(false);
+    expect(outputString(result)).toContain('stop_status: 1/1');
+    expect(tasks.stopCalls).toEqual([{ taskId, reason: 'Stopped by StopAgents' }]);
+    expect(tasks.suppressCalls).toEqual([taskId]);
+  });
+
+  it('stopAgentsTool_foreground_reportsTerminalForegroundTaskAsAlreadyTerminal', async () => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(
+      processTask({
+        taskId: 'bash-sa-fgdone1',
+        detached: false,
+        status: 'completed',
+        endedAt: 1_700_000_001_000,
+        exitCode: 0,
+      }),
+    );
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_foreground_terminal', { task_ids: [taskId] }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 0/1');
+    expect(output).toContain(
+      `task_id: ${taskId}\nkind: process\nstatus: already_terminal\nreason: Task already completed`,
+    );
+    expect(tasks.stopCalls).toEqual([]);
+    expect(tasks.suppressCalls).toEqual([]);
+  });
+
+  it('stopAgentsTool_all_stopsActiveDetachedAndSkipsForegroundAndTerminal', async () => {
+    const tasks = new FakeTaskService();
+    const runningId = tasks.add(processTask({ taskId: 'bash-sa-allrun1' }));
+    const foregroundId = tasks.add(processTask({ taskId: 'bash-sa-allfg01', detached: false }));
+    const terminalId = tasks.add(
+      processTask({
+        taskId: 'bash-sa-allend1',
+        status: 'completed',
+        endedAt: 1_700_000_001_000,
+        exitCode: 0,
+      }),
+    );
+    tasks.capacityOverride = { running: 1, max: 3 };
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_all', { all: true }),
+    );
+    const output = outputString(result);
+
+    expect(result.isError).toBe(false);
+    expect(output).toContain('stop_status: 1/2');
+    expect(output).toContain('background_capacity: 1/3');
+    expect(output).toContain(`task_id: ${runningId}\nkind: process\nstatus: stopped`);
+    expect(output).toContain(`task_id: ${foregroundId}\nkind: process\nstatus: skipped_foreground`);
+    expect(output).not.toContain(terminalId);
+    expect(tasks.stopCalls).toEqual([{ taskId: runningId, reason: 'Stopped by StopAgents' }]);
+    expect(tasks.suppressCalls).toEqual([runningId]);
+  });
+
+  it.each<{
+    readonly label: string;
+    readonly reason: string | undefined;
+    readonly expected: string;
+  }>([
+    { label: 'Custom', reason: '  cleanup fleet  ', expected: 'cleanup fleet' },
+    { label: 'Empty', reason: '', expected: 'Stopped by StopAgents' },
+    { label: 'Whitespace', reason: '   ', expected: 'Stopped by StopAgents' },
+    { label: 'Omitted', reason: undefined, expected: 'Stopped by StopAgents' },
+  ])('stopAgentsTool_reason_applies$label', async ({ reason, expected }) => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(processTask({ taskId: 'bash-sa-reason1' }));
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_reason', { task_ids: [taskId], reason }),
+    );
+
+    expect(result.isError).toBe(false);
+    expect(outputString(result)).toContain(`reason: ${expected}`);
+    expect(tasks.stopCalls).toEqual([{ taskId, reason: expected }]);
+  });
+
+  it('stopAgentsTool_output_reportsBackgroundCapacity', async () => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(processTask({ taskId: 'bash-sa-cap0001' }));
+    tasks.capacityOverride = { running: 2 };
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag(true)),
+      context('stop_agents_capacity', { task_ids: [taskId] }),
+    );
+
+    expect(outputString(result)).toContain('background_capacity: 2/unlimited');
+  });
+
+  it('stopAgentsTool_flagOff_returnsDisabledMessageWithoutStopping', async () => {
+    const tasks = new FakeTaskService();
+    const taskId = tasks.add(processTask({ taskId: 'bash-sa-flag001' }));
+
+    const result = await executeTool(
+      new StopAgentsTool(tasks, stubFlag((id) => id !== AGENT_FLEET_CONTROL_FLAG_ID)),
+      context('stop_agents_flag_off', { task_ids: [taskId] }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(outputString(result)).toBe(
+      'StopAgents is disabled: the agent_fleet_control experimental flag is off.',
+    );
+    expect(tasks.stopCalls).toEqual([]);
+    expect(tasks.suppressCalls).toEqual([]);
   });
 });

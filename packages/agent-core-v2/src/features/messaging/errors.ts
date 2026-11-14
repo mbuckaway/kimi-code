@@ -10,6 +10,9 @@ export const MessagingErrors = {
     MESSAGE_TARGET_INTERRUPTED: 'message.target_interrupted',
     MESSAGE_DELIVERY_TIMEOUT: 'message.delivery_timeout',
     MESSAGE_DELIVERY_FAILED: 'message.delivery_failed',
+    MESSAGE_NOT_FOUND: 'message.not_found',
+    STOP_SELF: 'stop.self',
+    STOP_MAIN_DENIED: 'stop.main_denied',
   },
   info: {
     'message.empty': {
@@ -59,6 +62,24 @@ export const MessagingErrors = {
       retryable: true,
       public: true,
       action: 'Retry the send.',
+    },
+    'message.not_found': {
+      title: 'The inbox message id is unknown',
+      retryable: false,
+      public: true,
+      action: 'Use ListMessages to get a current message id, then retry.',
+    },
+    'stop.self': {
+      title: 'An agent cannot stop itself',
+      retryable: false,
+      public: true,
+      action: 'Ask another agent, your parent, or the user to stop you.',
+    },
+    'stop.main_denied': {
+      title: 'The root agent cannot be stopped by an agent',
+      retryable: false,
+      public: true,
+      action: 'Only the user can stop the root agent.',
     },
   },
 } as const satisfies ErrorDomain;

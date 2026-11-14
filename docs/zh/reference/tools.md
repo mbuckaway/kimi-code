@@ -64,7 +64,7 @@
 | `EnterPlanMode` | 自动放行 | 进入 Plan 模式 |
 | `ExitPlanMode` | 自动放行（需用户确认计划） | 退出 Plan 模式并提交计划 |
 
-Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只允许写入当前的计划文件，`TaskStop` 被完全拦截。其余工具（包括 `Bash`）仍按当前权限规则处理。
+Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只允许写入当前的计划文件，`TaskStop`、`StopAgent`、`StopAgents`、`DismissAgents` 和 `InterruptAgent` 被完全拦截（`TagAgent` 与 `RenameAgent` 仍可用）。其余工具（包括 `Bash`）仍按当前权限规则处理。
 
 **`EnterPlanMode`** 不接受任何参数，进入成功后返回工作流指引及计划文件路径。
 
@@ -117,22 +117,54 @@ Supermoon 模式是最大严谨度的工作状态：开启后，Agent 默认用�
 | `AgentSwarm` | swarm mode 中自动放行，否则需审批 | 从 item 或 prompt 启动 subagent，或恢复已有 subagent |
 | `SendMessage` | 自动放行 | 向会话中的其他 Agent 发送消息 |
 | `ListAgents` | 自动放行 | 列出可以发消息的 Agent |
+| `ListMessages` | 自动放行 | 列出你收到的消息，最新的在前 |
+| `ReplyMessage` | 自动放行 | 按 id 回复收件箱中的消息 |
+| `BroadcastMessage` | 自动放行 | 向可以寻址的每个 Agent 发送一条消息 |
 | `AskUserQuestion` | 自动放行 | 向用户提问以获取结构化输入 |
 | `Skill` | 自动放行 | 调用已注册的 inline Skill |
 
-**`Agent`** 将子任务委托给 subagent 执行。必填参数：`prompt`（完整任务描述）和 `description`（3–5 个词的简短说明）。可选参数：`subagent_type`（默认 `coder`）、`resume`（恢复已有 Agent 的 ID，与 `subagent_type` 互斥）、`run_in_background`（默认 false）、`name`（实验功能；仅在启用 `agent_messaging` flag 时可用——为新 subagent 指定可按名称寻址的名字，由 1–64 个字母、数字、`.`、`_` 或 `-` 组成，在会话的所有 subagent 中唯一，`main` 保留给根 agent；resume 时忽略）和 `model`（仅在启用 [subagent 模型池](../configuration/config-files.md#subagent-模型池) 实验功能并配置模型池后可用——`[secondary_model.models]` 表或仅一行 `default_model`：池中别名，或 `"primary"` 表示调用方自己运行的模型；resume 时无效）。未传入时 subagent 绑定池的 `default_model`；未配置模型池时，subagent 一律继承调用方模型。Agent 任务默认 2 小时超时，可通过 `config.toml` 的 `[subagent] timeout_ms`（`0` = 无超时，或 `KIMI_SUBAGENT_TIMEOUT_MS` 环境变量）配置，且在 print 模式（`kimi -p`）下默认无超时。前台模式下父 Agent 等待 subagent 完成再继续；后台模式立即返回任务 ID，完成时通过合成 User 消息自动回到 main agent。多个前台 `Agent` 调用在同一步运行时，TUI 会合并展示，并为每个 subagent 显示运行、等待、完成或失败状态以及已耗时长。subagent 体系细节见 [Agent 与 subagent](../customization/agents.md)。
+**`Agent`** 将子任务委托给 subagent 执行。必填参数：`prompt`（完整任务描述）和 `description`（3–5 个词的简短说明）。可选参数：`subagent_type`（默认 `coder`）、`persona`（实验功能；仅在启用 `agent_persona` flag 时可用——persona 名称或工作区内的 persona 文件路径，应用于新 subagent；见 [Persona](../customization/agents.md#persona)）、`resume`（恢复已有 Agent 的 ID，与 `subagent_type` 互斥）、`run_in_background`（默认 false）、`name`（实验功能；仅在启用 `agent_messaging` flag 时可用——为新 subagent 指定可按名称寻址的名字，由 1–64 个字母、数字、`.`、`_` 或 `-` 组成，在会话的所有 subagent 中唯一，`main` 保留给根 agent；resume 时忽略）和 `model`（仅在启用 [subagent 模型池](../configuration/config-files.md#subagent-模型池) 实验功能并配置模型池后可用——`[secondary_model.models]` 表或仅一行 `default_model`：池中别名，或 `"primary"` 表示调用方自己运行的模型；resume 时无效）。未传入时 subagent 绑定池的 `default_model`；未配置模型池时，subagent 一律继承调用方模型。Persona 必须通过 `extends` 指向本次派生的基座 Agent：缺少 `extends` 会以 `persona.base_required` 拒绝，指向其他基座会以 `persona.base_mismatch` 拒绝。Persona 只会收窄基座 Agent 的 `tools`、`disallowedTools` 和 `subagents`，绝不放宽。`persona` 与 `resume` 或 `fork` 同时传入会被拒绝。通过 `KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=1` 或 `config.toml` 中 `[experimental]` 下的 `agent_persona = true` 开启该功能。Agent 任务默认 2 小时超时，可通过 `config.toml` 的 `[subagent] timeout_ms`（`0` = 无超时，或 `KIMI_SUBAGENT_TIMEOUT_MS` 环境变量）配置，且在 print 模式（`kimi -p`）下默认无超时。前台模式下父 Agent 等待 subagent 完成再继续；后台模式立即返回任务 ID，完成时通过合成 User 消息自动回到 main agent。多个前台 `Agent` 调用在同一步运行时，TUI 会合并展示，并为每个 subagent 显示运行、等待、完成或失败状态以及已耗时长。subagent 体系细节见 [Agent 与 subagent](../customization/agents.md)。
 
-**`AgentSwarm`** 可以从共享的 `prompt_template` 和 `items` 数组启动 subagent，也可以通过 `resume_agent_ids` 恢复已有 subagent，或在一次调用中同时使用两者。也可以改用 `prompts`（由至少 2 条互不相同的完整提示词组成的数组，每条对应一个 subagent）来代替 `items` 和 `prompt_template`；`prompts` 不能与二者同时传入。模板必须包含 `{{item}}` 占位符；每个 item 会替换该占位符，并启动一个新的 subagent。传入 `subagent_type` 可以指定整个 swarm 中所有新启动的 subagent 使用的 profile；省略时默认使用 `coder`。传入 `model`（仅在启用 [subagent 模型池](../configuration/config-files.md#subagent-模型池) 实验功能并配置模型池后可用——`[secondary_model.models]` 表或仅一行 `default_model`）可以让新启动的 subagent 运行在池中别名指定的模型或调用方自己的模型（`"primary"`）上。未传入时新启动的 subagent 绑定池的 `default_model`；未配置模型池时则继承调用方模型。恢复的 subagent 保持其原有模型。不传 `resume_agent_ids` 时，本工具要求至少 2 个 item 或 prompt；传入 `resume_agent_ids` 时，可以恢复 1 个或多个已有 subagent。本工具最多支持 128 个 subagent，会等待全部 subagent 完成，并返回聚合报告。每个 subagent 默认 2 小时超时，可通过 `config.toml` 的 [`[swarm] timeout_ms`](../configuration/config-files.md#swarm)（`0` = 无超时，或 `KIMI_CODE_SWARM_TIMEOUT_MS` 环境变量）配置，且在 print 模式（`kimi -p`）下默认无超时；超时的 subagent 会被中止，并在聚合报告中标记为失败。在 TUI 中，前台 swarm 会在输入框上方显示实时 `Agent swarm` 进度面板。在 `manual` 权限模式下，未处于 swarm mode 时调用 `AgentSwarm` 会触发审批，除非已有权限规则允许；swarm mode 已开启时，`AgentSwarm` 本身会自动放行。权限规则只能按工具名 `AgentSwarm` 匹配，不支持 `AgentSwarm(swarm)` 这类参数模式。默认情况下，本工具会逐步提升并发且不设上限（立即启动 5 个 subagent，之后每 700 毫秒再启动 1 个）；将 `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` 设为正整数可限制该阶段同时运行的 subagent 数量，不设置则表示不限制。若设置为非正整数的值，本次 AgentSwarm 调用会立即失败。
+**`AgentSwarm`** 可以从共享的 `prompt_template` 和 `items` 数组启动 subagent，也可以通过 `resume_agent_ids` 恢复已有 subagent，或在一次调用中同时使用两者。也可以改用 `prompts`（由至少 2 条互不相同的完整提示词组成的数组，每条对应一个 subagent）来代替 `items` 和 `prompt_template`；`prompts` 不能与二者同时传入。模板必须包含 `{{item}}` 占位符；每个 item 会替换该占位符，并启动一个新的 subagent。传入 `subagent_type` 可以指定整个 swarm 中所有新启动的 subagent 使用的 profile；省略时默认使用 `coder`。传入 `persona` 可为所有新启动的 subagent 统一应用一个 persona，或传入 `personas`——与 `items` 或 `prompts` 按位置一一对应，每项一条——为每个 subagent 分别指定；两者互斥。二者遵循与 `Agent` 相同的基座匹配规则：每个 persona 都必须通过 `extends` 指向本次 swarm 的基座 Agent（`subagent_type`，省略时为 `coder`），缺少 `extends` 会以 `persona.base_required` 拒绝，基座不一致会以 `persona.base_mismatch` 拒绝。Persona 只会收窄工具、禁止工具与 subagent。恢复的 subagent 会忽略 `persona` 与 `personas` 并保留自己的角色，与 `fork` 同时传入则会被拒绝。二者都是实验功能，由 `agent_persona` flag 控制（`KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=1`，或 `config.toml` 中 `[experimental]` 下的 `agent_persona = true`）。传入 `model`（仅在启用 [subagent 模型池](../configuration/config-files.md#subagent-模型池) 实验功能并配置模型池后可用——`[secondary_model.models]` 表或仅一行 `default_model`）可以让新启动的 subagent 运行在池中别名指定的模型或调用方自己的模型（`"primary"`）上。未传入时新启动的 subagent 绑定池的 `default_model`；未配置模型池时则继承调用方模型。恢复的 subagent 保持其原有模型。不传 `resume_agent_ids` 时，本工具要求至少 2 个 item 或 prompt；传入 `resume_agent_ids` 时，可以恢复 1 个或多个已有 subagent。本工具最多支持 128 个 subagent，会等待全部 subagent 完成，并返回聚合报告。每个 subagent 默认 2 小时超时，可通过 `config.toml` 的 [`[swarm] timeout_ms`](../configuration/config-files.md#swarm)（`0` = 无超时，或 `KIMI_CODE_SWARM_TIMEOUT_MS` 环境变量）配置，且在 print 模式（`kimi -p`）下默认无超时；超时的 subagent 会被中止，并在聚合报告中标记为失败。在 TUI 中，前台 swarm 会在输入框上方显示实时 `Agent swarm` 进度面板。在 `manual` 权限模式下，未处于 swarm mode 时调用 `AgentSwarm` 会触发审批，除非已有权限规则允许；swarm mode 已开启时，`AgentSwarm` 本身会自动放行。权限规则只能按工具名 `AgentSwarm` 匹配，不支持 `AgentSwarm(swarm)` 这类参数模式。默认情况下，本工具会逐步提升并发且不设上限（立即启动 5 个 subagent，之后每 700 毫秒再启动 1 个）；将 `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` 设为正整数可限制该阶段同时运行的 subagent 数量，不设置则表示不限制。若设置为非正整数的值，本次 AgentSwarm 调用会立即失败。
 
-**`SendMessage`** 向会话中的另一个 Agent 发送消息——`main`、父 Agent 或同级 Agent——用于询问信息、交付发现或回复收到的消息。`to` 接受 `main`、Agent 名称或原始 Agent id；`message` 是消息正文，`summary` 是可选的单行预览。运行中的接收方会在下一个步骤边界收到消息，空闲的 Agent 会在后台被唤醒，空闲的 `main` 则会开启新的轮次。**`ListAgents`** 不接受参数，列出可以发消息的 Agent 及其 id、名称和运行状态，且不会列出调用方自己。两个工具都是实验功能且默认启用：通过 `agent_messaging` flag 禁用（`KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING=0`，或 `config.toml` 中 `[experimental]` 下的 `agent_messaging = false`）。消息以 `<agent-message>` 信封送达，属于来自其他 Agent 的不受信任输入——既不是用户审批，也不授予任何权限。
+**`SendMessage`** 向会话中的另一个 Agent 发送消息——`main`、父 Agent 或同级 Agent——用于询问信息、交付发现或回复收到的消息。`to` 接受 `main`、Agent 名称或原始 Agent id；`message` 是消息正文，`summary` 是可选的单行预览。运行中的接收方会在下一个步骤边界收到消息，空闲的 Agent 会在后台被唤醒，空闲的 `main` 则会开启新的轮次。**`ListAgents`** 不接受参数，列出可以发消息的 Agent 及其 id、名称和运行状态，并显示每个 Agent 的角色、父 Agent id、标签和派生状态；id 和名称仍然是用于寻址的句柄，且不会列出调用方自己。五个工具（`SendMessage`、`ListAgents`、`ListMessages`、`ReplyMessage` 和 `BroadcastMessage`）都是实验功能且默认启用：通过 `agent_messaging` flag 禁用（`KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING=0`，或 `config.toml` 中 `[experimental]` 下的 `agent_messaging = false`）。消息和回复以 `<agent-message>` 信封送达，属于来自其他 Agent 的不受信任输入——既不是用户审批，也不授予任何权限。
+
+**`ListMessages`** 接受可选的 `from`（发送方 Agent 的 id 或名称）和 `limit`（默认 20，取值范围 1–100），按从新到旧的顺序返回调用方收到的消息。每条消息包含消息 id、发送方、投递模式和正文的简短预览，头部会报告有多少条消息已排入调用方的队列但尚未投递（`<N> queued, not yet delivered`）。**`ReplyMessage`** 接受 `message_id`（来自 `ListMessages` 的 id）、`message` 和可选的 `summary`；它会解析原发送方，并通过与 `SendMessage` 相同的路径投递回复，同时在信封上标记 `[re: <id>]`。id 未知时以 `message.not_found` 失败。**`BroadcastMessage`** 接受 `message` 和可选的 `summary`，按顺序向调用方可以寻址的每个 Agent 发送——与 `ListAgents` 相同的名册，绝不会包含调用方自己——并为每个接收方报告一行。单个接收方的失败（`queue_full`、`delivery_timeout`、`target_interrupted`）会作为数据报告，不会中断其他投递；只有调用方自己中止才会停止整个分发。没有其他可寻址的 Agent 时，它会报告没有可发送的对象。
 
 **`AskUserQuestion`** 以结构化多选题的形式向用户提问，适用于需要消歧或选择方案的场景。`questions` 参数接受 1–4 道题，每道题需提供 `question`（以 `?` 结尾）、`options`（2–4 个选项，每项含 `label` 和 `description`）以及可选的 `header`（最多 12 字符）和 `multi_select`（默认 false）。系统自动附加"其他"选项。`background` 为 true 时启动后台问题任务并立即返回任务 ID。宿主未实现交互式提问能力时返回失败提示，Agent 应改为在文本回复中直接提问。
 
 **`Skill`** 允许 Agent 主动调用已注册的 inline 类型 Skill。接受 `skill`（Skill 名称）和可选的 `args`（附加参数文本）。只有 `type = "inline"` 的 Skill 能通过此工具调用；`disableModelInvocation: true` 的 Skill 会被拒绝。嵌套调用深度上限 3 层。Skill 体系细节见 [Agent Skills](../customization/skills.md)。
 
+## 集群控制
+
+集群控制工具让 Agent 停止、移除、打标签和重命名其集群中的 Agent。
+
+| 工具 | 默认审批 | 说明 |
+| --- | --- | --- |
+| `StopAgent` | 需审批 | 取消单个 Agent 当前的运行，但不解除其名称 |
+| `InterruptAgent` | 需审批 | 让单个 Agent 完成当前步骤后再停止 |
+| `StopAgents` | 需审批 | 在一次调用中停止多个后台任务或 Agent |
+| `DismissAgents` | 需审批 | 把你拥有的 Agent 从会话名册中移除 |
+| `TagAgent` | 需审批 | 设置你拥有的 Agent 的标签 |
+| `RenameAgent` | 需审批 | 重命名你拥有的 Agent |
+
+**`StopAgent`** 接受 `agent_id` 和可选的 `reason`。它会取消目标当前的运行：活跃轮次、排队中的轮次，以及任何进行中的消息投递运行。停止不会解除目标的名称，之后发一条消息即可恢复它。Agent 不能停止自己，也不能停止 `main`。如果希望目标先完成当前步骤再停止，改用 `InterruptAgent`。
+
+**`InterruptAgent`** 接受 `agent_id`。它会请求目标优雅停止：目标完成当前步骤——包括已经调用的工具——然后停止，而不是在步骤中途被取消。需要立即终止时使用 `StopAgent`。Agent 不能中断自己，也不能中断 `main`。
+
+**`StopAgents`** 接受一个互斥选择器——`agent_ids`、`task_ids` 或 `all: true`——以及可选的 `include_foreground`（默认 `false`）和 `reason`。除非 `include_foreground` 为 true，否则前台任务会被排除，因为调用方可能正在等待它们。已处于终止状态的任务会按原样汇报，不会再次停止；结果会为每个请求的任务报告一段，状态为 `stopped`、`already_terminal`、`skipped_foreground` 或 `not_found`。停止不会解除名称，Agent 会保留其启动时获得的名称。
+
+**`DismissAgents`** 接受一个互斥选择器——`ids`、`names` 或 `all: true`——并把你拥有的 Agent 从会话名册中移除。归属关系指直接父级：只有父级是调用方的 Agent 才能被移除。该工具会拒绝 `main`、调用方自身以及任何你不拥有的 Agent。它会在移除任何内容之前校验每个 id，因此被拒绝的调用不会移除任何内容。运行中的 Agent 会先被关闭再移除；ghost 条目——只有元数据而没有存活 Agent——只会被注销。
+
+**`TagAgent`** 接受 `agent_id` 和 `tags`，后者最多包含 20 个标签。每个标签最多 32 个字符，且不能包含逗号，因为标签以逗号连接的形式存储在 Agent 的 `labels.tags` 中。传入 `tags: []` 可清空所有标签。只有你拥有的 Agent 才能打标签；`main`、调用方自身以及其他 Agent 的 subagent 都会被拒绝。打标签只改标签，绝不会中断或停止 Agent。
+
+**`RenameAgent`** 接受 `agent_id` 和 `name`。新名称会像启动时选择的名称一样校验并保留（1–64 个字母、数字、`.`、`_` 或 `-`；`main` 为保留名称），因此在该 Agent 存活期间其他 Agent 无法占用它。Agent id 永远不会改变，Agent 仍可通过 id 寻址，标签也不受影响。只有你拥有的 Agent 才能重命名；`main`、调用方自身以及其他 Agent 的 subagent 都会被拒绝。
+
+六个工具都是实验功能，默认关闭，由 `agent_fleet_control` flag 控制（`KIMI_CODE_EXPERIMENTAL_AGENT_FLEET_CONTROL=1`，或 `config.toml` 中 `[experimental]` 下的 `agent_fleet_control = true`）。它们不会自动放行，且停止与移除类工具在 Plan 模式下会被拦截。
+
 ## 后台任务
 
-后台任务工具用于管理通过 `Bash`、`Agent` 或 `AskUserQuestion` 启动的后台任务。任务进入终止状态时会自动把状态和已保存的输出路径送回 Agent；如需提前检查进度，使用 `TaskOutput`；如果下一步必须等待某个任务的结果，使用 `WaitFor` 在当前轮次内等待。
+后台任务工具用于管理通过 `Bash`、`Agent` 或 `AskUserQuestion` 启动的后台任务。任务进入终止状态时会自动把状态和已保存的输出路径送回 Agent；如需提前检查进度，使用 `TaskOutput`；如果下一步必须等待某个任务的结果，使用 `WaitFor` 在当前轮次内等待。另有三个只读工具用于查看更全面的情况：`AgentResult` 按 agent id 读取子 Agent 的最终结果，`AgentHealth` 报告单个 Agent 的健康状态与后台容量，`WaitForAll` 在同一个截止时间下等待整批后台任务。
 
 | 工具 | 默认审批 | 说明 |
 | --- | --- | --- |
@@ -140,6 +172,9 @@ Supermoon 模式是最大严谨度的工作状态：开启后，Agent 默认用�
 | `TaskOutput` | 自动放行 | 查看后台任务的输出 |
 | `TaskStop` | 需审批 | 停止正在运行的后台任务 |
 | `WaitFor` | 自动放行 | 等待后台任务结束 |
+| `AgentResult` | 自动放行 | 按 agent id 读取子 Agent 的最新结果 |
+| `AgentHealth` | 自动放行 | 查看单个 Agent 的派生健康状态与后台容量 |
+| `WaitForAll` | 自动放行 | 在同一个截止时间下等待整批后台任务 |
 
 **`TaskList`** 返回后台任务列表。可选参数 `active_only`（默认 true，仅列出运行中的任务）和 `limit`（默认 20，取值范围 1–100）。
 
@@ -148,6 +183,14 @@ Supermoon 模式是最大严谨度的工作状态：开启后，Agent 默认用�
 **`TaskStop`** 接受 `task_id` 和可选的 `reason`（默认 `Stopped by TaskStop`）。对已处于终止状态的任务也能安全调用。
 
 **`WaitFor`** 把当前轮次挂起，直到后台任务结束或超时。参数：`timeout`（必填，单位秒，上限 600）和可选的 `task_id`。不传 `task_id` 时，调用时刻运行中的任意一个后台任务结束即返回；当前没有运行中的后台任务时立即返回。超时不是错误——结果会列出仍在运行的任务，Agent 可以再次等待，也可以先处理其他工作。已通过 `WaitFor` 汇报结果的任务不会再推送自动完成通知。
+
+**`AgentResult`** 只接受一个 `agent_id`（来自 `ListAgents`，或来自 `TaskList` 中 agent 类型的任务），并解析该 Agent 最近的一次 agent 任务：仍在运行的任务优先于更早结束的任务，因此尚未完成的 Agent 不会返回最终结果。返回内容是结构化的任务元数据，加上最多最近 32 KB 的输出（已完成的 subagent 即为它的最终消息），以及指向完整日志的 `output_path`；预览被截断时用 `Read` 读取完整日志。该工具是只读的：它不会停止、恢复或以其他方式改变 Agent 及其任务。读取结果既不会抑制也不会重复自动完成通知——结果只会通过最先到达的途径送达一次。
+
+**`AgentHealth`** 接受 `agent_id`，返回该 Agent 的派生 `state`：`running`（循环正在处理一个轮次）、`stalled`（agent 任务仍在运行但循环空闲）、`orphaned`（元数据仍在，但没有存活的 Agent 句柄，已无法控制）、`lost`（任务在进程重启后残留，已无法再检查）、`idle`（Agent 存活且没有任务），或最后一个任务的终止状态（`completed`、`failed`、`timed_out`、`killed`）。除了状态之外，它还报告循环状态、当前轮次阶段与步骤、活跃工具、待审批项、上一轮次的结束原因、上下文 token 大小、累计输入 / 输出 token，以及 `background_capacity: <running>/<max>`（未配置上限时显示 `<running>/unlimited`）。`AgentHealth` 是只读工具，因此任何情况下都可以安全调用，包括在 Plan 模式下。
+
+**`WaitForAll`** 在同一个共享截止时间下等待整批后台任务。参数：`timeout`（必填，单位秒，上限 600），以及可选的 `agent_ids` 或 `task_ids`——二者最多只能传一个；都不传则等待调用时刻所有运行中的后台任务。它在调用开始时对整批任务做一次快照，因此等待期间新启动的任务不在覆盖范围内，仍通过常规的自动通知汇报。已完成的任务会被标记为已送达，不再额外产生自动完成通知。超时不是错误：结果会报告 `completed`、`partial` 或 `timed_out`，列出已完成的任务和仍在运行的任务，Agent 可以再次调用 `WaitForAll` 继续等待。该工具对任务只读——它不会停止任何任务，中断等待也会让所有任务继续运行。
+
+三个工具都是实验功能且默认启用：通过 `agent_messaging` flag 禁用（`KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING=0`，或 `config.toml` 中 `[experimental]` 下的 `agent_messaging = false`）。`WaitForAll` 还需要 `wait_for` flag，该 flag 默认开启。
 
 ## 定时任务
 

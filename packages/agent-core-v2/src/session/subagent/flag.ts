@@ -29,3 +29,18 @@ export const subagentForkFlag: FlagDefinitionInput = {
 };
 
 registerFlagDefinition(subagentForkFlag);
+
+export const AGENT_PERSONA_FLAG_ID = 'agent_persona';
+export const AGENT_PERSONA_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA';
+
+export const agentPersonaFlag: FlagDefinitionInput = {
+  id: AGENT_PERSONA_FLAG_ID,
+  title: 'Agent persona',
+  description:
+    'Let the Agent and AgentSwarm tools layer a Markdown persona (overlay or replace) onto a spawned agent profile via the persona/personas parameters.',
+  env: AGENT_PERSONA_FLAG_ENV,
+  default: false,
+  surface: 'core',
+};
+
+registerFlagDefinition(agentPersonaFlag);

@@ -2,6 +2,7 @@ import type {
   AgentProfile,
   AgentProfileContext,
   EnvironmentDisclosureSnapshot,
+  PersonaBinding,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { ModelCapability } from '#/kosong/contract/capability';
 import type { ThinkingEffort } from '#/kosong/contract/provider';
@@ -107,6 +108,7 @@ export interface BindAgentInput {
   readonly model?: string;
   readonly thinking?: string;
   readonly strictThinking?: boolean;
+  readonly persona?: PersonaBinding;
 }
 
 export interface IAgentProfileService {

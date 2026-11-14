@@ -1,3 +1,5 @@
+import type { PersonaBinding } from '#/app/agentProfileCatalog/agentProfileCatalog';
+
 import { PRIMARY_SUBAGENT_MODEL_CHOICE } from './configSection';
 
 export const DEFAULT_PROFILE_NAME = 'coder';
@@ -10,6 +12,10 @@ export const FORK_WITH_MODEL_UNAVAILABLE =
   'Cannot override the model when forking the current context. A fork inherits this agent\'s model.';
 export const FORK_EXPERIMENTAL_UNAVAILABLE =
   'fork is disabled: the subagent_fork experimental flag is off.';
+export const PERSONA_EXPERIMENTAL_UNAVAILABLE =
+  'persona is disabled: the agent_persona experimental flag is off.';
+export const PERSONA_WITH_FORK_UNAVAILABLE =
+  'Cannot set persona when forking the current context. A fork inherits this agent\'s own profile.';
 export const FORK_CONTEXT_NOTICE =
   'The conversation above is not your own history: it is a one-time snapshot inherited from the agent that forked you. Treat it as reference material only — you are an independent subagent, not a continuation of that agent. Do the task below directly yourself, then report the result.';
 
@@ -49,6 +55,7 @@ export interface SubagentSpawnPlanInput {
   readonly profileName?: string;
   readonly model?: string;
   readonly fork?: boolean;
+  readonly persona?: string;
 }
 
 export interface SubagentSpawnPlan {
@@ -56,6 +63,7 @@ export interface SubagentSpawnPlan {
   readonly model: string;
   readonly thinking?: string;
   readonly fork: boolean;
+  readonly persona?: PersonaBinding;
 }
 
 export interface SpawnSubagentOptions {

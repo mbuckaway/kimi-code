@@ -12,6 +12,7 @@ import { TOOLS_SECTION } from '#/agent/toolPolicy/configSection';
 import {
   DEFAULT_AGENT_PROFILE_NAME,
   normalizeAgentProfile,
+  type PersonaBinding,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { BuiltinAgentProfileLoaderService } from '#/app/agentProfileCatalog/builtinAgentProfileLoaderService';
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
@@ -1087,6 +1088,109 @@ describe('AgentProfileService tool-pattern warnings', () => {
     expect(messages.some((m) => m.includes('"*"') && m.includes('disallowedTools'))).toBe(true);
   });
 
+});
+
+describe('AgentProfileService persona bind threading', () => {
+  let ctx: TestAgentContext;
+  let homeDir: string;
+
+  beforeAll(() => {
+    registerAgentProfile({
+      name: 'persona-base',
+      tools: ['Read', 'Bash', 'Grep'],
+      disallowedTools: ['Write'],
+      subagents: ['coder', 'explore'],
+      systemPrompt: () => 'persona base prompt',
+    });
+    registerAgentProfile({
+      name: 'persona-skill-probe',
+      tools: ['Read', 'Skill'],
+      systemPrompt: (context) => `skill-active:${String(context.skillActive)}`,
+    });
+  });
+
+  beforeEach(async () => {
+    homeDir = await mkdtemp(join(tmpdir(), 'kimi-persona-bind-home-'));
+  });
+
+  afterEach(async () => {
+    await ctx?.dispose();
+    await rm(homeDir, { recursive: true, force: true });
+  });
+
+  async function bindAndReadProfileBind(
+    profile: string,
+    persona?: PersonaBinding,
+  ): Promise<{ record: Record<string, unknown>; svc: IAgentProfileService }> {
+    const persistence = new InMemoryWireRecordPersistence();
+    ctx = createTestAgent({ persistence }, hostEnvironmentServices(homeDir));
+    const svc = ctx.get(IAgentProfileService);
+
+    await svc.bind({ profile, model: MOCK_MODEL, persona });
+    await ctx.get(IWireService).flush();
+
+    const record = persistence.records.find((candidate) => candidate.type === 'profile.bind');
+    if (record === undefined) throw new Error('missing profile.bind record');
+    return { record, svc };
+  }
+
+  function baseProfileTools(name: string): readonly string[] | undefined {
+    return ctx.get(ISessionAgentProfileCatalog).get(name)?.tools;
+  }
+
+  it('renders an overlay persona into the base prompt without changing tools', async () => {
+    const { record, svc } = await bindAndReadProfileBind(DEFAULT_AGENT_PROFILE_NAME, {
+      name: 'overlay-persona',
+      mode: 'overlay',
+      text: 'PERSONA-OVERLAY-MARKER',
+    });
+
+    expect(svc.getSystemPrompt()).toContain('Kimi Code CLI');
+    expect(svc.getSystemPrompt()).toContain('PERSONA-OVERLAY-MARKER');
+    expect(record['activeToolNames']).toEqual(baseProfileTools(DEFAULT_AGENT_PROFILE_NAME));
+    expect(record['disallowedTools']).toEqual([]);
+  });
+
+  it('dispatches the narrowed tools, the union denylist, and the narrowed subagents', async () => {
+    const { record } = await bindAndReadProfileBind('persona-base', {
+      name: 'narrow-persona',
+      mode: 'overlay',
+      text: 'narrowed persona',
+      tools: ['Read', 'Bash'],
+      disallowedTools: ['Bash'],
+      subagents: ['explore'],
+    });
+
+    expect(record).toMatchObject({
+      profileName: 'persona-base',
+      activeToolNames: ['Read', 'Bash'],
+      disallowedTools: ['Write', 'Bash'],
+      subagents: ['explore'],
+    });
+  });
+
+  it('replaces the system prompt with the persona body while keeping base capabilities', async () => {
+    const { record, svc } = await bindAndReadProfileBind(DEFAULT_AGENT_PROFILE_NAME, {
+      name: 'replace-persona',
+      mode: 'replace',
+      text: 'PERSONA-REPLACE-BODY',
+    });
+
+    expect(svc.data().systemPrompt).toBe('PERSONA-REPLACE-BODY');
+    expect(record['activeToolNames']).toEqual(baseProfileTools(DEFAULT_AGENT_PROFILE_NAME));
+    expect(record['disallowedTools']).toEqual([]);
+  });
+
+  it('computes skillActive from the persona-narrowed tool set', async () => {
+    const { svc } = await bindAndReadProfileBind('persona-skill-probe', {
+      name: 'no-skill-persona',
+      mode: 'overlay',
+      text: 'no skill persona',
+      tools: ['Read'],
+    });
+
+    expect(svc.data().systemPrompt).toBe('skill-active:false');
+  });
 });
 
 async function executeDirectToolCall(ctx: TestAgentContext, name: string): Promise<ToolResult> {

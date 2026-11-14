@@ -5,7 +5,10 @@ import {
   type SystemPromptRenderResult,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { AgentProfileContribution } from '#/app/agentProfileCatalog/agentProfileContribution';
-import { renderPromptTemplateResult } from '#/app/agentProfileCatalog/profile-shared';
+import {
+  personaSkillsGuidance,
+  renderPromptTemplateResult,
+} from '#/app/agentProfileCatalog/profile-shared';
 
 import type { AgentFileDefinition, AgentFileDiscoveryResult } from './types';
 
@@ -16,16 +19,38 @@ export function agentProfileFromFile(
   const skillActive =
     (definition.tools === undefined || definition.tools.includes('Skill')) &&
     !(definition.disallowedTools ?? []).includes('Skill');
+  const isPersona = definition.extends !== undefined;
   return normalizeAgentProfile({
     name: definition.name,
     description: definition.description,
     whenToUse: definition.whenToUse,
     override: definition.override || definition.source === 'explicit',
+    mode: isPersona ? definition.mode : undefined,
+    extends: definition.extends,
+    persona: isPersona ? definition.prompt : undefined,
+    skills: definition.skills,
     tools: definition.tools,
     disallowedTools: definition.disallowedTools,
     subagents: definition.subagents,
-    renderSystemPrompt: (context) =>
-      renderPromptTemplateResult(definition.prompt, context, { skillActive }, basePrompt),
+    renderSystemPrompt: (context) => {
+      if (isPersona && definition.mode === 'replace') {
+        const guidance = personaSkillsGuidance(definition.skills);
+        return renderPromptTemplateResult(
+          guidance.length > 0 ? `${definition.prompt}\n\n${guidance}` : definition.prompt,
+          context,
+          { skillActive },
+          basePrompt,
+        );
+      }
+      if (isPersona) {
+        return basePrompt({
+          ...context,
+          persona: definition.prompt,
+          personaSkills: definition.skills,
+        });
+      }
+      return renderPromptTemplateResult(definition.prompt, context, { skillActive }, basePrompt);
+    },
   });
 }
 

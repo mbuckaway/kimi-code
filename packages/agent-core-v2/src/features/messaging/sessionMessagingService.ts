@@ -3,8 +3,10 @@ import { createControlledPromise } from '@antfu/utils';
 import { DisposableStore, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { type IAgentScopeHandle } from '#/_base/di/scope';
 import { Service } from '#/_base/di/service';
+import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 import {
   abortable,
+  abortError,
   createDeadlineAbortSignal,
   isUserCancellation,
   linkAbortSignal,
@@ -21,8 +23,11 @@ import { TurnStarted } from '#/agent/loop/turnEvents';
 import { TurnEnded, turnKey } from '#/agent/loop/turnOps';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { deriveAgentHealth } from '#/agent/task/agentHealth';
+import { agentTaskFor } from '#/agent/task/agentTaskLookup';
 import { IAgentTaskService } from '#/agent/task/task';
 import { SubagentTask } from '#/agent/tools/agent/subagent-task';
+import { AgentReminder, type ReminderRuntime } from '#/features/reminder/reminderAgentRuntime';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import {
@@ -43,16 +48,32 @@ import {
 import { AgentMessageStepRequest } from './agentMessageRequest';
 import { AGENT_MESSAGING_FLAG_ID } from './flag';
 import {
+  AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
+  DEFAULT_INBOX_LIMIT,
   MAX_BUFFERED_AGENT_MESSAGES,
+  MAX_INBOX_MESSAGES,
   MESSAGING_INSTRUCTIONS,
+  appendInboxEntry,
+  formatRosterChangeNotice,
   recordRecentSend,
   truncateAgentMessage,
   wrapAgentMessage,
 } from './envelope';
 import {
+  type AgentInbox,
+  type AgentInboxDelivery,
+  type AgentInboxMessage,
   type AgentRosterEntry,
+  type BroadcastDelivery,
+  type BroadcastFailure,
+  type BroadcastMessageResult,
+  type InterruptAgentResult,
   type ISessionMessagingService,
+  type ListMessagesOptions,
+  type ReplyMessageResult,
+  type SendMessageOptions,
   type SendMessageResult,
+  type StopAgentResult,
 } from './messaging';
 
 const QUEUE_FULL_MESSAGE = "The receiver's message queue is full — retry later.";
@@ -84,7 +105,13 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   private readonly launches = new Map<string, InFlightLaunch>();
   private readonly pendingMessages = new Map<string, number>();
   private readonly interruptedAgents = new Set<string>();
+  private readonly runControllers = new Map<string, AbortController>();
+  private readonly pendingInterrupts = new Map<string, IDisposable>();
   private readonly watchedAgents = new Map<string, IDisposable>();
+  private readonly inbox = new Map<string, AgentInboxMessage[]>();
+  private readonly lastRosterText = new Map<string, string>();
+  private readonly rosterSyncs = new Map<string, Promise<void>>();
+  private nextMessageNumber = 1;
 
   constructor(
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
@@ -93,21 +120,33 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     @IFlagService private readonly flags: IFlagService,
   ) {
     super();
-    for (const agent of this.agentLifecycle.list()) this.watchAgent(agent.agentId);
+    for (const agent of this.agentLifecycle.list()) {
+      this.watchAgent(agent.agentId);
+      this.scheduleRosterSync(agent.agentId);
+    }
     this._register(
       this.agentLifecycle.onDidCreate((agent) => {
         this.watchAgent(agent.agentId);
+        this.scheduleRosterSyncForAll();
       }),
     );
     this._register(
       this.agentLifecycle.onDidClose((agent) => {
         this.unwatchAgent(agent.agentId);
+        this.scheduleRosterSyncForAll();
+      }),
+    );
+    this._register(
+      this.sessionMetadata.onDidChangeMetadata((event) => {
+        if (event.changed.includes('agents')) this.scheduleRosterSyncForAll();
       }),
     );
     this._register(
       toDisposable(() => {
         for (const disposables of this.watchedAgents.values()) disposables.dispose();
         this.watchedAgents.clear();
+        for (const pending of this.pendingInterrupts.values()) pending.dispose();
+        this.pendingInterrupts.clear();
       }),
     );
   }
@@ -121,20 +160,33 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       'Addressable agents (use SendMessage with the id):',
       ...roster
         .filter((entry) => entry.agentId !== callerAgentId)
-        .map((entry) => `- ${this.labelOf(entry)} (id: ${entry.agentId})`),
+        .map((entry) => this.rosterLineOf(entry)),
     ].join('\n');
   }
 
   async listAgents(callerAgentId: string): Promise<readonly AgentRosterEntry[]> {
     const roster = await this.addressableAgents(callerAgentId);
+    const callerHandle = this.agentLifecycle.handleOf(callerAgentId);
+    const tasks = callerHandle === undefined ? [] : this.taskServiceOf(callerHandle).list(false);
     return roster
       .filter((entry) => entry.agentId !== callerAgentId)
-      .map((entry) => ({
-        agentId: entry.agentId,
-        name: entry.role === 'main' ? undefined : agentNameOf(entry.meta),
-        role: entry.role,
-        running: this.isRunning(entry.agentId),
-      }));
+      .map((entry) => {
+        const handle = this.agentLifecycle.handleOf(entry.agentId);
+        const loopState = handle === undefined ? undefined : this.loopOf(handle).status().state;
+        return {
+          agentId: entry.agentId,
+          name: entry.role === 'main' ? undefined : agentNameOf(entry.meta),
+          role: entry.role === 'main' ? 'main' : (entry.meta?.type ?? 'sub'),
+          running: this.isRunning(entry.agentId),
+          parentAgentId: subagentParentAgentId(entry.meta),
+          tags: parseAgentTags(entry.meta),
+          state: deriveAgentHealth({
+            hasHandle: handle !== undefined,
+            loopState,
+            task: agentTaskFor(tasks, entry.agentId),
+          }),
+        };
+      });
   }
 
   async sendMessage(
@@ -142,6 +194,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     to: string,
     message: string,
     signal?: AbortSignal,
+    options?: SendMessageOptions,
   ): Promise<SendMessageResult> {
     signal?.throwIfAborted();
     if (message.trim().length === 0) {
@@ -154,6 +207,180 @@ export class SessionMessagingService extends Service implements ISessionMessagin
         `Cannot send a message to yourself ("${recipient.agentId}").`,
       );
     }
+    return this.deliverResolved(callerAgentId, recipient, message, signal, options?.inReplyTo);
+  }
+
+  async listMessages(
+    callerAgentId: string,
+    options: ListMessagesOptions = {},
+  ): Promise<AgentInbox> {
+    const from = options.from?.trim();
+    const limit = Math.min(
+      MAX_INBOX_MESSAGES,
+      Math.max(1, options.limit ?? DEFAULT_INBOX_LIMIT),
+    );
+    const entries = this.inbox.get(callerAgentId) ?? [];
+    const filtered =
+      from === undefined || from.length === 0
+        ? entries
+        : entries.filter((entry) => entry.from === from || entry.fromLabel === from);
+    return {
+      messages: [...filtered].toReversed().slice(0, limit),
+      pending: this.pendingMessages.get(callerAgentId) ?? 0,
+    };
+  }
+
+  async replyMessage(
+    callerAgentId: string,
+    messageId: string,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<ReplyMessageResult> {
+    const id = messageId.trim();
+    if (message.trim().length === 0) {
+      throw new Error2(ErrorCodes.MESSAGE_EMPTY, 'Cannot send an empty message.');
+    }
+    const original = this.inbox
+      .get(callerAgentId)
+      ?.find((entry) => entry.id === id);
+    if (original === undefined) {
+      throw new Error2(
+        ErrorCodes.MESSAGE_NOT_FOUND,
+        `Unknown inbox message "${id}".`,
+        { details: { messageId: id } },
+      );
+    }
+    const result = await this.sendMessage(callerAgentId, original.from, message, signal, {
+      inReplyTo: original.id,
+    });
+    return { ...result, inReplyTo: original.id };
+  }
+
+  async broadcastMessage(
+    callerAgentId: string,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<BroadcastMessageResult> {
+    signal?.throwIfAborted();
+    if (message.trim().length === 0) {
+      throw new Error2(ErrorCodes.MESSAGE_EMPTY, 'Cannot send an empty message.');
+    }
+    const roster = await this.addressableAgents(callerAgentId);
+    const delivered: BroadcastDelivery[] = [];
+    const failed: BroadcastFailure[] = [];
+    for (const entry of roster) {
+      if (entry.agentId === callerAgentId) continue;
+      const agentId = entry.agentId;
+      const label = this.labelOf(entry);
+      const recipient: AgentMessageRecipient = { agentId, label, role: entry.role };
+      try {
+        const result = await this.deliverResolved(callerAgentId, recipient, message, signal);
+        delivered.push({ agentId, label, delivery: result.delivery });
+      } catch (error) {
+        if (signal?.aborted === true) throw error;
+        failed.push({
+          agentId,
+          label,
+          reason: broadcastFailureReason(error),
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { delivered, failed };
+  }
+
+  async stopAgent(
+    callerAgentId: string,
+    to: string,
+    reason?: string,
+    signal?: AbortSignal,
+  ): Promise<StopAgentResult> {
+    signal?.throwIfAborted();
+    const recipient = await this.resolveRecipient(callerAgentId, to);
+    this.assertStoppable(callerAgentId, recipient);
+    const cancelReason = abortError(stopReasonFor(callerAgentId, reason));
+    const controller = this.runControllers.get(recipient.agentId);
+    controller?.abort(cancelReason);
+    const handle = this.agentLifecycle.handleOf(recipient.agentId);
+    if (handle === undefined) {
+      return {
+        agentId: recipient.agentId,
+        label: recipient.label,
+        stopped: false,
+        pendingTurnIds: [],
+      };
+    }
+    const loop = this.loopOf(handle);
+    const status = loop.status();
+    const pendingTurnIds = [...status.pendingTurnIds];
+    const stopped =
+      status.state === 'running' || pendingTurnIds.length > 0 || controller !== undefined;
+    if (stopped) {
+      for (const turnId of pendingTurnIds) loop.cancel(turnId, cancelReason);
+      loop.cancel(undefined, cancelReason);
+    }
+    return {
+      agentId: recipient.agentId,
+      label: recipient.label,
+      stopped,
+      pendingTurnIds,
+    };
+  }
+
+  async interruptAgent(
+    callerAgentId: string,
+    to: string,
+    signal?: AbortSignal,
+  ): Promise<InterruptAgentResult> {
+    signal?.throwIfAborted();
+    const recipient = await this.resolveRecipient(callerAgentId, to);
+    this.assertStoppable(callerAgentId, recipient);
+    const handle = this.agentLifecycle.handleOf(recipient.agentId);
+    if (handle === undefined) {
+      return { agentId: recipient.agentId, label: recipient.label, interrupted: false };
+    }
+    const loop = this.loopOf(handle);
+    if (loop.status().state !== 'running') {
+      return { agentId: recipient.agentId, label: recipient.label, interrupted: false };
+    }
+    this.clearPendingInterrupt(recipient.agentId);
+    this.pendingInterrupts.set(
+      recipient.agentId,
+      loop.hooks.onDidFinishStep.register(
+        `agent-interrupt:${recipient.agentId}`,
+        async (context, next) => {
+          context.stopTurn = true;
+          await next();
+        },
+      ),
+    );
+    return { agentId: recipient.agentId, label: recipient.label, interrupted: true };
+  }
+
+  private assertStoppable(callerAgentId: string, recipient: AgentMessageRecipient): void {
+    if (recipient.agentId === MAIN_AGENT_ID) {
+      throw new Error2(
+        ErrorCodes.STOP_MAIN_DENIED,
+        'The root agent cannot be stopped by an agent.',
+      );
+    }
+    if (recipient.agentId === callerAgentId) {
+      throw new Error2(ErrorCodes.STOP_SELF, 'An agent cannot stop itself.');
+    }
+  }
+
+  private clearPendingInterrupt(agentId: string): void {
+    this.pendingInterrupts.get(agentId)?.dispose();
+    this.pendingInterrupts.delete(agentId);
+  }
+
+  private async deliverResolved(
+    callerAgentId: string,
+    recipient: AgentMessageRecipient,
+    message: string,
+    signal?: AbortSignal,
+    inReplyTo?: string,
+  ): Promise<SendMessageResult> {
     const { text, truncated } = truncateAgentMessage(message);
     const dedupeKey = this.dedupeKey(callerAgentId, recipient.agentId);
     const duplicate = (): SendMessageResult => ({
@@ -168,7 +395,14 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     const ownsInFlight = inFlightText === undefined;
     if (ownsInFlight) this.inFlightSends.set(dedupeKey, text);
     try {
-      return await this.deliverMessage(callerAgentId, recipient, text, truncated, signal);
+      return await this.deliverMessage(
+        callerAgentId,
+        recipient,
+        text,
+        truncated,
+        signal,
+        inReplyTo,
+      );
     } finally {
       if (ownsInFlight && this.inFlightSends.get(dedupeKey) === text) {
         this.inFlightSends.delete(dedupeKey);
@@ -182,11 +416,13 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     text: string,
     truncated: boolean,
     signal: AbortSignal | undefined,
+    inReplyTo?: string,
   ): Promise<SendMessageResult> {
     const origin = await this.agentMessageOrigin(callerAgentId);
+    const envelopeOptions = inReplyTo === undefined ? undefined : { inReplyTo };
     const message: ContextMessage = {
       role: 'user',
-      content: [{ type: 'text', text: wrapAgentMessage(origin, text) }],
+      content: [{ type: 'text', text: wrapAgentMessage(origin, text, envelopeOptions) }],
       toolCalls: [],
       origin,
     };
@@ -217,8 +453,16 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     }
     if (running || recipient.role === 'main') {
       this.steerMessage(callerAgentId, target, recipient, message, text);
+      const delivery: AgentInboxDelivery = running ? 'steered' : 'newTurn';
+      this.recordInboxEntry(recipient.agentId, {
+        from: callerAgentId,
+        fromLabel: origin.replyTo,
+        message: text,
+        delivery,
+        truncated,
+      });
       return {
-        delivery: running ? 'steered' : 'newTurn',
+        delivery,
         agentId: recipient.agentId,
         label: recipient.label,
         truncated,
@@ -241,6 +485,13 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     signal?.throwIfAborted();
     if (outcome === 'busy') {
       this.steerMessage(callerAgentId, target, recipient, message, text);
+      this.recordInboxEntry(recipient.agentId, {
+        from: callerAgentId,
+        fromLabel: origin.replyTo,
+        message: text,
+        delivery: 'steered',
+        truncated,
+      });
       return {
         delivery: 'steered',
         agentId: recipient.agentId,
@@ -253,7 +504,24 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       this.dedupeKey(callerAgentId, recipient.agentId),
       text,
     );
+    this.recordInboxEntry(recipient.agentId, {
+      from: callerAgentId,
+      fromLabel: origin.replyTo,
+      message: text,
+      delivery: 'resumed',
+      truncated,
+    });
     return { delivery: 'resumed', agentId: recipient.agentId, label: recipient.label, truncated };
+  }
+
+  private recordInboxEntry(
+    agentId: string,
+    entry: Omit<AgentInboxMessage, 'id'>,
+  ): void {
+    appendInboxEntry(this.inbox, agentId, {
+      id: `message-${this.nextMessageNumber++}`,
+      ...entry,
+    });
   }
 
   private dedupeKey(callerAgentId: string, recipientAgentId: string): string {
@@ -296,6 +564,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     const launch = this.acquireLaunch(recipient.agentId);
     if (launch === undefined) return 'busy';
     const controller = new AbortController();
+    this.runControllers.set(recipient.agentId, controller);
     const unlinkSignal = signal === undefined ? () => {} : linkAbortSignal(signal, controller);
     const startedAt = Date.now();
     try {
@@ -365,6 +634,9 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       return 'resumed';
     } finally {
       unlinkSignal();
+      if (this.runControllers.get(recipient.agentId) === controller) {
+        this.runControllers.delete(recipient.agentId);
+      }
       launch.release();
     }
   }
@@ -579,6 +851,16 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     return agentNameOf(entry.meta) ?? this.profileNameOfId(entry.agentId) ?? entry.agentId;
   }
 
+  private rosterLineOf(entry: AddressableAgent): string {
+    const suffix = `(id: ${entry.agentId})`;
+    if (entry.role === 'main') return `- ${MAIN_AGENT_ID} ${suffix}`;
+    const name = agentNameOf(entry.meta);
+    if (name !== undefined) return `- ${name} ${suffix}`;
+    const profileName = this.profileNameOfId(entry.agentId);
+    if (profileName !== undefined) return `- ${profileName} (profile) ${suffix}`;
+    return `- ${entry.agentId} ${suffix}`;
+  }
+
   private profileNameOfId(agentId: string): string | undefined {
     const handle = this.agentLifecycle.handleOf(agentId);
     if (handle === undefined) return undefined;
@@ -615,6 +897,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
         if (event.reason === 'cancelled' && event.interruptReason === 'user_cancelled') {
           this.interruptedAgents.add(agentId);
         }
+        this.clearPendingInterrupt(agentId);
       }),
     );
     disposables.add(
@@ -643,10 +926,67 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     else this.interruptedAgents.delete(agentId);
   }
 
+  async syncRoster(agentId: string): Promise<void> {
+    const previous = this.rosterSyncs.get(agentId) ?? Promise.resolve();
+    const run = previous.then(() => this.applyRosterSync(agentId));
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.rosterSyncs.set(agentId, tail);
+    try {
+      await run;
+    } finally {
+      if (this.rosterSyncs.get(agentId) === tail) this.rosterSyncs.delete(agentId);
+    }
+  }
+
+  private async applyRosterSync(agentId: string): Promise<void> {
+    if (!this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
+      this.lastRosterText.delete(agentId);
+      return;
+    }
+    const text = await this.rosterInstructions(agentId);
+    if (text === undefined) {
+      this.lastRosterText.delete(agentId);
+      return;
+    }
+    const previous = this.lastRosterText.get(agentId);
+    if (previous === undefined) {
+      this.lastRosterText.set(agentId, text);
+      return;
+    }
+    if (previous === text) return;
+    this.lastRosterText.set(agentId, text);
+    const context = this.agentLifecycle.get(agentId);
+    if (context === undefined) return;
+    let reminder: ReminderRuntime;
+    try {
+      reminder = this.agentLifecycle.resolve(context, AgentReminder);
+    } catch {
+      return;
+    }
+    reminder.notify(formatRosterChangeNotice(previous, text), {
+      variant: AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
+    });
+  }
+
+  private scheduleRosterSync(agentId: string): void {
+    void this.syncRoster(agentId).catch(onUnexpectedError);
+  }
+
+  private scheduleRosterSyncForAll(): void {
+    for (const agent of this.agentLifecycle.list()) this.scheduleRosterSync(agent.agentId);
+  }
+
   private unwatchAgent(agentId: string): void {
     this.watchedAgents.get(agentId)?.dispose();
     this.watchedAgents.delete(agentId);
+    this.clearPendingInterrupt(agentId);
     this.interruptedAgents.delete(agentId);
+    this.inbox.delete(agentId);
+    this.lastRosterText.delete(agentId);
+    this.rosterSyncs.delete(agentId);
   }
 
   private loopOf(handle: IAgentScopeHandle): IAgentLoopService {
@@ -681,6 +1021,29 @@ function ownEntry(
   agentId: string,
 ): AgentMeta | undefined {
   return Object.hasOwn(agents, agentId) ? agents[agentId] : undefined;
+}
+
+function broadcastFailureReason(error: unknown): string {
+  if (!(error instanceof Error2)) return 'delivery_failed';
+  const prefix = 'message.';
+  return error.code.startsWith(prefix) ? error.code.slice(prefix.length) : 'delivery_failed';
+}
+
+function stopReasonFor(callerAgentId: string, reason: string | undefined): string {
+  const trimmed = reason?.trim() ?? '';
+  return trimmed.length === 0
+    ? `Stopped by agent ${callerAgentId}`
+    : `Stopped by agent ${callerAgentId}: ${trimmed}`;
+}
+
+function parseAgentTags(meta: AgentMeta | undefined): readonly string[] | undefined {
+  const raw = meta?.labels?.['tags'];
+  if (raw === undefined) return undefined;
+  const tags = raw
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+  return tags.length > 0 ? tags : undefined;
 }
 
 function interruptedAgentError(agentId: string): Error2 {

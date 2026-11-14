@@ -20,6 +20,7 @@ import {
 } from '#/agent/task/task';
 import { renderNotificationXml } from '#/agent/task/notificationXml';
 import { AgentTaskService, taskNotificationDeliveryKey } from '#/agent/task/taskService';
+import { TASK_SECTION } from '#/agent/task/configSection';
 import { ProcessTask } from '#/agent/tools/os/bash/process-task';
 import type { IHostProcess } from '#/os/interface/hostProcess';
 import { IConfigRegistry, IConfigService } from '#/app/config/config';
@@ -193,6 +194,50 @@ describe('AgentTaskService', () => {
     expect(listed[0]?.kind).toBe('process');
     expect(await svc.readOutput(id)).toBe('');
     await svc.stop(id);
+  });
+
+  it('capacity reports zero running tasks and no max when the task config is absent', () => {
+    const get = vi.fn(() => undefined);
+    ix.stub(IConfigService, { get: get as IConfigService['get'] });
+    const svc = ix.get(IAgentTaskService);
+
+    expect(svc.capacity()).toStrictEqual({ running: 0, max: undefined });
+  });
+
+  it('capacity reports the configured maxRunningTasks for the task section', () => {
+    const get = vi.fn((domain: string) =>
+      domain === TASK_SECTION ? { maxRunningTasks: 2 } : undefined,
+    );
+    ix.stub(IConfigService, { get: get as IConfigService['get'] });
+    const svc = ix.get(IAgentTaskService);
+
+    expect(svc.capacity()).toStrictEqual({ running: 0, max: 2 });
+  });
+
+  it('capacity counts a detached task while it runs and drops it once stopped', async () => {
+    const get = vi.fn((domain: string) =>
+      domain === TASK_SECTION ? { maxRunningTasks: 2 } : undefined,
+    );
+    ix.stub(IConfigService, { get: get as IConfigService['get'] });
+    const svc = ix.get(IAgentTaskService);
+    const taskId = svc.registerTask(fakeProcessTask(), { detached: true });
+
+    expect(svc.capacity()).toStrictEqual({ running: 1, max: 2 });
+
+    await svc.stop(taskId);
+
+    expect(svc.capacity()).toStrictEqual({ running: 0, max: 2 });
+  });
+
+  it('capacity does not count a foreground task', () => {
+    const get = vi.fn((domain: string) =>
+      domain === TASK_SECTION ? { maxRunningTasks: 2 } : undefined,
+    );
+    ix.stub(IConfigService, { get: get as IConfigService['get'] });
+    const svc = ix.get(IAgentTaskService);
+    svc.registerTask(fakeProcessTask(), { detached: false });
+
+    expect(svc.capacity()).toStrictEqual({ running: 0, max: 2 });
   });
 
   it('wait with a timeout beyond the timer ceiling does not resolve immediately', async () => {

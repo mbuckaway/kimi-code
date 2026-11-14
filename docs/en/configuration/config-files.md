@@ -492,7 +492,8 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `kimi_oauth` | `boolean` | `false` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI; token/apiKey auth remains the default |
-| `agent_messaging` | `boolean` | `true` | Agent-to-agent messaging: the `SendMessage` and `ListAgents` tools, and the `name` parameter on the `Agent` tool; set to `false` to disable |
+| `agent_messaging` | `boolean` | `true` | Agent-to-agent messaging and read-only fleet visibility: the `SendMessage`, `ListAgents`, `AgentResult`, `AgentHealth` and `WaitForAll` tools, and the `name` parameter on the `Agent` tool; set to `false` to disable |
+| `agent_fleet_control` | `boolean` | `false` | Destructive fleet lifecycle control: the `StopAgent`, `InterruptAgent`, `StopAgents`, `DismissAgents`, `TagAgent` and `RenameAgent` tools; off by default |
 
 ## `services`
 

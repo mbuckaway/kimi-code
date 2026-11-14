@@ -1,0 +1,1 @@
+While a background subagent runs, AgentResult reads its final message by agent id, AgentHealth reports one agent's running/stalled/orphaned health plus current background capacity, and WaitForAll waits for a whole cohort of tasks under one shared deadline.

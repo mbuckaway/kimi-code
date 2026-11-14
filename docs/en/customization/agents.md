@@ -106,12 +106,15 @@ You are a strict code reviewer. Read the diff, then report findings grouped by s
 | `tools` | no | Allowlist of tool names such as `Read` or `Bash`; MCP tools are matched with globs such as `mcp__github__*`. Accepts a YAML list or a comma-separated string (`tools: Read, Grep`). Omit to allow all tools; a lone `*` also allows all tools; an empty list (`tools: []`) disables all tools |
 | `disallowedTools` | no | Denylist with the same syntax and matching rules, applied after `tools` |
 | `subagents` | no | Allowlist of sub-agent names this agent may delegate to, with the same syntax as `tools` (YAML list or comma-separated string). Omit to inherit the default agent's allowlist (built-in default: `coder`, `explore`, `plan`, whose members cannot delegate further, so inherited chains always terminate); a lone `*` allows every type. The main agent's effective allowlist additionally includes every discovered custom agent, so custom agents stay delegatable by default |
+| `extends` | no | Base agent this file adds a role layer to. When present, the file is a [persona](#personas) rather than a standalone agent |
+| `mode` | no | How a persona combines with its base agent: `overlay` (the default) renders the body into the base prompt's `${persona}` slot, while `replace` makes the body the system prompt and still expands `${base_prompt}` to the base prompt. Any other value is ignored and the default applies. Read only when `extends` is present; see [Personas](#personas) |
+| `skills` | no | The persona's strengths, as a YAML list or a comma-separated string, rendered as `You are strongest at: <list>.` at the end of the persona block. `expertise` is an accepted alias when `skills` is absent |
 
 Built-in and user tools match by exact, case-sensitive name; entries starting with `mcp__` match MCP tools as globs. Three entry shapes never match anything and are reported with a warning when the profile takes effect: a wildcard outside an `mcp__` pattern (a bare `*` in `disallowedTools` disables nothing), an `mcp__` literal that is not a full `mcp__<server>__<tool>` name (`mcp__github` matches nothing — use `mcp__github__*` for the whole server), and a name no registered or built-in tool has (usually a typo, such as `read` instead of `Read`).
 
 The body is the agent's system prompt, and it is rendered as a template each time the prompt is built: `${var}` placeholders substitute live context values — unknown variables stay verbatim, a bare `$` is never special, and a variable with no context value renders as an empty string. `${base_prompt}` embeds the effective default system prompt (the built-in default, or your `SYSTEM.md` override when present), so a file can wrap the default behavior instead of replacing it. If the file replaces the default prompt but should still honor instructions contributed by enabled plugins, place `${plugin_sections}` where those instructions should appear. The available variables are listed in the SYSTEM.md section below.
 
-Unknown fields are ignored, so newer files stay readable by older versions. Fields from other agent tools (such as Claude Code's `model` or OpenCode's `mode`) are ignored the same way, the comma-separated `tools` form keeps Claude Code-style agent files loadable, and a missing `name` falls back to the file name so OpenCode-style files load too — a minimal file with `description` and a body works across tools.
+Unknown fields are ignored, so newer files stay readable by older versions. Fields from other agent tools (such as Claude Code's `model`) are ignored the same way, and a `mode` value other than `overlay` or `replace` — OpenCode's `mode: subagent`, for example — falls back to the default. The comma-separated `tools` form keeps Claude Code-style agent files loadable, and a missing `name` falls back to the file name so OpenCode-style files load too — a minimal file with `description` and a body works across tools.
 
 A file with invalid content discovered in a directory is skipped with a warning and does not affect other files. A file passed explicitly via `--agent-file` must be valid — otherwise the CLI reports the error and exits.
 
@@ -120,6 +123,29 @@ A file with invalid content discovered in a directory is skipped with a warning 
 :::
 
 Custom agents delegated as sub-agents run without the built-in sub-agent framing ("your final message is the entire handoff"). If you write an agent meant for delegation, state in the body that its last message should be the complete, self-contained result for the caller.
+
+### Personas
+
+A persona is an agent file that adds a role layer to another agent, its base agent, instead of defining a standalone agent. Use one when several tasks share a base agent but need different role framing — for example, a `coder` that reviews security in one spawn and performance in another. The feature is experimental and off by default: enable it with `KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=1` or `agent_persona = true` under `[experimental]` in `config.toml`.
+
+A persona declares `extends` to name its base agent and `mode` to choose how the two prompts combine. `mode: overlay` is the default: the base system prompt stays intact, and the persona body renders into its `${persona}` slot after the role section. `mode: replace` makes the persona body the system prompt instead, while `${base_prompt}` still expands to the effective base prompt, so the body can wrap it deliberately.
+
+```markdown
+---
+name: security-reviewer
+extends: coder
+mode: overlay
+skills:
+  - threat modeling
+  - secrets detection
+---
+
+Review every change for injection, credential handling, and unsafe defaults…
+```
+
+A persona can narrow its base agent but never widen it. Its `tools` and `subagents` lists intersect with the base lists, and an `mcp__` glob matches only inside its own server pattern, so the result always stays a subset of the base allowlist. `disallowedTools` takes the union of both lists. A persona can never add a tool, a subagent type, or any other capability the base agent does not already have.
+
+When you pass a persona through the `persona` parameter of `Agent`, the file must declare `extends`, and the value must name the base agent being spawned. A missing `extends` is rejected with `persona.base_required`, and a different base with `persona.base_mismatch`. A path persona applies to that one spawn only, is not registered in the agent catalog, and must live inside the workspace. `Agent(name)` gives a subagent instance its addressable name, while `persona` selects the instance's role — the two parameters are independent.
 
 ### Selecting the Main Agent
 
@@ -160,8 +186,9 @@ Like the body of a regular agent file, SYSTEM.md is rendered as a template each 
 | `${additional_dirs_info}` | Additional directories added to the workspace; empty when there are none |
 | `${base_prompt}` | The default system prompt. Inside `SYSTEM.md` itself this is the built-in default; inside an agent file it is the effective default — the built-in default, or your `SYSTEM.md` override when present |
 | `${plugin_sections}` | A complete Plugin Instructions block contributed by enabled plugins; empty when no enabled plugin contributes instructions |
+| `${persona}` | The active persona block, composed from the persona body and its `skills` line; empty when no persona applies |
 
-Unknown variables stay verbatim, a bare `$` is never special, and a variable with no context value renders as an empty string. Four pre-composed blocks — `${windows_notes}`, `${additional_dirs_section}`, `${skills_section}`, and `${plugin_sections}` — render the matching built-in prompt section, or an empty string when it does not apply. The built-in default prompt already includes `${plugin_sections}`, so do not add it again when `${base_prompt}` already expands to that prompt. The variables are enough to rebuild the skeleton of the built-in prompt, for example:
+Unknown variables stay verbatim, a bare `$` is never special, and a variable with no context value renders as an empty string. Five pre-composed blocks — `${windows_notes}`, `${additional_dirs_section}`, `${skills_section}`, `${plugin_sections}`, and `${persona}` — render the matching built-in prompt section, or an empty string when it does not apply. The built-in default prompt already includes `${plugin_sections}`, so do not add it again when `${base_prompt}` already expands to that prompt. The variables are enough to rebuild the skeleton of the built-in prompt, for example:
 
 ```markdown
 You are Kimi, running at ${cwd} on ${os}.

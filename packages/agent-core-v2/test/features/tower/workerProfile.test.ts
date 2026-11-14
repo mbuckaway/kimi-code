@@ -15,14 +15,28 @@ describe('tower-worker profile', () => {
     const coder = builtinProfile('coder');
     const tools = TOWER_WORKER_PROFILE_DEF.tools ?? [];
 
+    const notCoderTools: readonly string[] = [
+      'AgentSwarm',
+      'EnterSupermoonMode',
+      'ExitSupermoonMode',
+      'SendMessage',
+      'ListAgents',
+      'BroadcastMessage',
+      'ListMessages',
+      'ReplyMessage',
+      'AgentResult',
+      'AgentHealth',
+      'WaitForAll',
+      'StopAgent',
+      'StopAgents',
+      'InterruptAgent',
+      'DismissAgents',
+      'RenameAgent',
+      'TagAgent',
+    ];
+
     for (const name of coder.tools ?? []) {
-      if (
-        name === 'AgentSwarm' ||
-        name === 'EnterSupermoonMode' ||
-        name === 'ExitSupermoonMode' ||
-        name === 'SendMessage' ||
-        name === 'ListAgents'
-      ) {
+      if (notCoderTools.includes(name)) {
         continue;
       }
       expect(tools).toContain(name);
