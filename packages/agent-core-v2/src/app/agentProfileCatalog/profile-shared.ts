@@ -5,6 +5,7 @@ import {
   type AgentProfile,
   type AgentProfileContext,
   type EnvironmentDisclosureSnapshot,
+  type PersonaBinding,
   type SystemPromptRenderResult,
 } from './agentProfileCatalog';
 import { BUILTIN_AGENT_PROFILE_SOURCE_ID } from './builtinAgentProfileLoader';
@@ -127,6 +128,11 @@ function resolveLanguageDirective(context: AgentProfileContext): string {
   return `Reply in ${lang}. Only switch languages if the user explicitly writes to you in another language. Never infer the user's language from project context, file contents, or tool output.`;
 }
 
+export function personaSkillsGuidance(skills: readonly string[] | undefined): string {
+  if (skills === undefined || skills.length === 0) return '';
+  return `You are strongest at: ${skills.join(', ')}.`;
+}
+
 export function systemPromptVars(
   context: AgentProfileContext,
   options: { readonly skillActive: boolean },
@@ -137,7 +143,7 @@ export function systemPromptVars(
   const skills = skillActive ? (context.skills ?? '') : '';
   const pluginSections = context.pluginSections ?? '';
   const additionalDirsInfo = context.additionalDirsInfo ?? '';
-  return {
+  const vars: Record<string, string> = {
     role_additional: '',
     product_name: context.productName ?? DEFAULT_PRODUCT_NAME,
     reply_style_guide: context.replyStyleGuide ?? DEFAULT_REPLY_STYLE_GUIDE,
@@ -161,6 +167,12 @@ export function systemPromptVars(
         ? `\n\n# Plugin Instructions\n\n${PLUGIN_SECTIONS_PROSE}\n\n${pluginSections}\n\n`
         : '',
   };
+  const personaBody = renderPrompt(context.persona ?? '', vars).trim();
+  const personaGuidance = personaSkillsGuidance(context.personaSkills);
+  const personaContent =
+    personaGuidance.length > 0 ? `${personaBody}\n\n${personaGuidance}`.trim() : personaBody;
+  vars['persona'] = personaContent.length > 0 ? `\n\n${personaContent}\n\n` : '';
+  return vars;
 }
 
 export function renderPromptTemplateResult(
@@ -205,4 +217,94 @@ function mergeEnvironmentDisclosure(
 ): EnvironmentDisclosureSnapshot {
   if (base === undefined) return direct;
   return { cwd: direct.cwd || base.cwd };
+}
+
+function mcpGlobPrefix(entry: string): string | undefined {
+  if (!entry.startsWith('mcp__')) return undefined;
+  const star = entry.indexOf('*');
+  return star === -1 ? undefined : entry.slice(0, star);
+}
+
+function intersectToolEntry(baseEntry: string, personaEntry: string): string | undefined {
+  if (baseEntry === personaEntry) return baseEntry;
+  if (!baseEntry.startsWith('mcp__') || !personaEntry.startsWith('mcp__')) return undefined;
+  const basePrefix = mcpGlobPrefix(baseEntry);
+  const personaPrefix = mcpGlobPrefix(personaEntry);
+  if (personaPrefix !== undefined && baseEntry.startsWith(personaPrefix)) return baseEntry;
+  if (basePrefix !== undefined && personaEntry.startsWith(basePrefix)) return personaEntry;
+  return undefined;
+}
+
+function narrowTools(
+  base: readonly string[] | undefined,
+  persona: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (persona === undefined) return base;
+  if (base === undefined) return persona;
+  const narrowed: string[] = [];
+  for (const baseEntry of base) {
+    for (const personaEntry of persona) {
+      const intersection = intersectToolEntry(baseEntry, personaEntry);
+      if (intersection !== undefined && !narrowed.includes(intersection)) {
+        narrowed.push(intersection);
+      }
+    }
+  }
+  return narrowed;
+}
+
+function narrowSubagents(
+  base: readonly string[] | undefined,
+  persona: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (persona === undefined || persona.includes('*')) return base;
+  if (base === undefined) return persona;
+  if (base.includes('*')) return persona;
+  return base.filter((name) => persona.includes(name));
+}
+
+function unionToolList(
+  base: readonly string[] | undefined,
+  persona: readonly string[] | undefined,
+): readonly string[] | undefined {
+  const merged = [...new Set([...(base ?? []), ...(persona ?? [])])];
+  return merged.length > 0 ? merged : undefined;
+}
+
+export function renderPersonaSystemPrompt(
+  basePrompt: (context: AgentProfileContext) => SystemPromptRenderResult,
+  persona: Pick<PersonaBinding, 'mode' | 'text' | 'skills'>,
+  skillActive: boolean,
+): (context: AgentProfileContext) => SystemPromptRenderResult {
+  if (persona.mode === 'replace') {
+    const guidance = personaSkillsGuidance(persona.skills);
+    return (context) =>
+      renderPromptTemplateResult(
+        guidance.length > 0 ? `${persona.text}\n\n${guidance}` : persona.text,
+        context,
+        { skillActive },
+        basePrompt,
+      );
+  }
+  return (context) =>
+    basePrompt({ ...context, persona: persona.text, personaSkills: persona.skills });
+}
+
+export function withPersona(base: AgentProfile, persona: PersonaBinding): AgentProfile {
+  const tools = narrowTools(base.tools, persona.tools);
+  const disallowedTools = unionToolList(base.disallowedTools, persona.disallowedTools);
+  const subagents = narrowSubagents(base.subagents, persona.subagents);
+  const renderSystemPrompt = renderPersonaSystemPrompt(
+    (context) => base.renderSystemPrompt(context),
+    persona,
+    skillActiveFor(tools ?? []),
+  );
+  return {
+    ...base,
+    tools,
+    disallowedTools,
+    subagents,
+    renderSystemPrompt,
+    systemPrompt: (context) => renderSystemPrompt(context).text,
+  };
 }

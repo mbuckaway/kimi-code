@@ -127,6 +127,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       plan,
       labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
       prompt: options.prompt,
+      name: options.name,
     });
     emitAgentRunSpawned(caller, spawned.agentId, {
       profileName: plan.profileName,

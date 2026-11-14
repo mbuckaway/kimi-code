@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   normalizeAgentProfile,
+  type AgentProfile,
   type AgentProfileContext,
   type AgentProfileInput,
+  type PersonaBinding,
   type SystemPromptRenderResult,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import {
@@ -13,12 +15,14 @@ import {
 } from '#/app/agentProfileCatalog/contribution';
 import {
   DEFAULT_REPLY_STYLE_GUIDE,
+  personaSkillsGuidance,
   profileCanDelegate,
   renderPromptTemplateResult,
   renderSystemPromptResult,
   rootDelegationExtras,
   subagentAllowlistFor,
   systemPromptVars,
+  withPersona,
   withoutDelegatingTargets,
 } from '#/app/agentProfileCatalog/profile-shared';
 
@@ -553,5 +557,259 @@ describe('withoutDelegatingTargets', () => {
       'explore',
       'missing',
     ]);
+  });
+});
+
+describe('personaSkillsGuidance', () => {
+  it('returns an empty string for an undefined or empty skills list', () => {
+    expect(personaSkillsGuidance(undefined)).toBe('');
+    expect(personaSkillsGuidance([])).toBe('');
+  });
+
+  it('lists the persona skills in one sentence', () => {
+    expect(personaSkillsGuidance(['api-design', 'testing'])).toBe(
+      'You are strongest at: api-design, testing.',
+    );
+  });
+});
+
+describe('systemPromptVars persona', () => {
+  it('renders an empty persona block without a persona', () => {
+    expect(systemPromptVars({}, { skillActive: true })['persona']).toBe('');
+  });
+
+  it('wraps the persona text in blank lines', () => {
+    const vars = systemPromptVars({ persona: 'You are a reviewer.' }, { skillActive: true });
+
+    expect(vars['persona']).toBe('\n\nYou are a reviewer.\n\n');
+  });
+
+  it('appends the persona skills guidance', () => {
+    const vars = systemPromptVars(
+      { persona: 'You are a reviewer.', personaSkills: ['api-design', 'testing'] },
+      { skillActive: true },
+    );
+
+    expect(vars['persona']).toBe(
+      '\n\nYou are a reviewer.\n\nYou are strongest at: api-design, testing.\n\n',
+    );
+  });
+
+  it('renders the persona as a template against the other variables', () => {
+    const vars = systemPromptVars(
+      { persona: 'You review changes under ${cwd} as ${product_name}.', cwd: '/work' },
+      { skillActive: true },
+    );
+
+    expect(vars['persona']).toContain('You review changes under /work as Kimi Code CLI.');
+  });
+
+  it('renders the persona block through the builtin system prompt', () => {
+    const prompt = renderSystemPromptResult(
+      '',
+      { persona: 'You are a strict reviewer.', personaSkills: ['api-design'] },
+      { skillActive: true },
+    ).text;
+
+    expect(prompt).toContain('\n\nYou are a strict reviewer.\n\n');
+    expect(prompt).toContain('You are strongest at: api-design.');
+  });
+});
+
+describe('withPersona', () => {
+  const binding = (overrides: Partial<PersonaBinding> = {}): PersonaBinding => ({
+    mode: 'overlay',
+    text: 'PERSONA',
+    ...overrides,
+  });
+
+  const baseProfile = (
+    config: {
+      tools?: readonly string[];
+      disallowedTools?: readonly string[];
+      subagents?: readonly string[];
+    } = {},
+  ): AgentProfile =>
+    normalizeAgentProfile({
+      name: 'agent',
+      tools: config.tools,
+      disallowedTools: config.disallowedTools,
+      subagents: config.subagents,
+      renderSystemPrompt: (context) =>
+        renderSystemPromptResult('', context, { skillActive: true }),
+    });
+
+  it('keeps the base name and narrows tools to the persona allowlist', () => {
+    const profile = withPersona(
+      baseProfile({ tools: ['Read', 'Grep', 'Bash'] }),
+      binding({ tools: ['Read', 'Grep'] }),
+    );
+
+    expect(profile.name).toBe('agent');
+    expect(profile.tools).toEqual(['Read', 'Grep']);
+  });
+
+  it('never widens tools beyond the base allowlist', () => {
+    const profile = withPersona(
+      baseProfile({ tools: ['Read'] }),
+      binding({ tools: ['Read', 'Bash'] }),
+    );
+
+    expect(profile.tools).toEqual(['Read']);
+  });
+
+  it('keeps the base tools when the persona declares none', () => {
+    const profile = withPersona(baseProfile({ tools: ['Read'] }), binding());
+
+    expect(profile.tools).toEqual(['Read']);
+  });
+
+  it('uses the persona tools when the base allows all tools', () => {
+    const profile = withPersona(baseProfile(), binding({ tools: ['Read'] }));
+
+    expect(profile.tools).toEqual(['Read']);
+  });
+
+  it('keeps MCP glob entries the persona wildcard allows', () => {
+    const profile = withPersona(
+      baseProfile({ tools: ['Read', 'Grep', 'mcp__github__*', 'mcp__slack__*'] }),
+      binding({ tools: ['Read', 'mcp__*'] }),
+    );
+
+    expect(profile.tools).toEqual(['Read', 'mcp__github__*', 'mcp__slack__*']);
+  });
+
+  it('narrows a base MCP wildcard to a more specific persona glob', () => {
+    const profile = withPersona(
+      baseProfile({ tools: ['mcp__*'] }),
+      binding({ tools: ['mcp__github__*'] }),
+    );
+
+    expect(profile.tools).toEqual(['mcp__github__*']);
+  });
+
+  it('drops MCP glob entries the persona does not allow', () => {
+    const profile = withPersona(
+      baseProfile({ tools: ['mcp__github__*'] }),
+      binding({ tools: ['mcp__slack__*'] }),
+    );
+
+    expect(profile.tools).toEqual([]);
+  });
+
+  it('narrows a base MCP wildcard to a persona literal tool', () => {
+    const profile = withPersona(
+      baseProfile({ tools: ['mcp__github__*'] }),
+      binding({ tools: ['mcp__github__create_issue'] }),
+    );
+
+    expect(profile.tools).toEqual(['mcp__github__create_issue']);
+  });
+
+  it('unions disallowed tools preserving base order', () => {
+    const profile = withPersona(
+      baseProfile({ disallowedTools: ['Bash', 'Write'] }),
+      binding({ disallowedTools: ['Write', 'Edit'] }),
+    );
+
+    expect(profile.disallowedTools).toEqual(['Bash', 'Write', 'Edit']);
+  });
+
+  it('keeps disallowed tools undefined when neither side declares any', () => {
+    const profile = withPersona(baseProfile(), binding());
+
+    expect(profile.disallowedTools).toBeUndefined();
+  });
+
+  it('intersects subagent allowlists', () => {
+    const profile = withPersona(
+      baseProfile({ subagents: ['explore', 'plan'] }),
+      binding({ subagents: ['plan', 'coder'] }),
+    );
+
+    expect(profile.subagents).toEqual(['plan']);
+  });
+
+  it('treats a base "*" subagent allowlist as all types', () => {
+    const profile = withPersona(
+      baseProfile({ subagents: ['*'] }),
+      binding({ subagents: ['explore'] }),
+    );
+
+    expect(profile.subagents).toEqual(['explore']);
+  });
+
+  it('keeps the base subagents when the persona allows all types', () => {
+    const profile = withPersona(
+      baseProfile({ subagents: ['explore'] }),
+      binding({ subagents: ['*'] }),
+    );
+
+    expect(profile.subagents).toEqual(['explore']);
+  });
+
+  it('takes the persona allowlist when the base declares none', () => {
+    const profile = withPersona(baseProfile(), binding({ subagents: ['explore', 'plan'] }));
+
+    expect(profile.subagents).toEqual(['explore', 'plan']);
+  });
+
+  it('keeps the base allowlist when the persona declares none', () => {
+    const profile = withPersona(baseProfile({ subagents: ['explore', 'plan'] }), binding());
+
+    expect(profile.subagents).toEqual(['explore', 'plan']);
+  });
+
+  it('renders the persona at the role slot in overlay mode', () => {
+    const profile = withPersona(
+      baseProfile(),
+      binding({ text: 'You are a strict reviewer.', skills: ['api-design'] }),
+    );
+
+    const prompt = profile.systemPrompt({});
+
+    expect(prompt).toContain('\n\nYou are a strict reviewer.\n\n');
+    expect(prompt).toContain('You are strongest at: api-design.');
+  });
+
+  it('renders the persona body as the prompt in replace mode and keeps ${base_prompt}', () => {
+    const profile = withPersona(
+      normalizeAgentProfile({
+        name: 'agent',
+        renderSystemPrompt: () => ({ text: 'BASE_PROMPT', environment: { cwd: '' } }),
+      }),
+      binding({ mode: 'replace', text: 'PERSONA\n\n${base_prompt}' }),
+    );
+
+    expect(profile.systemPrompt({})).toBe('PERSONA\n\nBASE_PROMPT');
+  });
+
+  it('appends the persona skills guidance in replace mode', () => {
+    const profile = withPersona(
+      baseProfile(),
+      binding({ mode: 'replace', text: 'PERSONA', skills: ['api-design', 'testing'] }),
+    );
+
+    expect(profile.systemPrompt({})).toBe(
+      'PERSONA\n\nYou are strongest at: api-design, testing.',
+    );
+  });
+
+  it('empties ${skills} in replace mode when the narrowed tools drop the Skill tool', () => {
+    const profile = withPersona(
+      normalizeAgentProfile({
+        name: 'agent',
+        renderSystemPrompt: () => ({ text: 'BASE_PROMPT', environment: { cwd: '' } }),
+      }),
+      binding({ mode: 'replace', text: 'skills=${skills}', tools: ['Read'] }),
+    );
+
+    expect(profile.systemPrompt({ skills: 'SKILLS_LISTING' })).toBe('skills=');
+  });
+
+  it('exposes the rendered text through systemPrompt for overlay mode', () => {
+    const profile = withPersona(baseProfile(), binding({ text: 'PERSONA' }));
+
+    expect(profile.systemPrompt({})).toContain('\n\nPERSONA\n\n');
   });
 });

@@ -892,7 +892,7 @@ describe('AgentRunBatch swarm item forwarding', () => {
     return { launcher, spawned };
   }
 
-  function spawnTask(swarmItem?: string): QueuedAgentRunTask {
+  function spawnTask(swarmItem?: string, name?: string): QueuedAgentRunTask {
     return {
       kind: 'spawn',
       data: {},
@@ -901,6 +901,7 @@ describe('AgentRunBatch swarm item forwarding', () => {
       prompt: 'Review the file',
       description: 'Review #1 (subagent)',
       swarmItem,
+      name,
       runInBackground: false,
       plan: { profileName: 'subagent', model: 'mock-model', thinking: 'off', fork: false },
     };
@@ -919,13 +920,29 @@ describe('AgentRunBatch swarm item forwarding', () => {
     expect(results).toMatchObject([{ status: 'completed', agentId: 'agent-1' }]);
   });
 
-  it('leaves swarmItem undefined for spawn tasks without one', async () => {
+  it('forwards name from a spawn task to launcher.spawn', async () => {
+    expect.assertions(2);
+    const { launcher, spawned } = recordingLauncher();
+
+    await new AgentRunBatch(launcher, [spawnTask('src/a.ts', 'alpha')]).run();
+
+    expect(launcher.spawn).toHaveBeenCalledOnce();
+    expect(spawned[0]).toMatchObject({
+      profileName: 'subagent',
+      swarmItem: 'src/a.ts',
+      name: 'alpha',
+    });
+  });
+
+  it('leaves swarmItem and name undefined for spawn tasks without them', async () => {
+    expect.assertions(3);
     const { launcher, spawned } = recordingLauncher();
 
     await new AgentRunBatch(launcher, [spawnTask()]).run();
 
     expect(launcher.spawn).toHaveBeenCalledOnce();
     expect(spawned[0]?.swarmItem).toBeUndefined();
+    expect(spawned[0]?.name).toBeUndefined();
   });
 });
 
@@ -1065,6 +1082,26 @@ describe('SessionSwarmService metadata compatibility', () => {
       plan: { profileName: 'coder', model: 'kimi-test', thinking: 'medium', fork: false },
       labels: { parentAgentId: 'main', swarmItem: 'src/a.ts' },
       prompt: 'Review the file',
+    });
+  });
+
+  it('forwards a subagent name to the subagent spawn', async () => {
+    expect.assertions(2);
+    const service = ix.get(ISessionSwarmService);
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [{ ...spawnSessionTask('src/a.ts'), name: 'alpha' }],
+      }),
+    ).resolves.toMatchObject([{ agentId: 'agent-new', status: 'completed' }]);
+
+    expect(spawnAgent).toHaveBeenCalledWith({
+      callerAgentId: 'main',
+      plan: { profileName: 'coder', model: 'kimi-test', thinking: 'medium', fork: false },
+      labels: { parentAgentId: 'main', swarmItem: 'src/a.ts' },
+      prompt: 'Review the file',
+      name: 'alpha',
     });
   });
 
@@ -1441,7 +1478,22 @@ function subagentStub(
         promptText: opts.prompt,
       };
     }),
+    dismissAgents: vi.fn(async () => ({ dismissed: [] })),
+    setAgentTags: vi.fn(
+      async (_caller: string, target: string, tags: readonly string[]) => ({
+        agentId: target,
+        tags,
+      }),
+    ),
+    renameAgent: vi.fn(
+      async (_caller: string, target: string, name: string) => ({
+        agentId: target,
+        name,
+        tags: [],
+      }),
+    ),
     notifyAgentTaskStopped: () => {},
+    assertOwned: vi.fn(async () => {}),
   } as ISessionSubagentService;
 }
 

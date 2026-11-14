@@ -13,6 +13,9 @@ export const TERMINAL_STATUSES: ReadonlySet<AgentTaskStatus> = new Set<AgentTask
   'killed',
   'lost',
 ]);
+
+export const MAX_STOP_REASON_CHARS = 500;
+
 export type AgentTaskSettlementStatus = 'completed' | 'failed' | 'timed_out' | 'killed';
 
 export interface AgentTaskSettlement {

@@ -317,6 +317,13 @@ export function stripSubagentNameParameter(
   return stripParameter(parameters, 'name');
 }
 
+export function stripParameters(
+  parameters: Record<string, unknown>,
+  ...keys: readonly string[]
+): Record<string, unknown> {
+  return keys.reduce(stripParameter, parameters);
+}
+
 export function stripParameter(
   parameters: Record<string, unknown>,
   key: string,

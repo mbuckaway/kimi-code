@@ -8,10 +8,11 @@ Writing the prompt:
 
 Usage notes:
 - When the task continues earlier work a subagent already did, prefer resuming that agent (pass its `resume` id) over spawning a fresh instance — the resumed agent keeps its prior context.
+- A persona layers a role onto the capability profile and never grants tools, so pass it only when the tool advertises `persona`.
 - A subagent's result is only visible to you, not to the user. When the user needs to see what a subagent produced, summarize the relevant parts yourself in your own reply.
 - Subagents use a fixed 2-hour timeout. If one times out, resume the same agent instead of starting over.
 
-When the work decomposes into independent parts, you MUST use `AgentSwarm` — not a single sequential `Agent` call. Partition the work and run it as one swarm.
+When the work decomposes into independent parts, you MUST use `AgentSwarm` — not a single sequential `Agent` call. Partition the work and run it as one swarm. If the tool you call advertises `name` or `names` (agent messaging is enabled), give every new subagent an addressable name. Use `Agent.name` for a single spawn and `AgentSwarm.names` for a swarm, so peers can message them.
 
 When NOT to use Agent: skip delegation for trivial work you can do directly — reading a file whose path you already know, searching a small known set of files, or any task that takes only a step or two. Delegation has a context-handoff cost; it pays off only when the task is substantial enough to outweigh it.
 

@@ -25,10 +25,34 @@ import { TaskOutputInputSchema } from '../../src/tools/background/task-output';
 import { TaskStopInputSchema } from '../../src/tools/background/task-stop';
 import { AgentTool, AgentToolInputSchema } from '../../src/tools/builtin/collaboration/agent';
 import {
+  AgentHealthInputSchema,
+  AgentHealthTool,
+} from '../../src/tools/builtin/collaboration/agent-health';
+import {
+  AgentResultInputSchema,
+  AgentResultTool,
+} from '../../src/tools/builtin/collaboration/agent-result';
+import {
   AskUserQuestionInputSchema,
   AskUserQuestionTool,
 } from '../../src/tools/builtin/collaboration/ask-user';
+import {
+  BroadcastMessageToolInputSchema,
+  BroadcastMessageTool,
+} from '../../src/tools/builtin/collaboration/broadcast-message';
+import {
+  ListMessagesToolInputSchema,
+  ListMessagesTool,
+} from '../../src/tools/builtin/collaboration/list-messages';
+import {
+  ReplyMessageToolInputSchema,
+  ReplyMessageTool,
+} from '../../src/tools/builtin/collaboration/reply-message';
 import { SkillTool, SkillToolInputSchema } from '../../src/tools/builtin/collaboration/skill-tool';
+import {
+  WaitForAllInputSchema,
+  WaitForAllTool,
+} from '../../src/tools/builtin/collaboration/wait-for-all';
 import { EditInputSchema, EditTool } from '../../src/tools/builtin/file/edit';
 import { GlobInputSchema, GlobTool } from '../../src/tools/builtin/file/glob';
 import { GrepInputSchema, GrepTool } from '../../src/tools/builtin/file/grep';
@@ -42,6 +66,7 @@ import { createBackgroundManager } from '../agent/background/helpers';
 import {
   AgentSwarmTool,
   AgentSwarmToolInputSchema,
+  NAMES_EXPERIMENTAL_UNAVAILABLE,
 } from '../../src/tools/builtin/collaboration/agent-swarm';
 
 vi.mock('../../src/tools/support/rg-locator', () => ({
@@ -389,7 +414,7 @@ describe('current builtin collaboration tools', () => {
       },
     });
     expect(Object.keys(tool.parameters['properties'] as Record<string, unknown>).at(-1)).toBe(
-      'resume_agent_ids',
+      'names',
     );
 
     const result = await executeTool(tool, context(input, 'call_swarm'));
@@ -1132,6 +1157,254 @@ describe('current builtin collaboration tools', () => {
     expect(result.isError).toBeUndefined();
   });
 
+  it('AgentSwarm exposes the names parameter in the JSON schema by default', () => {
+    const tool = new AgentSwarmTool(mockSubagentHost({}), mockSwarmMode());
+    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
+
+    expect(properties).toHaveProperty('names');
+  });
+
+  it('AgentSwarm strips the names parameter from the JSON schema when agent messaging is disabled', () => {
+    const tool = new AgentSwarmTool(
+      mockSubagentHost({}),
+      mockSwarmMode(),
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
+
+    expect(properties).not.toHaveProperty('names');
+    expect(properties).toHaveProperty('items');
+  });
+
+  it('AgentSwarm names item-spawned subagents and renders the name attribute', async () => {
+    const runQueued = vi.fn(
+      async <T>(
+        tasks: readonly QueuedSubagentTask<T>[],
+      ): Promise<Array<QueuedSubagentRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: `agent-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSubagentHost({
+      runQueued: runQueued as unknown as SessionSubagentHost['runQueued'],
+    });
+    const swarmMode = mockSwarmMode();
+    const tool = new AgentSwarmTool(host, swarmMode);
+    const input = {
+      description: 'Review files',
+      prompt_template: 'Review {{item}}',
+      items: ['src/a.ts', 'src/b.ts'],
+      names: ['reviewer', 'analyst'],
+    };
+
+    const result = await executeTool(tool, context(input, 'call_swarm'));
+
+    expect(host.runQueued).toHaveBeenCalledWith([
+      {
+        kind: 'spawn',
+        data: {
+          kind: 'spawn',
+          index: 1,
+          item: 'src/a.ts',
+          prompt: 'Review src/a.ts',
+          name: 'reviewer',
+        },
+        profileName: 'coder',
+        parentToolCallId: 'call_swarm',
+        prompt: 'Review src/a.ts',
+        description: 'Review files #1 (coder)',
+        swarmIndex: 1,
+        swarmItem: 'src/a.ts',
+        runInBackground: false,
+        name: 'reviewer',
+        signal,
+        timeout: DEFAULT_SUBAGENT_TIMEOUT_MS,
+      },
+      {
+        kind: 'spawn',
+        data: {
+          kind: 'spawn',
+          index: 2,
+          item: 'src/b.ts',
+          prompt: 'Review src/b.ts',
+          name: 'analyst',
+        },
+        profileName: 'coder',
+        parentToolCallId: 'call_swarm',
+        prompt: 'Review src/b.ts',
+        description: 'Review files #2 (coder)',
+        swarmIndex: 2,
+        swarmItem: 'src/b.ts',
+        runInBackground: false,
+        name: 'analyst',
+        signal,
+        timeout: DEFAULT_SUBAGENT_TIMEOUT_MS,
+      },
+    ]);
+    expect(result.output).toBe([
+      '<agent_swarm_result>',
+      '<summary>completed: 2</summary>',
+      '<subagent agent_id="agent-1" name="reviewer" item="src/a.ts" outcome="completed">result 1</subagent>',
+      '<subagent agent_id="agent-2" name="analyst" item="src/b.ts" outcome="completed">result 2</subagent>',
+      '</agent_swarm_result>',
+    ].join('\n'));
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('AgentSwarm names prompt-spawned subagents', async () => {
+    const runQueued = vi.fn(
+      async <T>(
+        tasks: readonly QueuedSubagentTask<T>[],
+      ): Promise<Array<QueuedSubagentRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: `agent-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSubagentHost({
+      runQueued: runQueued as unknown as SessionSubagentHost['runQueued'],
+    });
+    const swarmMode = mockSwarmMode();
+    const tool = new AgentSwarmTool(host, swarmMode);
+    const input = {
+      description: 'Ship two features',
+      prompts: ['Implement the parser.', 'Write the changelog.'],
+      names: ['coder', 'writer'],
+    };
+
+    const result = await executeTool(tool, context(input, 'call_swarm'));
+
+    expect(host.runQueued).toHaveBeenCalledWith([
+      {
+        kind: 'spawn',
+        data: { kind: 'spawn', index: 1, prompt: 'Implement the parser.', name: 'coder' },
+        profileName: 'coder',
+        parentToolCallId: 'call_swarm',
+        prompt: 'Implement the parser.',
+        description: 'Ship two features #1 (coder)',
+        swarmIndex: 1,
+        runInBackground: false,
+        name: 'coder',
+        signal,
+        timeout: DEFAULT_SUBAGENT_TIMEOUT_MS,
+      },
+      {
+        kind: 'spawn',
+        data: { kind: 'spawn', index: 2, prompt: 'Write the changelog.', name: 'writer' },
+        profileName: 'coder',
+        parentToolCallId: 'call_swarm',
+        prompt: 'Write the changelog.',
+        description: 'Ship two features #2 (coder)',
+        swarmIndex: 2,
+        runInBackground: false,
+        name: 'writer',
+        signal,
+        timeout: DEFAULT_SUBAGENT_TIMEOUT_MS,
+      },
+    ]);
+    expect(result.output).toBe([
+      '<agent_swarm_result>',
+      '<summary>completed: 2</summary>',
+      '<subagent agent_id="agent-1" name="coder" outcome="completed">result 1</subagent>',
+      '<subagent agent_id="agent-2" name="writer" outcome="completed">result 2</subagent>',
+      '</agent_swarm_result>',
+    ].join('\n'));
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('AgentSwarm rejects names whose length does not match the items', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const swarmMode = mockSwarmMode();
+    const tool = new AgentSwarmTool(host, swarmMode);
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: ['reviewer'],
+      }),
+    );
+
+    expect(result.output).toBe(
+      'AgentSwarm names must match the number of items/prompts (expected 2, got 1).',
+    );
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm rejects duplicate names', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const swarmMode = mockSwarmMode();
+    const tool = new AgentSwarmTool(host, swarmMode);
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: ['reviewer', 'reviewer'],
+      }),
+    );
+
+    expect(result.output).toBe('Duplicate subagent names. AgentSwarm requires distinct names.');
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm rejects names without items or prompts', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const swarmMode = mockSwarmMode();
+    const tool = new AgentSwarmTool(host, swarmMode);
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Resume review',
+        resume_agent_ids: { 'agent-old-1': 'Continue previous review A' },
+        names: ['reviewer'],
+      }),
+    );
+
+    expect(result.output).toBe(
+      'names requires items or prompts; resumed subagents keep their existing names.',
+    );
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm rejects names when agent messaging is disabled', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const swarmMode = mockSwarmMode();
+    const tool = new AgentSwarmTool(host, swarmMode, undefined, undefined, undefined, false);
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        names: ['reviewer', 'analyst'],
+      }),
+    );
+
+    expect(result.output).toBe(NAMES_EXPERIMENTAL_UNAVAILABLE);
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
   it('Skill exposes parameters and reports unknown skills as tool errors', async () => {
     const tool = new SkillTool({
       skills: {
@@ -1152,6 +1425,122 @@ describe('current builtin collaboration tools', () => {
     const result = await executeTool(tool, context({ skill: 'missing' }));
     expect(result).toMatchObject({ isError: true });
     expect(result.output).toContain('not found');
+  });
+
+  it('ListMessages exposes parameters and renders the caller inbox', async () => {
+    const host = mockSubagentHost({
+      listMessages: vi.fn().mockReturnValue({
+        messages: [
+          {
+            id: 'message-1',
+            from: 'agent-a',
+            fromLabel: 'Alice',
+            message: 'hello',
+            delivery: 'buffered',
+            truncated: false,
+          },
+        ],
+        pending: 0,
+      }),
+    });
+    const tool = new ListMessagesTool(host);
+
+    expect(ListMessagesToolInputSchema.safeParse({ from: 'Alice', limit: 5 }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { from: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ from: 'Alice' }));
+    expect(result.output).toContain('message-1');
+    expect(result.output).toContain('from Alice');
+  });
+
+  it('ReplyMessage exposes parameters and reports a steered delivery', async () => {
+    const host = mockSubagentHost({
+      replyMessage: vi.fn().mockResolvedValue({
+        delivery: 'steered',
+        agentId: 'agent-a',
+        label: 'Alice',
+        truncated: false,
+        inReplyTo: 'message-3',
+      }),
+    });
+    const tool = new ReplyMessageTool(host);
+
+    expect(
+      ReplyMessageToolInputSchema.safeParse({ message_id: 'message-3', message: 'ok' }).success,
+    ).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { message_id: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ message_id: 'message-3', message: 'ok' }));
+    expect(result.output).toContain('delivered to Alice (agent-a)');
+  });
+
+  it('BroadcastMessage exposes parameters and reports delivery counts', async () => {
+    const host = mockSubagentHost({
+      broadcastMessage: vi.fn().mockResolvedValue({
+        delivered: [{ agentId: 'agent-a', label: 'Alice', delivery: 'buffered' }],
+        failed: [],
+      }),
+    });
+    const tool = new BroadcastMessageTool(host);
+
+    expect(BroadcastMessageToolInputSchema.safeParse({ message: 'hi all' }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { message: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ message: 'hi all' }));
+    expect(result.output).toContain('1 delivered');
+    expect(result.output).toContain('Alice');
+  });
+
+  it('AgentResult exposes parameters and reports unknown agents as errors', async () => {
+    const tool = new AgentResultTool(createBackgroundManager().manager);
+
+    expect(AgentResultInputSchema.safeParse({ agent_id: 'agent-a' }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { agent_id: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ agent_id: 'agent-a' }));
+    expect(result).toMatchObject({ isError: true });
+    expect(result.output).toContain('No task found for agent: agent-a');
+  });
+
+  it('AgentHealth exposes parameters and reports unknown agents as errors', async () => {
+    const host = mockSubagentHost({ listAgents: vi.fn().mockReturnValue([]) });
+    const tool = new AgentHealthTool(createBackgroundManager().manager, host);
+
+    expect(AgentHealthInputSchema.safeParse({ agent_id: 'agent-a' }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { agent_id: { type: 'string' } },
+    });
+
+    const result = await executeTool(tool, context({ agent_id: 'agent-a' }));
+    expect(result).toMatchObject({ isError: true });
+    expect(result.output).toContain('Agent not found: agent-a');
+  });
+
+  it('WaitForAll exposes parameters and reports missing tasks as errors', async () => {
+    const tool = new WaitForAllTool(createBackgroundManager().manager);
+
+    expect(WaitForAllInputSchema.safeParse({ timeout: 5 }).success).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: { timeout: { type: 'integer' } },
+    });
+
+    const result = await executeTool(tool, context({ timeout: 5, task_ids: ['bash-missing'] }));
+    expect(result).toMatchObject({ isError: true });
+    expect(result.output).toContain('Task not found: bash-missing');
   });
 });
 

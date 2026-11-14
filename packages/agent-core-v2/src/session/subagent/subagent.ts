@@ -44,6 +44,28 @@ export type AgentTaskHooks = {
   readonly onWillStartAgentTask: AgentTaskStartHookContext;
 };
 
+export interface AgentLabelUpdate {
+  readonly agentId: string;
+  readonly name?: string;
+  readonly tags: readonly string[];
+}
+
+export interface DismissAgentsTargets {
+  readonly ids?: readonly string[];
+  readonly names?: readonly string[];
+  readonly all?: boolean;
+}
+
+export interface DismissedAgent {
+  readonly agentId: string;
+  readonly name?: string;
+  readonly ghost: boolean;
+}
+
+export interface DismissAgentsResult {
+  readonly dismissed: readonly DismissedAgent[];
+}
+
 export interface ISessionSubagentService {
   readonly _serviceBrand: undefined;
 
@@ -56,6 +78,25 @@ export interface ISessionSubagentService {
   planSpawn(input: SubagentSpawnPlanInput): Promise<SubagentSpawnPlan>;
 
   spawn(opts: SpawnSubagentOptions): Promise<SpawnedSubagent>;
+
+  dismissAgents(
+    callerAgentId: string,
+    targets: DismissAgentsTargets,
+  ): Promise<DismissAgentsResult>;
+
+  setAgentTags(
+    callerAgentId: string,
+    target: string,
+    tags: readonly string[],
+  ): Promise<AgentLabelUpdate>;
+
+  renameAgent(
+    callerAgentId: string,
+    target: string,
+    name: string,
+  ): Promise<AgentLabelUpdate>;
+
+  assertOwned(callerAgentId: string, target: string): Promise<void>;
 
   notifyAgentTaskStopped(context: AgentTaskStopHookContext): void;
 }

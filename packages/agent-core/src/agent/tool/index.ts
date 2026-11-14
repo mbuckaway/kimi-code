@@ -874,6 +874,20 @@ export class ToolManager {
           agentMessagingEnabled &&
           new b.ListAgentsTool(this.agent.subagentHost),
         this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.ListMessagesTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.ReplyMessageTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.BroadcastMessageTool(this.agent.subagentHost),
+        agentMessagingEnabled && new b.AgentResultTool(background),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.AgentHealthTool(background, this.agent.subagentHost),
+        agentMessagingEnabled && new b.WaitForAllTool(background),
+        this.agent.subagentHost &&
           new b.AgentSwarmTool(
             this.agent.subagentHost,
             this.agent.swarmMode,
@@ -884,6 +898,7 @@ export class ToolManager {
               this.agent.config.modelAlias,
             ),
             this.agent.experimentalFlags.enabled('secondary-model'),
+            agentMessagingEnabled,
           ),
         toolServices?.webSearcher && new b.WebSearchTool(toolServices.webSearcher),
         toolServices?.urlFetcher && new b.FetchURLTool(toolServices.urlFetcher),

@@ -34,6 +34,25 @@ describe('isSensitiveFile', () => {
     }
   });
 
+  it('flags package-manager, credential-store, and container credential files', () => {
+    for (const path of [
+      '.npmrc',
+      '/home/user/.npmrc',
+      '.netrc',
+      '/home/user/.netrc',
+      '.git-credentials',
+      '/home/user/.git-credentials',
+      'credentials.json',
+      '/home/user/credentials.json',
+      'token.json',
+      '/home/user/token.json',
+      'docker/config.json',
+      '/home/user/docker/config.json',
+    ]) {
+      expect(isSensitiveFile(path), path).toBe(true);
+    }
+  });
+
   it('matches sensitive patterns case-insensitively on posix paths', () => {
     for (const path of [
       '.ENV',
@@ -55,7 +74,6 @@ describe('isSensitiveFile', () => {
       'package.json',
       'server.key.example',
       'id_rsa.pub',
-      'credentials.json',
       '.envrc',
       'environment.py',
       '.env_example',

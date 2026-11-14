@@ -48,6 +48,7 @@ import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import {
   IAgentTaskService,
+  type AgentTaskCapacity,
   type AgentTaskLoadOptions,
   type AgentTask,
   type AgentTaskInfo,
@@ -909,6 +910,13 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       await entry.persistWriteQueue;
     }
     return reason;
+  }
+
+  capacity(): AgentTaskCapacity {
+    return {
+      running: this.activeTaskCount(),
+      max: resolveAgentTaskConfig(this.config)?.maxRunningTasks,
+    };
   }
 
   private assertCanRegister(detached: boolean): void {

@@ -713,6 +713,29 @@ describe('SubagentBatch scheduling contract', () => {
       vi.useRealTimers();
     }
   });
+
+  it('passes the task name into the spawn options', async () => {
+    const spawn = vi.fn(
+      async (options: SpawnSubagentOptions): Promise<SubagentHandle> => ({
+        agentId: 'agent-1',
+        profileName: options.profileName,
+        resumed: false,
+        completion: Promise.resolve({ result: 'done' }),
+      }),
+    );
+    const launcher: SubagentBatchLauncher = {
+      spawn,
+      resume: vi.fn(),
+      retry: vi.fn(),
+    };
+
+    const results = await new SubagentBatch(launcher, [
+      { ...queuedTask(1), name: 'reviewer' },
+    ]).run();
+
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ name: 'reviewer' }));
+    expect(results).toMatchObject([{ task: { name: 'reviewer' }, status: 'completed' }]);
+  });
 });
 
 describe('resolveSwarmMaxConcurrency', () => {

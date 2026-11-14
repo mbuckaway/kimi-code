@@ -419,6 +419,18 @@ export class BackgroundManager {
     return info.detached !== false;
   }
 
+  /** Count non-terminal tasks and report the effective concurrency cap. */
+  capacity(): { readonly running: number; readonly max?: number } {
+    let running = 0;
+    for (const entry of this.tasks.values()) {
+      if (!TERMINAL_STATUSES.has(entry.status)) running++;
+    }
+    return {
+      running,
+      max: resolveMaxRunningTasks(this.agent.kimiConfig?.background?.maxRunningTasks),
+    };
+  }
+
   /**
    * Return the output snapshot used by TaskOutput.
    *
@@ -890,6 +902,23 @@ export class BackgroundManager {
 
   markDeliveredNotification(origin: BackgroundTaskOrigin): void {
     this.deliveredNotificationKeys.add(notificationKey(origin));
+  }
+
+  /**
+   * Mark each task's terminal notification as delivered, so a later completion
+   * notification for the same task and status is not re-emitted.
+   */
+  markTasksDeliveredViaWait(
+    tasks: readonly { readonly taskId: string; readonly status: BackgroundTaskStatus }[],
+  ): void {
+    for (const { taskId, status } of tasks) {
+      this.markDeliveredNotification({
+        kind: 'background_task',
+        taskId,
+        status,
+        notificationId: `task:${taskId}:${status}`,
+      });
+    }
   }
 
   private isTerminalNotificationSuppressed(taskId: string): boolean {

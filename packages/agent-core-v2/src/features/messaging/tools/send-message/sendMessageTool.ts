@@ -12,8 +12,8 @@ import { MAX_AGENT_MESSAGE_CHARS } from '#/features/messaging/envelope';
 
 import {
   ISendMessageTool,
-  MAX_MESSAGE_SUMMARY_CHARS,
   SendMessageToolInputSchema,
+  messagePreviewOf,
   type SendMessageToolInput,
 } from './send-message';
 import SEND_MESSAGE_DESCRIPTION from './send-message.md?raw';
@@ -36,7 +36,7 @@ export class SendMessageTool implements ISendMessageTool {
   resolveExecution(args: SendMessageToolInput): ToolExecution {
     const to = args.to.trim();
     return {
-      description: `Send message to ${to}: ${messagePreview(args)}`,
+      description: `Send message to ${to}: ${messagePreviewOf(args)}`,
       accesses: ToolAccesses.none(),
       approvalRule: this.name,
       matchesRule: (ruleArgs) => matchesGlobRuleSubject(ruleArgs, to),
@@ -68,14 +68,6 @@ export class SendMessageTool implements ISendMessageTool {
       };
     }
   }
-}
-
-function messagePreview(args: SendMessageToolInput): string {
-  const newline = args.message.indexOf('\n');
-  const source = args.summary ?? (newline === -1 ? args.message : args.message.slice(0, newline));
-  return source.length > MAX_MESSAGE_SUMMARY_CHARS
-    ? `${source.slice(0, MAX_MESSAGE_SUMMARY_CHARS - 1)}…`
-    : source;
 }
 
 function formatSendMessageResult(result: SendMessageResult): string {

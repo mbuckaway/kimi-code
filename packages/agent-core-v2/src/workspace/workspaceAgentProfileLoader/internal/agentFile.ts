@@ -1,6 +1,7 @@
 import { CoreErrors } from '#/_base/errors/codes';
 import { Error2 } from '#/_base/errors/errors';
 import { FrontmatterError, parseFrontmatter } from '#/_base/text/frontmatter';
+import type { AgentProfileMode } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 import type { AgentFileDefinition, AgentFileSource } from './types';
 
@@ -20,10 +21,19 @@ export interface ParseAgentFileOptions {
   readonly path: string;
   readonly source: AgentFileSource;
   readonly text: string;
+  readonly requireExtends?: boolean;
+}
+
+export interface ParseAgentFileRequiresExtendsOptions extends ParseAgentFileOptions {
+  readonly requireExtends: true;
 }
 
 const AGENT_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+export function parseAgentFileText(
+  options: ParseAgentFileRequiresExtendsOptions,
+): AgentFileDefinition & { readonly extends: string };
+export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDefinition;
 export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDefinition {
   let parsed;
   try {
@@ -70,6 +80,21 @@ export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDef
     options.path,
   );
 
+  const mode = parseMode(frontmatter['mode']);
+  const extendedName = parseExtends(frontmatter['extends'], options.path);
+  if (options.requireExtends === true && extendedName === undefined) {
+    throw new AgentFileParseError(
+      `Frontmatter field "extends" is required for a persona file (persona.base_required) in ${options.path}`,
+    );
+  }
+  const skillsField = frontmatter['skills'];
+  const hasSkills = skillsField !== undefined && skillsField !== null;
+  const skills = parseStringList(
+    hasSkills ? skillsField : frontmatter['expertise'],
+    hasSkills ? 'skills' : 'expertise',
+    options.path,
+  );
+
   const override = parseBoolean(frontmatter['override'], 'override', options.path);
   const rawTools = parseStringList(frontmatter['tools'], 'tools', options.path);
   const tools = rawTools?.length === 1 && rawTools[0] === '*' ? undefined : rawTools;
@@ -91,6 +116,9 @@ export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDef
     description,
     whenToUse: nonEmptyString(frontmatter['whenToUse']),
     override,
+    mode,
+    extends: extendedName,
+    skills,
     tools,
     disallowedTools,
     subagents,
@@ -98,6 +126,20 @@ export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDef
     path: options.path,
     source: options.source,
   };
+}
+
+function parseMode(value: unknown): AgentProfileMode {
+  return value === 'replace' ? 'replace' : 'overlay';
+}
+
+function parseExtends(value: unknown, filePath: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    throw new AgentFileParseError(
+      `Frontmatter field "extends" in ${filePath} must be a non-empty string`,
+    );
+  }
+  return nonEmptyString(value);
 }
 
 function parseBoolean(value: unknown, field: string, filePath: string): boolean {

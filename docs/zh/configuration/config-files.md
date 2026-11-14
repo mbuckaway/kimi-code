@@ -491,7 +491,8 @@ reply_language = "en"     # 可选 — 默认值为 "en"
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `kimi_oauth` | `boolean` | `false` | 在 web UI 和 TUI 中启用 kimi.com/kimi.ai 的 OAuth 设备码登录；token/apiKey 鉴权仍为默认 |
-| `agent_messaging` | `boolean` | `true` | Agent 间的消息通信：`SendMessage` 与 `ListAgents` 工具，以及 `Agent` 工具的 `name` 参数；设为 `false` 可禁用 |
+| `agent_messaging` | `boolean` | `true` | Agent 间的消息通信与只读的 Agent 集群可见性：`SendMessage`、`ListAgents`、`AgentResult`、`AgentHealth`、`WaitForAll` 工具，以及 `Agent` 工具的 `name` 参数；设为 `false` 可禁用 |
+| `agent_fleet_control` | `boolean` | `false` | 破坏性的 Agent 集群生命周期控制：`StopAgent`、`InterruptAgent`、`StopAgents`、`DismissAgents`、`TagAgent` 和 `RenameAgent` 工具；默认关闭 |
 
 ## `services`
 

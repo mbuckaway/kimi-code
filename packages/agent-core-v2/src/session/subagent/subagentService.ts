@@ -26,19 +26,32 @@ import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { ILogService } from '#/_base/log/log';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { RuntimeWorkspaceView } from '#/runtime/runtimeWorkspaceView';
 import { createHooks } from '#/hooks';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
+import {
+  isSubagentMeta,
+  subagentParentAgentId,
+  tagsOf,
+} from '#/session/agentLifecycle/subagentMetadata';
 import { agentContextOf } from '#/agent/scopeContext/scopeContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { agentNameOf, normalizeAgentName } from './agentNames';
+import { AGENT_PERSONA_FLAG_ID } from './flag';
+import { type ResolvedPersona, resolvePersona } from './persona';
 
 import {
+  type AgentLabelUpdate,
   type AgentRunHandle,
   type AgentRunRequest,
   type AgentTaskHooks,
   type AgentTaskStopHookContext,
+  type DismissAgentsResult,
+  type DismissAgentsTargets,
+  type DismissedAgent,
   ISessionSubagentService,
   type RunAgentOptions,
 } from './subagent';
@@ -51,11 +64,18 @@ import {
 import {
   DEFAULT_PROFILE_NAME,
   FORK_CONTEXT_NOTICE,
+  PERSONA_EXPERIMENTAL_UNAVAILABLE,
+  PERSONA_WITH_FORK_UNAVAILABLE,
   type SpawnSubagentOptions,
   type SpawnedSubagent,
   type SubagentSpawnPlan,
   type SubagentSpawnPlanInput,
 } from './spawn';
+
+interface OwnedAgentTarget {
+  readonly agentId: string;
+  readonly meta: AgentMeta;
+}
 
 export class SessionSubagentService extends Service implements ISessionSubagentService {
   declare readonly _serviceBrand: undefined;
@@ -79,6 +99,8 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     @ISessionContext private readonly sessionContext: ISessionContext,
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @ILogService private readonly log: ILogService,
+    @ISessionWorkspaceContext private readonly workspaceContext: ISessionWorkspaceContext,
+    @IHostFileSystem private readonly hostFs: IHostFileSystem,
   ) {
     super();
   }
@@ -105,8 +127,14 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     const requested = input.profileName !== undefined && input.profileName.length > 0
       ? input.profileName
       : undefined;
+    const persona =
+      input.persona === undefined
+        ? undefined
+        : await this.resolvePersonaForSpawn(input.persona, requested, fork);
     const requestedProfileName =
-      requested ?? (fork ? (own.profileName ?? DEFAULT_PROFILE_NAME) : DEFAULT_PROFILE_NAME);
+      requested ??
+      persona?.base ??
+      (fork ? (own.profileName ?? DEFAULT_PROFILE_NAME) : DEFAULT_PROFILE_NAME);
     const extras =
       input.callerAgentId === MAIN_AGENT_ID
         ? rootDelegationExtras(this.catalog, own, this.catalog.list())
@@ -152,7 +180,28 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
       model: binding.model,
       thinking: resolveSubagentThinking(this.configService, model, binding.thinking),
       fork,
+      persona,
     };
+  }
+
+  private async resolvePersonaForSpawn(
+    reference: string,
+    baseProfileName: string | undefined,
+    fork: boolean,
+  ): Promise<ResolvedPersona> {
+    if (fork) {
+      throw new Error2(ErrorCodes.VALIDATION_FAILED, PERSONA_WITH_FORK_UNAVAILABLE);
+    }
+    if (!this.flags.enabled(AGENT_PERSONA_FLAG_ID)) {
+      throw new Error2(ErrorCodes.VALIDATION_FAILED, PERSONA_EXPERIMENTAL_UNAVAILABLE);
+    }
+    return resolvePersona({
+      reference,
+      baseProfileName,
+      catalog: this.catalog,
+      fs: this.hostFs,
+      workspace: this.workspaceContext,
+    });
   }
 
   async spawn(opts: SpawnSubagentOptions): Promise<SpawnedSubagent> {
@@ -168,6 +217,64 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     } finally {
       releaseName?.();
     }
+  }
+
+  async dismissAgents(
+    callerAgentId: string,
+    targets: DismissAgentsTargets,
+  ): Promise<DismissAgentsResult> {
+    const resolved = await this.resolveDismissTargets(callerAgentId, targets);
+    const dismissed: DismissedAgent[] = [];
+    for (const { agentId, meta } of resolved) {
+      const handle = this.agentLifecycle.handleOf(agentId);
+      if (handle !== undefined) await this.agentLifecycle.remove(agentContextOf(handle));
+      await this.sessionMetadata.unregisterAgent(agentId);
+      dismissed.push({ agentId, name: agentNameOf(meta), ghost: handle === undefined });
+    }
+    return { dismissed };
+  }
+
+  async setAgentTags(
+    callerAgentId: string,
+    target: string,
+    tags: readonly string[],
+  ): Promise<AgentLabelUpdate> {
+    const { agentId, meta } = await this.resolveOwnedTarget(callerAgentId, target);
+    const normalized = normalizeAgentTags(tags);
+    const labels: Record<string, string> = { ...meta.labels };
+    if (normalized.length === 0) {
+      delete labels['tags'];
+    } else {
+      labels['tags'] = normalized.join(',');
+    }
+    const nextMeta: AgentMeta = { ...meta, labels };
+    await this.sessionMetadata.registerAgent(agentId, nextMeta);
+    return { agentId, name: agentNameOf(nextMeta), tags: normalized };
+  }
+
+  async renameAgent(
+    callerAgentId: string,
+    target: string,
+    name: string,
+  ): Promise<AgentLabelUpdate> {
+    const { agentId, meta } = await this.resolveOwnedTarget(callerAgentId, target);
+    const normalized = normalizeAgentName(name);
+    if (agentNameOf(meta) === normalized) {
+      return { agentId, name: normalized, tags: tagsOf(meta) };
+    }
+    const release = this.reserveAgentName(normalized);
+    try {
+      await this.assertAgentNameAvailable(normalized, agentId);
+      const nextMeta: AgentMeta = { ...meta, labels: { ...meta.labels, name: normalized } };
+      await this.sessionMetadata.registerAgent(agentId, nextMeta);
+      return { agentId, name: normalized, tags: tagsOf(meta) };
+    } finally {
+      release();
+    }
+  }
+
+  async assertOwned(callerAgentId: string, target: string): Promise<void> {
+    await this.resolveOwnedTarget(callerAgentId, target);
   }
 
   private async createSpawnedAgent(
@@ -194,6 +301,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
               profile: plan.profileName,
               model: plan.model,
               thinking: plan.thinking,
+              persona: plan.persona,
             },
             labels,
             runtimeId: lease!.runtime.identity.runtimeId,
@@ -263,11 +371,101 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     }
   }
 
+  private async assertAgentNameAvailable(name: string, excludeAgentId: string): Promise<void> {
+    const holder = this.findNameHolder(await this.agentMetadata(), name, excludeAgentId);
+    if (holder !== undefined) {
+      throw new Error2(
+        ErrorCodes.AGENT_NAME_TAKEN,
+        `An agent named "${name}" already exists (${holder}).`,
+      );
+    }
+  }
+
+  private async resolveDismissTargets(
+    callerAgentId: string,
+    targets: DismissAgentsTargets,
+  ): Promise<readonly OwnedAgentTarget[]> {
+    const resolved: OwnedAgentTarget[] = [];
+    const seen = new Set<string>();
+    for (const target of [...(targets.ids ?? []), ...(targets.names ?? [])]) {
+      const entry = await this.resolveOwnedTarget(callerAgentId, target);
+      if (seen.has(entry.agentId)) continue;
+      seen.add(entry.agentId);
+      resolved.push(entry);
+    }
+    if (targets.all === true) {
+      const agents = await this.agentMetadata();
+      const owned = Object.entries(agents)
+        .filter(
+          ([, meta]) =>
+            isSubagentMeta(meta) && subagentParentAgentId(meta) === callerAgentId,
+        )
+        .toSorted((left, right) => left[0].localeCompare(right[0]));
+      for (const [agentId, meta] of owned) {
+        if (seen.has(agentId)) continue;
+        seen.add(agentId);
+        resolved.push({ agentId, meta });
+      }
+    }
+    return resolved;
+  }
+
+  private async resolveOwnedTarget(
+    callerAgentId: string,
+    target: string,
+  ): Promise<OwnedAgentTarget> {
+    const address = target.trim();
+    if (address === MAIN_AGENT_ID) {
+      throw new Error2(
+        ErrorCodes.AGENT_NOT_A_SUBAGENT,
+        `The root agent "${MAIN_AGENT_ID}" is not a subagent.`,
+        { details: { agentId: MAIN_AGENT_ID } },
+      );
+    }
+    if (address === callerAgentId) {
+      throw new Error2(ErrorCodes.AGENT_NOT_OWNED, 'An agent cannot target itself.');
+    }
+    const agents = await this.agentMetadata();
+    const direct = Object.hasOwn(agents, address) ? agents[address] : undefined;
+    if (direct !== undefined) {
+      if (direct.type === 'main') {
+        throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent "${address}" is not a subagent.`, {
+          details: { agentId: address },
+        });
+      }
+      if (!isSubagentMeta(direct) || subagentParentAgentId(direct) !== callerAgentId) {
+        throw new Error2(
+          ErrorCodes.AGENT_NOT_OWNED,
+          `Agent "${address}" is not owned by "${callerAgentId}".`,
+          { details: { agentId: address } },
+        );
+      }
+      return { agentId: address, meta: direct };
+    }
+    const named = Object.entries(agents)
+      .filter(
+        ([, meta]) =>
+          isSubagentMeta(meta) &&
+          subagentParentAgentId(meta) === callerAgentId &&
+          agentNameOf(meta) === address,
+      )
+      .toSorted((left, right) => left[0].localeCompare(right[0]));
+    const match = named[0];
+    if (match === undefined) {
+      throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent "${address}" does not exist.`, {
+        details: { agentId: address },
+      });
+    }
+    return { agentId: match[0], meta: match[1] };
+  }
+
   private findNameHolder(
     agents: Readonly<Record<string, AgentMeta>>,
     name: string,
+    excludeAgentId?: string,
   ): string | undefined {
     for (const [holderId, meta] of Object.entries(agents)) {
+      if (holderId === excludeAgentId) continue;
       if (meta.type === 'sub' && agentNameOf(meta) === name) return holderId;
     }
     return undefined;
@@ -332,6 +530,10 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     if (profileName === undefined) return undefined;
     return this.catalog.get(profileName)?.summaryPolicy;
   }
+}
+
+function normalizeAgentTags(tags: readonly string[]): readonly string[] {
+  return [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0))];
 }
 
 registerScopedService(

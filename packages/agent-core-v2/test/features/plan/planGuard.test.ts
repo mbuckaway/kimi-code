@@ -345,6 +345,40 @@ describe('AgentPlanService plan-guard listener', () => {
       expect(permissionRan).toBe(false);
     });
 
+    it.each([
+      ['StopAgent', { agent_id: 'agent-2' }],
+      ['StopAgents', { task_ids: ['task-1'] }],
+      ['DismissAgents', { ids: ['agent-2'] }],
+      ['InterruptAgent', { agent_id: 'agent-2' }],
+    ] as const)(
+      'planGuard_%s_returnsVetoWhilePlanModeIsActive',
+      async (toolName, args) => {
+        expect.assertions(4);
+        await enterPlan();
+        const decision = await run(hookContext(toolName, { args }));
+
+        expect(decision?.veto?.isError).toBe(true);
+        expect(decision?.veto?.output).toContain(toolName);
+        expect(decision?.veto?.output).toContain('ExitPlanMode');
+        expect(permissionRan).toBe(false);
+      },
+    );
+
+    it.each([
+      ['TagAgent', { agent_id: 'agent-2', tags: ['reviewer'] }],
+      ['RenameAgent', { agent_id: 'agent-2', name: 'planner' }],
+    ] as const)(
+      'planGuard_%s_keepsRosterEditsAvailableWhilePlanModeIsActive',
+      async (toolName, args) => {
+        expect.assertions(2);
+        await enterPlan();
+        const decision = await run(hookContext(toolName, { args }));
+
+        expect(decision?.veto).toBeUndefined();
+        expect(permissionRan).toBe(true);
+      },
+    );
+
     it.each(['CronCreate', 'CronDelete'] as const)(
       'blocks %s while plan mode is active',
       async (toolName) => {

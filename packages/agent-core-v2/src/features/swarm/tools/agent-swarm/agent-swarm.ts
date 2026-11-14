@@ -55,6 +55,28 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Map of existing subagent agent_id to the prompt used to resume that subagent. These resumed subagents are launched before new item-based subagents.',
       ),
+    names: z
+      .array(z.string().trim().min(1).max(64))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'Optional names for the new subagents, positionally aligned with items or prompts: pass exactly one name per item or prompt, in the same order. Each name is 1-64 characters of letters, digits, ".", "_" or "-", must not be "main", and must be unique within this call. Ignored for resumed subagents, which keep their existing names.',
+      ),
+    persona: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'One persona applied to every subagent spawned from items or prompts: a catalog agent name or a workspace .md file path. The persona declares mode (overlay or replace) and extends (its base profile); when subagent_type is also set, the declared base must match it. Resumed subagents keep their existing role. Cannot be combined with personas.',
+      ),
+    personas: z
+      .array(z.string().trim().min(1))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'One persona per new subagent, positionally aligned with items or prompts: pass exactly one persona per item or prompt, in the same order. Each entry is a catalog agent name or a workspace .md file path, validated against the base profile. Resumed subagents keep their existing role. Cannot be combined with persona.',
+      ),
     model: z
       .string()
       .optional()
@@ -65,6 +87,9 @@ export const AgentSwarmToolInputSchema = z
   .strict();
 
 export type AgentSwarmToolInput = z.infer<typeof AgentSwarmToolInputSchema>;
+
+export const NAMES_EXPERIMENTAL_UNAVAILABLE =
+  'names is disabled: the agent_messaging experimental flag is off.';
 
 export interface IAgentSwarmTool extends AgentTool<AgentSwarmToolInput> { readonly _serviceBrand: undefined }
 export const IAgentSwarmTool = createDecorator<IAgentSwarmTool>('agentSwarmTool');

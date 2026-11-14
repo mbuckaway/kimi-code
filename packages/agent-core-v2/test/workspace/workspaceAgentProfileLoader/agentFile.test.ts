@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { AgentFileParseError, parseAgentFileText } from '#/workspace/workspaceAgentProfileLoader/internal/agentFile';
 import { agentProfileFromFile } from '#/workspace/workspaceAgentProfileLoader/internal/agentProfileFromFile';
 import type { AgentFileDefinition } from '#/workspace/workspaceAgentProfileLoader/internal/types';
-import type { SystemPromptRenderResult } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import type {
+  AgentProfileContext,
+  SystemPromptRenderResult,
+} from '#/app/agentProfileCatalog/agentProfileCatalog';
+import { renderSystemPromptResult } from '#/app/agentProfileCatalog/profile-shared';
 
 const FULL_FILE = `---
 name: code-reviewer
@@ -111,6 +115,7 @@ describe('parseAgentFileText', () => {
 
     expect(def.name).toBe('solo');
     expect(def.prompt).toBe('body');
+    expect(def.mode).toBe('overlay');
   });
 
   it('rejects a non-boolean override field', () => {
@@ -169,6 +174,96 @@ describe('parseAgentFileText', () => {
   it('rejects an empty prompt body', () => {
     expect(() => parse('---\nname: solo\ndescription: d\n---\n')).toThrow(/prompt body/);
   });
+
+  it('parses a persona mode, base, and skills', () => {
+    const def = parse(
+      '---\nname: reviewer\ndescription: d\nmode: replace\nextends: coder\nskills:\n  - api-design\n  - testing\n---\n\nbody\n',
+    );
+
+    expect(def.mode).toBe('replace');
+    expect(def.extends).toBe('coder');
+    expect(def.skills).toEqual(['api-design', 'testing']);
+  });
+
+  it('defaults mode to overlay', () => {
+    expect(parse('---\nname: solo\ndescription: d\n---\n\nbody\n').mode).toBe('overlay');
+  });
+
+  it('accepts a comma-separated skills string', () => {
+    const def = parse('---\nname: solo\ndescription: d\nskills: api-design, testing\n---\n\nbody\n');
+
+    expect(def.skills).toEqual(['api-design', 'testing']);
+  });
+
+  it('accepts expertise as a skills alias', () => {
+    const def = parse(
+      '---\nname: solo\ndescription: d\nexpertise: api-design, testing\n---\n\nbody\n',
+    );
+
+    expect(def.skills).toEqual(['api-design', 'testing']);
+  });
+
+  it('prefers skills over the expertise alias', () => {
+    const def = parse(
+      '---\nname: solo\ndescription: d\nskills: api-design\nexpertise: testing\n---\n\nbody\n',
+    );
+
+    expect(def.skills).toEqual(['api-design']);
+  });
+
+  it('rejects a non-string extends field', () => {
+    const act = () => parse('---\nname: solo\ndescription: d\nextends: 42\n---\n\nbody\n');
+
+    expect(act).toThrow(AgentFileParseError);
+    expect(act).toThrow(/"extends"/);
+  });
+
+  it('treats an empty extends field as absent', () => {
+    const def = parse('---\nname: solo\ndescription: d\nextends: ""\n---\n\nbody\n');
+
+    expect(def.extends).toBeUndefined();
+  });
+
+  it('rejects a persona file without extends when requireExtends is set', () => {
+    let failure: unknown;
+    try {
+      parseAgentFileText({
+        path: '/tmp/agents/reviewer.md',
+        source: 'explicit',
+        text: '---\nname: reviewer\ndescription: d\n---\n\nbody\n',
+        requireExtends: true,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AgentFileParseError);
+    expect((failure as Error).message).toContain('extends');
+    expect((failure as Error).message).toContain('persona.base_required');
+  });
+
+  it('accepts a persona file with extends when requireExtends is set', () => {
+    const def = parseAgentFileText({
+      path: '/tmp/agents/reviewer.md',
+      source: 'explicit',
+      text: '---\nname: reviewer\ndescription: d\nextends: coder\n---\n\nbody\n',
+      requireExtends: true,
+    });
+
+    expect(def.extends).toBe('coder');
+  });
+
+  it('types extends as a required string when requireExtends is set', () => {
+    const def = parseAgentFileText({
+      path: '/tmp/agents/reviewer.md',
+      source: 'explicit',
+      text: '---\nname: reviewer\ndescription: d\nextends: coder\n---\n\nbody\n',
+      requireExtends: true,
+    });
+    const declaredBase: string = def.extends;
+
+    expect(declaredBase).toBe('coder');
+  });
 });
 
 describe('agentProfileFromFile', () => {
@@ -177,6 +272,7 @@ describe('agentProfileFromFile', () => {
     description: 'd',
     whenToUse: 'reviews',
     override: false,
+    mode: 'overlay',
     prompt: 'PROMPT_BODY',
     path: '/tmp/agents/reviewer.md',
     source: 'user',
@@ -289,5 +385,93 @@ describe('agentProfileFromFile', () => {
     const profile = agentProfileFromFile({ ...base, source: 'explicit' }, basePrompt);
 
     expect(profile.override).toBe(true);
+  });
+
+  it('ignores persona fields without extends', () => {
+    const profile = agentProfileFromFile({ ...base, mode: 'replace' }, basePrompt);
+
+    expect(profile.mode).toBeUndefined();
+    expect(profile.extends).toBeUndefined();
+    expect(profile.persona).toBeUndefined();
+    expect(profile.systemPrompt({})).toBe('PROMPT_BODY');
+  });
+});
+
+describe('agentProfileFromFile personas', () => {
+  const base: AgentFileDefinition = {
+    name: 'reviewer',
+    description: 'd',
+    override: false,
+    mode: 'overlay',
+    extends: 'agent',
+    prompt: 'PERSONA_ROLE',
+    skills: ['api-design'],
+    path: '/tmp/agents/reviewer.md',
+    source: 'user',
+  };
+  const basePrompt = (): SystemPromptRenderResult => ({
+    text: 'BASE_PROMPT',
+    environment: { cwd: '' },
+  });
+  const renderedBasePrompt = (context: AgentProfileContext): SystemPromptRenderResult =>
+    renderSystemPromptResult('', context, { skillActive: true });
+
+  it('renders the persona block at the role slot in overlay mode', () => {
+    const profile = agentProfileFromFile(base, renderedBasePrompt);
+
+    const prompt = profile.systemPrompt({});
+
+    expect(prompt).toContain('\n\nPERSONA_ROLE\n\n');
+    expect(prompt).toContain('You are strongest at: api-design.');
+  });
+
+  it('exposes the persona fields on the profile in overlay mode', () => {
+    const profile = agentProfileFromFile(base, renderedBasePrompt);
+
+    expect(profile.mode).toBe('overlay');
+    expect(profile.extends).toBe('agent');
+    expect(profile.persona).toBe('PERSONA_ROLE');
+    expect(profile.skills).toEqual(['api-design']);
+  });
+
+  it('renders the persona body and skills guidance in replace mode', () => {
+    const profile = agentProfileFromFile(
+      { ...base, mode: 'replace', prompt: 'PERSONA_ROLE' },
+      basePrompt,
+    );
+
+    expect(profile.systemPrompt({})).toBe(
+      'PERSONA_ROLE\n\nYou are strongest at: api-design.',
+    );
+  });
+
+  it('keeps ${base_prompt} working in replace mode', () => {
+    const profile = agentProfileFromFile(
+      { ...base, mode: 'replace', prompt: 'PERSONA_ROLE\n\n${base_prompt}', skills: [] },
+      basePrompt,
+    );
+
+    expect(profile.systemPrompt({})).toBe('PERSONA_ROLE\n\nBASE_PROMPT');
+  });
+
+  it('empties ${skills} in replace mode when the file allowlist drops the Skill tool', () => {
+    const profile = agentProfileFromFile(
+      { ...base, mode: 'replace', prompt: 'skills=${skills}', tools: ['Read'], skills: [] },
+      basePrompt,
+    );
+
+    expect(profile.systemPrompt({ skills: 'SKILLS_LISTING' })).toBe('skills=');
+  });
+
+  it('forwards the base prompt environment disclosure in overlay mode', () => {
+    const profile = agentProfileFromFile(
+      base,
+      (context): SystemPromptRenderResult => ({
+        text: 'BASE_PROMPT',
+        environment: { cwd: context.cwd ?? '' },
+      }),
+    );
+
+    expect(profile.renderSystemPrompt({ cwd: '/work' }).environment).toEqual({ cwd: '/work' });
   });
 });

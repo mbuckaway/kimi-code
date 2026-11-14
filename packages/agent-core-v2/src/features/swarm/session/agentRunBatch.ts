@@ -24,6 +24,7 @@ export interface AgentRunAttemptOptions {
 export interface AgentSpawnAttemptOptions extends AgentRunAttemptOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
+  readonly name?: string;
   readonly plan: SubagentSpawnPlan;
 }
 
@@ -294,6 +295,7 @@ export class AgentRunBatch<T> {
         const spawnOptions: AgentSpawnAttemptOptions = {
           profileName: task.profileName,
           swarmItem: task.swarmItem,
+          name: task.name,
           plan: task.plan,
           ...runOptions,
         };
