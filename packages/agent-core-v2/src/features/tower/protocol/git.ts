@@ -6,26 +6,49 @@ export class GitError extends Error {
   constructor(
     readonly args: readonly string[],
     readonly stderr: string,
+    readonly exitCode?: number,
   ) {
     super(`git ${args.join(' ')} failed: ${stderr.trim() || 'unknown error'}`);
     this.name = 'GitError';
   }
 }
 
-export async function git(cwd: string, args: readonly string[]): Promise<string> {
+export interface GitOptions {
+  readonly env?: Readonly<Record<string, string>>;
+  readonly input?: string;
+  readonly trimEnd?: boolean;
+}
+
+export async function git(
+  cwd: string,
+  args: readonly string[],
+  options: GitOptions = {},
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       'git',
       [...args],
-      { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+      {
+        cwd,
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: 16 * 1024 * 1024,
+        env: options.env === undefined ? process.env : { ...process.env, ...options.env },
+      },
       (error, stdout, stderr) => {
         if (error !== null) {
-          reject(new GitError(args, stderr || error.message));
+          reject(
+            new GitError(
+              args,
+              stderr || error.message,
+              typeof error.code === 'number' ? error.code : undefined,
+            ),
+          );
           return;
         }
-        resolve(stdout.trimEnd());
+        resolve(options.trimEnd === false ? stdout : stdout.trimEnd());
       },
     );
+    if (options.input !== undefined) child.stdin?.end(options.input);
   });
 }
 
@@ -93,6 +116,8 @@ export async function diffNameOnly(
   base: string,
   ref: string,
 ): Promise<readonly string[]> {
-  const out = await git(cwd, ['diff', '--name-only', `${base}...${ref}`]);
-  return out.length === 0 ? [] : out.split('\n').filter((line) => line.trim().length > 0);
+  const out = await git(cwd, ['diff', '--name-only', '-z', `${base}...${ref}`], {
+    trimEnd: false,
+  });
+  return out.length === 0 ? [] : out.split('\0').filter((path) => path.length > 0);
 }

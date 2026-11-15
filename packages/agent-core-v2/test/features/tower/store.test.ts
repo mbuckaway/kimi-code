@@ -6,7 +6,16 @@ import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { TowerProtocolError, TowerStore, parseFrontmatter } from '../../../src/features/tower/protocol';
+import {
+  TOWER_FILE_IO_CONCURRENCY,
+  TOWER_GIT_CONCURRENCY,
+  TowerProtocolError,
+  TowerStore,
+  diffNameOnly,
+  git as protocolGit,
+  mapWithConcurrency,
+  parseFrontmatter,
+} from '../../../src/features/tower/protocol';
 import type {
   TowerFindingType,
   TowerMission,
@@ -953,5 +962,139 @@ describe('teardown', () => {
     } finally {
       await rm(subRepo, { recursive: true, force: true });
     }
+  });
+});
+
+describe('mapWithConcurrency', () => {
+  it('returns an empty array without invoking the mapper for empty input', async () => {
+    let calls = 0;
+    const values = await mapWithConcurrency([], 4, async () => {
+      calls += 1;
+      return 0;
+    });
+
+    expect(values).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  it('preserves input order even when later items finish first', async () => {
+    const values = await mapWithConcurrency([30, 20, 10, 0], 4, async (delayMs, index) => {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return `${String(index)}:${String(delayMs)}`;
+    });
+
+    expect(values).toEqual(['0:30', '1:20', '2:10', '3:0']);
+  });
+
+  it('caps the number of in-flight mappers at the configured concurrency', async () => {
+    let active = 0;
+    let maximum = 0;
+    const items = Array.from({ length: 12 }, (_, index) => index);
+
+    const values = await mapWithConcurrency(items, 3, async (item) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active -= 1;
+      return item * 2;
+    });
+
+    expect(maximum).toBe(3);
+    expect(values).toEqual(items.map((item) => item * 2));
+  });
+
+  it('clamps a concurrency below one to sequential execution', async () => {
+    let active = 0;
+    let maximum = 0;
+
+    await mapWithConcurrency([0, 1, 2], 0, async (item) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active -= 1;
+      return item;
+    });
+
+    expect(maximum).toBe(1);
+  });
+
+  it('rejects with the first mapper error', async () => {
+    const failure = new Error('mapper failed');
+
+    await expect(
+      mapWithConcurrency([1, 2, 3], 2, async (item) => {
+        if (item === 2) throw failure;
+        return item;
+      }),
+    ).rejects.toThrow(failure);
+  });
+
+  it('exposes the tower file-io and git concurrency limits', () => {
+    expect(TOWER_FILE_IO_CONCURRENCY).toBe(8);
+    expect(TOWER_GIT_CONCURRENCY).toBe(4);
+  });
+});
+
+describe('protocol git helpers', () => {
+  it('feeds stdin to git and only trims the output when trimEnd is not disabled', async () => {
+    const blob = await protocolGit(repo, ['hash-object', '-w', '--stdin'], {
+      input: '# tower fixture\n',
+    });
+    expect(blob).toMatch(/^[0-9a-f]{40,64}$/);
+
+    const raw = await protocolGit(repo, ['config', '--get', 'user.name'], { trimEnd: false });
+    expect(raw).toBe('Tower Test\n');
+
+    const trimmed = await protocolGit(repo, ['config', '--get', 'user.name']);
+    expect(trimmed).toBe('Tower Test');
+  });
+
+  it('merges extra environment variables into the git process', async () => {
+    const identity = await protocolGit(repo, ['var', 'GIT_AUTHOR_IDENT'], {
+      env: {
+        GIT_AUTHOR_NAME: 'Env Author',
+        GIT_AUTHOR_EMAIL: 'env-author@example.test',
+        GIT_AUTHOR_DATE: '2020-01-01T00:00:00Z',
+      },
+    });
+
+    expect(identity).toContain('Env Author <env-author@example.test>');
+  });
+
+  it('splits NUL-terminated diff paths so spaces and newlines survive', async () => {
+    await commitFile(repo, 'file with space.txt', 'space\n', 'space file');
+    const newlinePath = 'line\nbreak.txt';
+    await writeFile(join(repo, newlinePath), 'newline\n');
+    await git(repo, 'add', newlinePath);
+    await git(repo, 'commit', '-m', 'newline file');
+
+    const paths = await diffNameOnly(repo, 'HEAD~2', 'HEAD');
+
+    expect(paths).toContain('file with space.txt');
+    expect(paths).toContain(newlinePath);
+  });
+});
+
+describe('tower protocol shapes', () => {
+  it('accepts artifact mission completion fields', () => {
+    const mission = {
+      id: 'M1',
+      title: 'artifact mission',
+      slug: 'artifact-mission',
+      kind: 'artifact',
+      scope: ['src/**'],
+      branch: 'tower/artifact',
+      worktree: 'M1',
+      deps: ['M0'],
+      status: 'active',
+      tasks: [],
+      notes: [],
+      blockers: [],
+      completionTip: 'abc1234',
+      keyArtifacts: ['src/report.html'],
+    } satisfies TowerMission;
+
+    expect(mission.completionTip).toBe('abc1234');
+    expect(mission.keyArtifacts).toEqual(['src/report.html']);
   });
 });

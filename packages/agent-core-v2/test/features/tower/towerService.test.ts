@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+
+import { BashParserService } from '#/app/bashParser/bashParserService';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
@@ -24,10 +26,23 @@ import type {
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
 import { TowerStore } from '#/features/tower/protocol/index';
-import { IAgentTowerService, TOWER_FLAG_ID } from '#/features/tower/tower';
+import {
+  IAgentTowerService,
+  TOWER_FLAG_ID,
+  TOWER_TOOL_NAMES,
+  TOWER_WORKER_PROFILE,
+  hasPinnedPermissionMode,
+  towerEnterFailureMessage,
+} from '#/features/tower/tower';
+import {
+  TOWER_BASH_GUARD_PARSE_OPTIONS,
+  analyzeTowerBashCommand,
+  commandNeedsTowerGuard,
+  towerWorkspaceOwned,
+} from '#/features/tower/bashGuard';
 import { _setTowerFeatureAssembledForTests } from '#/features/tower/towerFeature';
 import { AgentTowerService, TOWER_MODE_TOOLS } from '#/features/tower/towerService';
-import { towerKey } from '#/features/tower/towerOps';
+import { TowerInboxSent, towerKey } from '#/features/tower/towerOps';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
 import { makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -1522,5 +1537,141 @@ describe('TowerModeInjection', () => {
 
     expect(towerReminderMessages(context)).toHaveLength(3);
     expect(lastTowerReminder(context)).toContain('Tower mode is active');
+  });
+});
+
+describe('tower mode API helpers', () => {
+  it('lists TowerRebase among the tower tool names', () => {
+    expect(TOWER_TOOL_NAMES).toContain('TowerRebase');
+  });
+
+  it('pins the permission mode only for the tower-worker profile', () => {
+    expect(hasPinnedPermissionMode(TOWER_WORKER_PROFILE)).toBe(true);
+    expect(hasPinnedPermissionMode('coder')).toBe(false);
+    expect(hasPinnedPermissionMode(undefined)).toBe(false);
+  });
+
+  it('describes every enter failure', () => {
+    expect(towerEnterFailureMessage({ entered: false, reason: 'not-main-agent' })).toBe(
+      'tower mode is only supported by the main agent',
+    );
+    expect(towerEnterFailureMessage({ entered: false, reason: 'experiment-off' })).toContain(
+      'KIMI_CODE_EXPERIMENTAL_TOWER=1',
+    );
+    expect(towerEnterFailureMessage({ entered: false, reason: 'feature-not-assembled' })).toContain(
+      'restart is required',
+    );
+    expect(
+      towerEnterFailureMessage({ entered: false, reason: 'owned-by-live-session', owner: 'sess-1' }),
+    ).toBe('another live session owns the workspace tower (session sess-1)');
+    expect(
+      towerEnterFailureMessage({
+        entered: false,
+        reason: 'owned-by-live-session',
+        owner: 'sess-1',
+        ownerTitle: 'Main session',
+      }),
+    ).toBe('another live session owns the workspace tower (session Main session (sess-1))');
+  });
+});
+
+describe('TowerInboxSent', () => {
+  it('declares an observable event carrying the inbox message metadata', () => {
+    const event = new TowerInboxSent({
+      from: 'tower',
+      to: 'w1',
+      subject: 'review done',
+      messageId: 'msg-1',
+      file: '.tower/comms/inbox/msg-1.md',
+      sentAt: '2026-01-01T00:00:00.000Z',
+      missionId: 'M1',
+    });
+
+    expect(event.type).toBe('tower.inbox.sent');
+    expect(TowerInboxSent.observable).toBe(true);
+    expect(TowerInboxSent.durable).toBe(false);
+    expect(event.messageId).toBe('msg-1');
+    expect(event.missionId).toBe('M1');
+    expect(event.serialize()).toMatchObject({
+      type: 'tower.inbox.sent',
+      from: 'tower',
+      to: 'w1',
+      subject: 'review done',
+    });
+  });
+});
+
+describe('tower bash guard', () => {
+  const parser = new BashParserService();
+  const parse = (source: string) => parser.parse(source, TOWER_BASH_GUARD_PARSE_OPTIONS);
+  let mainCheckout: string;
+
+  beforeEach(async () => {
+    mainCheckout = await mkdtemp(join(tmpdir(), 'tower-guard-test-'));
+  });
+
+  afterEach(async () => {
+    await rm(mainCheckout, { recursive: true, force: true });
+  });
+
+  const analyze = (command: string, cwd = mainCheckout): string | undefined =>
+    analyzeTowerBashCommand({ command, cwd, mainCheckout }, parse);
+
+  it.each([
+    ['ls -la', false],
+    ['git status', false],
+    ['git clean -fdx', true],
+    ['git reset --hard HEAD', true],
+    ['rm -rf build', true],
+  ])('commandNeedsTowerGuard(%s) is %s', (command, expected) => {
+    expect(commandNeedsTowerGuard(command)).toBe(expected);
+  });
+
+  it('vetoes git reset --hard in the main checkout but allows it in a mission worktree', () => {
+    expect(analyze('git reset --hard HEAD')).toContain('git reset --hard');
+
+    expect(analyze('git reset --hard HEAD', join(mainCheckout, '.tower/worktrees/M1'))).toBe(
+      undefined,
+    );
+  });
+
+  it('vetoes forced ignored-file clean at the main checkout but not in a worktree or without -x', () => {
+    expect(analyze('git clean -fdx')).toContain('git clean');
+    expect(analyze('git clean -fd')).toBeUndefined();
+    expect(analyze('git clean -fdx', join(mainCheckout, '.tower/worktrees/M1'))).toBeUndefined();
+  });
+
+  it('vetoes recursive removal of the tower root and any removal inside comms', () => {
+    expect(analyze('rm -rf .tower')).toContain('`rm` is not allowed');
+    expect(analyze('rm -f .tower/comms/state.json')).toContain('`rm` is not allowed');
+    expect(analyze('rm -rf .tower/worktrees/M1/build')).toBeUndefined();
+    expect(analyze('rm -f notes.txt')).toBeUndefined();
+  });
+
+  it('looks through privilege wrappers, launch wrappers, and nested shells', () => {
+    expect(analyze('sudo git reset --hard')).toContain('git reset --hard');
+    expect(analyze('env FOO=1 git reset --hard')).toContain('git reset --hard');
+    expect(analyze("bash -c 'git reset --hard'")).toContain('git reset --hard');
+  });
+
+  it('blocks conservatively when the command cannot be analyzed', () => {
+    expect(
+      analyzeTowerBashCommand(
+        { command: 'git reset --hard', cwd: mainCheckout, mainCheckout },
+        () => ({ ok: false, reason: 'aborted' }),
+      ),
+    ).toContain('could not parse');
+  });
+
+  it('treats a state file with a session id as a tower-owned workspace', async () => {
+    const stateFile = join(mainCheckout, '.tower/comms/state.json');
+    await expect(towerWorkspaceOwned(stateFile)).resolves.toBe(false);
+
+    await mkdir(dirname(stateFile), { recursive: true });
+    await writeFile(stateFile, JSON.stringify({ sessionId: 'sess-1' }));
+    await expect(towerWorkspaceOwned(stateFile)).resolves.toBe(true);
+
+    await writeFile(stateFile, JSON.stringify({ sessionId: '' }));
+    await expect(towerWorkspaceOwned(stateFile)).resolves.toBe(false);
   });
 });

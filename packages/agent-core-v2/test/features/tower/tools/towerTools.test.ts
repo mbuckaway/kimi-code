@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ZodError } from 'zod';
 
 import { DisposableStore } from '#/_base/di/lifecycle';
 import type { ServiceIdentifier } from '#/_base/di/instantiation';
@@ -39,6 +40,8 @@ import { ITowerMissionTool } from '#/features/tower/tools/mission/mission';
 import { TowerMissionTool } from '#/features/tower/tools/mission/missionTool';
 import { ITowerStatusTool } from '#/features/tower/tools/status/status';
 import { TowerStatusTool } from '#/features/tower/tools/status/statusTool';
+import { TowerCompleteToolInputSchema } from '#/features/tower/tools/complete/complete';
+import { TowerRebaseToolInputSchema } from '#/features/tower/tools/rebase/rebase';
 
 import { executeTool } from '../../../tools/fixtures/execute-tool';
 import { stubAgentContext } from '../../../agent/agentContext/stubs';
@@ -396,5 +399,46 @@ describe('tool registration', () => {
     }
     expect(towerActive).toBe(false);
     expect((await stat(join(repo, '.tower')).catch(() => undefined))).toBeUndefined();
+  });
+});
+
+describe('TowerCompleteToolInputSchema', () => {
+  it('accepts a report with optional key artifacts', () => {
+    expect(TowerCompleteToolInputSchema.parse({ report: 'implemented the engine' })).toEqual({
+      report: 'implemented the engine',
+    });
+    expect(
+      TowerCompleteToolInputSchema.parse({
+        report: 'implemented the engine',
+        key_artifacts: ['src/engine/report.html'],
+      }),
+    ).toEqual({ report: 'implemented the engine', key_artifacts: ['src/engine/report.html'] });
+  });
+
+  it('rejects a blank report', () => {
+    const attempt = (): unknown => TowerCompleteToolInputSchema.parse({ report: '   ' });
+
+    expect(attempt).toThrow(ZodError);
+    expect(attempt).toThrow(/report must not be empty/);
+  });
+
+  it('rejects a missing report and unknown keys', () => {
+    expect(() => TowerCompleteToolInputSchema.parse({})).toThrow(ZodError);
+    expect(() =>
+      TowerCompleteToolInputSchema.parse({ report: 'done', mission: 'M1' }),
+    ).toThrow(ZodError);
+  });
+});
+
+describe('TowerRebaseToolInputSchema', () => {
+  it('accepts a mission id', () => {
+    expect(TowerRebaseToolInputSchema.parse({ mission: 'M3' })).toEqual({ mission: 'M3' });
+  });
+
+  it('rejects a missing mission and unknown keys', () => {
+    expect(() => TowerRebaseToolInputSchema.parse({})).toThrow(ZodError);
+    expect(() => TowerRebaseToolInputSchema.parse({ mission: 'M3', force: true })).toThrow(
+      ZodError,
+    );
   });
 });
