@@ -1,5 +1,6 @@
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { TOWER_NAME } from '#/features/tower/protocol/index';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
@@ -20,6 +21,7 @@ export class TowerRebaseTool implements ITowerRebaseTool {
     @ISessionContext private readonly sessionContext: ISessionContext,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
   ) {}
 
   resolveExecution(args: TowerRebaseToolInput): ToolExecution {
@@ -43,9 +45,11 @@ export class TowerRebaseTool implements ITowerRebaseTool {
               output: `unknown mission "${args.mission}" — known: ${state.missions.map((candidate) => candidate.id).join(', ') || '(none)'}`,
             };
           }
-          const result = await store.rebaseMission(TOWER_NAME, mission.id, {
-            activeAgentIds: () => this.activeAgentIds(),
-          });
+          const result = await this.tower.withBranchLease(mission.branch, () =>
+            store.rebaseMission(TOWER_NAME, mission.id, {
+              activeAgentIds: () => this.activeAgentIds(),
+            }),
+          );
           if (result.status === 'up-to-date') {
             return {
               output: `mission ${mission.id} (${mission.branch}) is already up to date with base "${state.base}" — retry TowerMerge; if it was refused for another reason, that refusal tells you what is missing`,

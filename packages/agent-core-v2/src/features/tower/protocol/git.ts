@@ -88,6 +88,40 @@ export async function initRepository(cwd: string): Promise<void> {
   await git(cwd, ['init']);
 }
 
+const ADD_PATHS_CHUNK = 100;
+
+async function gitCommit(cwd: string, args: readonly string[]): Promise<void> {
+  try {
+    await git(cwd, args);
+  } catch (error) {
+    if (!(error instanceof GitError) || !error.stderr.includes('identity unknown')) {
+      throw error;
+    }
+    await git(cwd, [
+      '-c',
+      'user.name=Kimi Tower',
+      '-c',
+      'user.email=kimi-tower@localhost',
+      ...args,
+    ]);
+  }
+}
+
+export async function checkoutNewLocalBranch(cwd: string, branch: string): Promise<void> {
+  await git(cwd, ['checkout', '-b', branch]);
+}
+
+export async function commitPaths(
+  cwd: string,
+  paths: readonly string[],
+  message: string,
+): Promise<void> {
+  for (let i = 0; i < paths.length; i += ADD_PATHS_CHUNK) {
+    await git(cwd, ['add', '-A', '--', ...paths.slice(i, i + ADD_PATHS_CHUNK)]);
+  }
+  await gitCommit(cwd, ['commit', '-m', message]);
+}
+
 export async function isAncestor(cwd: string, ancestor: string, ref: string): Promise<boolean> {
   try {
     await git(cwd, ['merge-base', '--is-ancestor', ancestor, ref]);

@@ -10,8 +10,13 @@ import { BashParserService } from '#/app/bashParser/bashParserService';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
+import type { ISessionScopeHandle } from '#/_base/di/scope';
 import { TestInstantiationService } from '#/_base/di/test';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { TaskTerminatedNotice } from '#/agent/task/taskOps';
+import { SubagentStarted } from '#/session/subagent/mirrorAgentRun';
+import { ISessionActivityView } from '#/session/sessionActivity/sessionActivity';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { createReminderStub, lifecycleWithReminder } from '../reminder/stubs';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
@@ -25,7 +30,11 @@ import type {
   BeforeExecuteDecision,
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
-import { TowerStore } from '#/features/tower/protocol/index';
+import {
+  TowerProtocolError,
+  TowerStore,
+  type TowerRosterEntry,
+} from '#/features/tower/protocol/index';
 import {
   IAgentTowerService,
   TOWER_FLAG_ID,
@@ -33,6 +42,7 @@ import {
   TOWER_WORKER_PROFILE,
   hasPinnedPermissionMode,
   towerEnterFailureMessage,
+  type TowerExitReason,
 } from '#/features/tower/tower';
 import {
   TOWER_BASH_GUARD_PARSE_OPTIONS,
@@ -81,6 +91,61 @@ async function initGitRepo(repo: string): Promise<void> {
   await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.email', 'tower-test@example.com'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.name', 'Tower Test'], { cwd: repo });
+}
+
+async function makeTowerRepo(): Promise<string> {
+  const repo = await mkdtemp(join(tmpdir(), 'tower-enter-'));
+  await initGitRepo(repo);
+  await writeFile(join(repo, 'README.md'), '# fixture\n');
+  await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+  await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
+  return repo;
+}
+
+function ownerSessionHandle(input: {
+  readonly busy: boolean;
+  readonly title?: string;
+  readonly onExit?: (reason: string) => void;
+}): ISessionScopeHandle {
+  const activity = {
+    _serviceBrand: undefined,
+    state: () => ({ busy: input.busy, mainTurnActive: input.busy, pendingInteraction: 'none' }),
+    onDidChange: () => ({ dispose: () => {} }),
+  };
+  const metadata = {
+    read: async () => ({
+      id: 'session-original',
+      title: input.title,
+      createdAt: 0,
+      updatedAt: 0,
+      archived: false,
+    }),
+  };
+  const ownerTower = {
+    exit: async (reason?: TowerExitReason) => {
+      input.onExit?.(reason ?? 'user');
+    },
+  };
+  const mainHandle = {
+    accessor: { get: (id: unknown) => (id === IAgentTowerService ? ownerTower : undefined) },
+  };
+  const lifecycle = {
+    handleOf: (agentId: string) => (agentId === 'main' ? mainHandle : undefined),
+  };
+  const accessor = {
+    get: (id: unknown) => {
+      if (id === ISessionActivityView) return activity;
+      if (id === ISessionMetadata) return metadata;
+      if (id === IAgentLifecycleService) return lifecycle;
+      return undefined;
+    },
+  };
+  return {
+    id: 'session-original',
+    kind: 'session',
+    accessor,
+    dispose: () => {},
+  } as unknown as ISessionScopeHandle;
 }
 
 _setTowerFeatureAssembledForTests(true);
@@ -228,9 +293,9 @@ describe('AgentTowerService', () => {
     );
 
     expect(tower.isActive).toBe(false);
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: true });
     expect(tower.isActive).toBe(true);
-    tower.exit();
+    await tower.exit();
     expect(tower.isActive).toBe(false);
 
     expect(events).toEqual([
@@ -250,10 +315,10 @@ describe('AgentTowerService', () => {
       }),
     );
 
-    tower.exit();
+    await tower.exit();
     expect(tower.isActive).toBe(false);
-    await tower.enter();
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: true });
+    await expect(tower.enter()).resolves.toEqual({ entered: true });
     expect(tower.isActive).toBe(true);
 
     expect(events).toEqual([{ type: 'agent.status.updated', towerMode: true }]);
@@ -393,7 +458,7 @@ describe('AgentTowerService', () => {
     expect(formatDenyMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('enter() is a no-op while the tower flag is off', async () => {
+  it('enter() returns experiment-off while the tower flag is off', async () => {
     towerFlagOn = false;
     const tower = ix.get(IAgentTowerService);
     const events: { readonly type: string }[] = [];
@@ -403,18 +468,21 @@ describe('AgentTowerService', () => {
       }),
     );
 
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: false, reason: 'experiment-off' });
 
     expect(tower.isActive).toBe(false);
     expect(events).toEqual([]);
   });
 
-  it('enter() is a no-op until the feature is assembled — a live flag flip needs a restart', async () => {
+  it('enter() returns feature-not-assembled until the feature is assembled — a live flag flip needs a restart', async () => {
     _setTowerFeatureAssembledForTests(false);
     try {
       const tower = ix.get(IAgentTowerService);
 
-      await tower.enter();
+      await expect(tower.enter()).resolves.toEqual({
+        entered: false,
+        reason: 'feature-not-assembled',
+      });
 
       expect(tower.isActive).toBe(false);
       expect(addedTools).toEqual([]);
@@ -480,44 +548,149 @@ describe('AgentTowerService', () => {
     expect(events).toContainEqual({ type: 'agent.status.updated', towerMode: true });
   });
 
-  it('enter() is a no-op while a foreign session owns the tower in this process', async () => {
-    const repo = await mkdtemp(join(tmpdir(), 'tower-enter-foreign-'));
+  it('enter() reports the live owner while a foreign session is busy with the tower', async () => {
+    const repo = await makeTowerRepo();
     try {
-      await initGitRepo(repo);
-      await writeFile(join(repo, 'README.md'), '# fixture\n');
-      await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
       await new TowerStore(repo).init('session-original');
 
+      let ownerExited = false;
       liveSessionIds = ['session-original'];
+      ix.stub(ISessionManager, {
+        get: (id: string) =>
+          id === 'session-original'
+            ? ownerSessionHandle({
+                busy: true,
+                title: 'Main session',
+                onExit: () => {
+                  ownerExited = true;
+                },
+              })
+            : undefined,
+      } as unknown as ISessionManager);
       ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
       const tower = ix.get(IAgentTowerService);
 
-      await tower.enter();
+      await expect(tower.enter()).resolves.toEqual({
+        entered: false,
+        reason: 'owned-by-live-session',
+        owner: 'session-original',
+        ownerTitle: 'Main session',
+      });
 
       expect(tower.isActive).toBe(false);
       expect(addedTools).toEqual([]);
+      expect(ownerExited).toBe(false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('enter() takes the tower over from an idle live session', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await new TowerStore(repo).init('session-original');
+
+      const exitReasons: string[] = [];
+      liveSessionIds = ['session-original'];
+      ix.stub(ISessionManager, {
+        get: (id: string) =>
+          id === 'session-original'
+            ? ownerSessionHandle({
+                busy: false,
+                onExit: (reason) => {
+                  exitReasons.push(reason);
+                },
+              })
+            : undefined,
+      } as unknown as ISessionManager);
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter()).resolves.toEqual({ entered: true });
+
+      expect(exitReasons).toEqual(['takeover']);
+      expect(tower.isActive).toBe(true);
+      expect((await new TowerStore(repo).load()).sessionId).toBe('session-fork');
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
   });
 
   it('enter() adopts the tower once the owning session is gone — TowerInit stays reachable', async () => {
-    const repo = await mkdtemp(join(tmpdir(), 'tower-enter-stale-'));
+    const repo = await makeTowerRepo();
     try {
-      await initGitRepo(repo);
-      await writeFile(join(repo, 'README.md'), '# fixture\n');
-      await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
       await new TowerStore(repo).init('session-original');
 
       ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
       const tower = ix.get(IAgentTowerService);
 
-      await tower.enter();
+      await expect(tower.enter()).resolves.toEqual({ entered: true });
 
       expect(tower.isActive).toBe(true);
       expect(addedTools).toEqual([...TOWER_MODE_TOOLS]);
+      expect((await new TowerStore(repo).load()).sessionId).toBe('session-fork');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('enter(base) initializes the tower on an existing local base branch', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await execFileAsync('git', ['branch', 'release'], { cwd: repo });
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter('release')).resolves.toEqual({ entered: true });
+
+      const state = await new TowerStore(repo).load();
+      expect(state.base).toBe('release');
+      expect(state.sessionId).toBe('session-fork');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('enter(base) creates the base branch and snapshots a dirty checkout onto it', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await new TowerStore(repo).init('session-original');
+      await writeFile(join(repo, 'dirty.txt'), 'wip\n');
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter('release')).resolves.toEqual({ entered: true });
+
+      const { stdout: branch } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: repo,
+      });
+      const { stdout: head } = await execFileAsync(
+        'git',
+        ['show', '--name-only', '--pretty=%s', 'HEAD'],
+        { cwd: repo },
+      );
+      expect(branch.trim()).toBe('release');
+      expect(head).toContain('tower: snapshot of uncommitted base checkout changes');
+      expect(head).toContain('dirty.txt');
+      expect((await new TowerStore(repo).load()).base).toBe('release');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('exit releases tower ownership so a later session can adopt it', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await new TowerStore(repo).init('session-fork');
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter()).resolves.toEqual({ entered: true });
+      expect((await new TowerStore(repo).load()).sessionId).toBe('session-fork');
+
+      await tower.exit('user');
+
+      expect((await new TowerStore(repo).load()).sessionId).toBeUndefined();
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
@@ -544,7 +717,7 @@ describe('AgentTowerService', () => {
     expect(addedTools).toEqual([...TOWER_MODE_TOOLS]);
     expect(removedTools).toEqual([]);
 
-    tower.exit();
+    await tower.exit();
     expect(removedTools).toEqual([]);
   });
 
@@ -555,12 +728,12 @@ describe('AgentTowerService', () => {
     );
     const tower = ix.get(IAgentTowerService);
 
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: false, reason: 'not-main-agent' });
 
     expect(tower.isActive).toBe(false);
     expect(addedTools).toEqual([]);
 
-    tower.exit();
+    await tower.exit();
     expect(removedTools).toEqual([]);
   });
 
@@ -639,7 +812,7 @@ describe('AgentTowerService', () => {
     towerFlagOn = false;
     expect(tower.isActive).toBe(false);
 
-    tower.exit();
+    await tower.exit();
 
     towerFlagOn = true;
     expect(tower.isActive).toBe(false);
@@ -1356,6 +1529,176 @@ describe('AgentTowerService', () => {
       expect(formatDenyMessage).not.toHaveBeenCalled();
     });
   });
+
+  describe('branch leases', () => {
+    it('holds the lease while the guarded operation runs and frees it afterwards', async () => {
+      const tower = ix.get(IAgentTowerService);
+      let observed: boolean | undefined;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const run = tower.withBranchLease('tower/M1', async () => {
+        observed = tower.isBranchLeased('tower/M1');
+        await gate;
+        return 'done';
+      });
+
+      expect(tower.isBranchLeased('tower/M1')).toBe(true);
+      expect(tower.isBranchLeased('tower/M2')).toBe(false);
+      await expect(tower.withBranchLease('tower/M1', async () => 'second')).rejects.toThrow(
+        TowerProtocolError,
+      );
+      await expect(tower.withBranchLease('tower/M1', async () => 'second')).rejects.toThrow(
+        /leased by another tower merge\/rebase/,
+      );
+
+      release();
+      await expect(run).resolves.toBe('done');
+      expect(observed).toBe(true);
+      expect(tower.isBranchLeased('tower/M1')).toBe(false);
+    });
+
+    it('frees the lease when the guarded operation throws', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(
+        tower.withBranchLease('tower/M1', async () => {
+          throw new Error('boom');
+        }),
+      ).rejects.toThrow('boom');
+
+      expect(tower.isBranchLeased('tower/M1')).toBe(false);
+    });
+
+    it('does not serialize different mission branches', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      const results = await Promise.all([
+        tower.withBranchLease('tower/M1', async () => 'one'),
+        tower.withBranchLease('tower/M2', async () => 'two'),
+      ]);
+
+      expect(results).toEqual(['one', 'two']);
+    });
+  });
+
+  describe('worker death tracking', () => {
+    let repo: string;
+
+    beforeEach(async () => {
+      repo = await makeTowerRepo();
+      const store = new TowerStore(repo);
+      await store.init('session-test');
+      await store.registerAgent({
+        name: 'w1',
+        agentId: 'agent-w1',
+        sessionId: 'session-test',
+        kind: 'worker',
+        missionId: 'M1',
+        branch: 'tower/M1',
+        worktree: 'M1',
+        spawnedAt: new Date().toISOString(),
+      });
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-test' } as unknown as ISessionContext);
+      await ix.get(IAgentTowerService).enter();
+    });
+
+    afterEach(async () => {
+      await rm(repo, { recursive: true, force: true });
+    });
+
+    async function rosterEntry(): Promise<TowerRosterEntry | undefined> {
+      const state = await new TowerStore(repo).load();
+      return state.roster.agents.find((agent) => agent.agentId === 'agent-w1');
+    }
+
+    it('markAgentDied writes the roster fields surfaced by status', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.markAgentDied('agent-w1', 'failed', 'boom')).resolves.toBe(true);
+
+      const entry = await rosterEntry();
+      expect(entry?.deathStatus).toBe('failed');
+      expect(entry?.deathReason).toBe('boom');
+      expect(entry?.diedAt).toBeDefined();
+    });
+
+    it('markAgentDied ignores an agent outside the roster', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.markAgentDied('agent-ghost', 'failed', 'boom')).resolves.toBe(false);
+    });
+
+    it('clearAgentDied revives the roster entry', async () => {
+      const tower = ix.get(IAgentTowerService);
+      await tower.markAgentDied('agent-w1', 'failed', 'boom');
+
+      await expect(tower.clearAgentDied('agent-w1')).resolves.toBe(true);
+
+      const entry = await rosterEntry();
+      expect(entry?.diedAt).toBeUndefined();
+      expect(entry?.deathStatus).toBeUndefined();
+    });
+
+    it('marks the roster agent died when its background task terminates abnormally', async () => {
+      publishAsMain(
+        ix,
+        new TaskTerminatedNotice({
+          agentId: 'main',
+          info: {
+            kind: 'agent',
+            taskId: 'task-1',
+            agentId: 'agent-w1',
+            description: 'worker',
+            status: 'failed',
+            startedAt: 0,
+            endedAt: 1,
+            stopReason: 'kaput',
+          },
+        }),
+      );
+
+      await vi.waitFor(async () => {
+        const entry = await rosterEntry();
+        expect(entry?.deathStatus).toBe('failed');
+        expect(entry?.deathReason).toBe('kaput');
+      });
+    });
+
+    it('ignores a completed task termination', async () => {
+      publishAsMain(
+        ix,
+        new TaskTerminatedNotice({
+          agentId: 'main',
+          info: {
+            kind: 'agent',
+            taskId: 'task-1',
+            agentId: 'agent-w1',
+            description: 'worker',
+            status: 'completed',
+            startedAt: 0,
+            endedAt: 1,
+          },
+        }),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect((await rosterEntry())?.diedAt).toBeUndefined();
+    });
+
+    it('clears the death mark when the subagent starts again', async () => {
+      const tower = ix.get(IAgentTowerService);
+      await tower.markAgentDied('agent-w1', 'failed', 'boom');
+
+      publishAsMain(ix, new SubagentStarted({ subagentId: 'agent-w1' }));
+
+      await vi.waitFor(async () => {
+        expect((await rosterEntry())?.diedAt).toBeUndefined();
+      });
+    });
+  });
 });
 
 async function injectDynamic(ctx: TestAgentContext): Promise<void> {
@@ -1428,7 +1771,7 @@ describe('TowerModeInjection', () => {
     await tower.enter();
 
     await injectDynamic(ctx);
-    tower.exit();
+    await tower.exit();
     await injectDynamic(ctx);
 
     expect(towerReminderMessages(context)).toHaveLength(2);
@@ -1526,7 +1869,7 @@ describe('TowerModeInjection', () => {
     await tower.enter();
 
     await injectDynamic(ctx);
-    tower.exit();
+    await tower.exit();
     await injectDynamic(ctx);
     await injectDynamic(ctx);
 

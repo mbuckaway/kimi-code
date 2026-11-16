@@ -55,7 +55,7 @@ export class TowerTeardownTool implements ITowerTeardownTool {
             );
           }
           const report = await store.teardown({ force: args.force });
-          this.tower.exit();
+          await this.tower.exit();
           return {
             output: [
               'tower teardown:',

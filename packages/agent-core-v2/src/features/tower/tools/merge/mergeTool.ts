@@ -1,4 +1,5 @@
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentTowerService } from '#/features/tower/tower';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { toInputJsonSchema } from '#/tool/input-schema';
@@ -17,6 +18,7 @@ export class TowerMergeTool implements ITowerMergeTool {
   constructor(
     @ISessionContext private readonly sessionContext: ISessionContext,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
+    @IAgentTowerService private readonly tower: IAgentTowerService,
   ) {}
 
   resolveExecution(args: TowerMergeToolInput): ToolExecution {
@@ -32,7 +34,9 @@ export class TowerMergeTool implements ITowerMergeTool {
       execute: () =>
         runTowerTool(async () => {
           const store = newTowerStore(this.sessionContext);
-          const result = await store.merge(args.branch);
+          const result = await this.tower.withBranchLease(args.branch, () =>
+            store.merge(args.branch),
+          );
           const { status, mergeCommit, conflictsWith, evaluatedBranchTip, currentBranchTip } =
             result;
           if (status === 'advanced') {

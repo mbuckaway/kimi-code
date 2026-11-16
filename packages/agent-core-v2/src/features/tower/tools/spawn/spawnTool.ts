@@ -132,7 +132,11 @@ export class TowerSpawnTool implements ITowerSpawnTool {
           };
         }
         try {
-          const added = await store.addWorktree(mission.worktree, mission.branch, state.base);
+          const branch = mission.branch;
+          const worktree = mission.worktree;
+          const added = await this.tower.withBranchLease(branch, () =>
+            store.addWorktree(worktree, branch, state.base),
+          );
           if (added.spawnBase !== undefined) {
             await store.updateMission(
               TOWER_NAME,

@@ -60,8 +60,12 @@ export interface IAgentTowerService {
   readonly _serviceBrand: undefined;
 
   readonly isActive: boolean;
-  enter(): Promise<void>;
-  exit(): void;
+  enter(base?: string): Promise<TowerEnterResult>;
+  exit(reason?: TowerExitReason): Promise<void>;
+  isBranchLeased(branch: string): boolean;
+  withBranchLease<T>(branch: string, execute: () => Promise<T>): Promise<T>;
+  markAgentDied(agentId: string, status: string, reason?: string): Promise<boolean>;
+  clearAgentDied(agentId: string): Promise<boolean>;
 }
 
 export const IAgentTowerService = createDecorator<IAgentTowerService>('agentTowerService');

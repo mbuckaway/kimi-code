@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, posix, resolve } from 'node:path';
 
@@ -34,6 +35,7 @@ import {
   REVIEWS_DIR,
   STATE_FILE,
   TOWER_NAME,
+  TOWER_ROOT,
   WORKTREES_DIR,
   dateDash,
   findingFileName,
@@ -206,6 +208,11 @@ export class TowerStore {
     }
   }
 
+  async isStateLost(): Promise<boolean> {
+    if (await this.isInitialized()) return false;
+    return existsSync(this.abs(TOWER_ROOT));
+  }
+
   async init(sessionId?: string, base?: string): Promise<TowerInitResult> {
     if (!(await isInsideRepo(this.repoRoot))) {
       throw new TowerProtocolError(
@@ -293,6 +300,35 @@ export class TowerStore {
       retired: stale.length > 0 ? stale.map((agent) => agent.name).join(',') : undefined,
     });
     return stale.map((agent) => agent.name);
+  }
+
+  async adopt(sessionId: string): Promise<readonly string[]> {
+    if (!(await this.isInitialized())) return [];
+    const state = await this.load();
+    return this.adoptForeignRoster(state, sessionId);
+  }
+
+  async release(sessionId: string): Promise<void> {
+    if (!(await this.isInitialized())) return;
+    const state = await this.load();
+    if (state.sessionId !== sessionId) return;
+    state.sessionId = undefined;
+    await this.save(state);
+    await this.appendLog(TOWER_NAME, 'release', { session: sessionId });
+  }
+
+  async rebase(base: string): Promise<boolean> {
+    const state = await this.load();
+    if (state.base === base) return false;
+    if (!(await branchExists(this.repoRoot, base))) {
+      throw new TowerProtocolError(
+        `base branch "${base}" does not exist as a local branch — merges land on a local branch, so remote-tracking refs and tags are not accepted; create a local branch first`,
+      );
+    }
+    const from = state.base;
+    await this.save({ ...state, base });
+    await this.appendLog(TOWER_NAME, 'rebase', { from, to: base });
+    return true;
   }
 
   private async ensureGitExclude(): Promise<void> {
@@ -384,6 +420,73 @@ export class TowerStore {
     }
     state.roster.agents.push(entry);
     await this.save(state);
+  }
+
+  async markAgentDied(
+    agentId: string,
+    status: string,
+    reason?: string,
+    sessionId?: string,
+  ): Promise<TowerRosterEntry | undefined> {
+    const state = await this.load();
+    if (sessionId !== undefined && state.sessionId !== undefined && state.sessionId !== sessionId) {
+      return undefined;
+    }
+    const index = state.roster.agents.findLastIndex((agent) => agent.agentId === agentId);
+    const existing = state.roster.agents[index];
+    if (existing === undefined) return undefined;
+    if (existing.diedAt !== undefined) return existing;
+    const entry: TowerRosterEntry = {
+      ...existing,
+      diedAt: new Date().toISOString(),
+      deathStatus: status,
+      deathReason: reason,
+    };
+    state.roster.agents[index] = entry;
+    await this.save(state);
+    const mission = state.missions.find((candidate) => candidate.id === entry.missionId);
+    await this.appendLog(
+      TOWER_NAME,
+      'died',
+      {
+        name: entry.name,
+        agent: agentId,
+        kind: entry.kind,
+        status,
+        reason: reason === undefined ? undefined : reason.replaceAll(/\s+/g, ' ').slice(0, 200),
+        mission: entry.missionId,
+        target: entry.reviewTarget,
+        session: sessionId,
+      },
+      mission === undefined
+        ? undefined
+        : join(MISSIONS_DIR, missionFileName(mission.id, mission.slug)),
+    );
+    return entry;
+  }
+
+  async clearAgentDied(agentId: string, sessionId?: string): Promise<boolean> {
+    const state = await this.load();
+    if (sessionId !== undefined && state.sessionId !== undefined && state.sessionId !== sessionId) {
+      return false;
+    }
+    const index = state.roster.agents.findLastIndex((agent) => agent.agentId === agentId);
+    const existing = state.roster.agents[index];
+    if (existing === undefined || existing.diedAt === undefined) return false;
+    state.roster.agents[index] = {
+      ...existing,
+      diedAt: undefined,
+      deathStatus: undefined,
+      deathReason: undefined,
+    };
+    await this.save(state);
+    await this.appendLog(TOWER_NAME, 'revived', {
+      name: existing.name,
+      agent: agentId,
+      kind: existing.kind,
+      session: sessionId,
+    });
+    return true;
   }
 
   async plan(input: readonly TowerPlanInput[]): Promise<readonly TowerMission[]> {

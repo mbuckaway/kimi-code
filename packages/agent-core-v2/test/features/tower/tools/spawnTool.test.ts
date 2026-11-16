@@ -80,6 +80,8 @@ describe('TowerSpawnTool', () => {
   let thinkingEnabled: boolean | undefined;
   let modelMeta: Record<string, Partial<Model>>;
   let createdSetMode: Mock<(mode: PermissionMode) => void>;
+  const leasedBranches = new Set<string>();
+  const leaseCalls: string[] = [];
 
   async function git(cwd: string, ...args: string[]): Promise<void> {
     await execFileAsync('git', args, { cwd });
@@ -99,6 +101,8 @@ describe('TowerSpawnTool', () => {
 
     towerActive = true;
     gate = { ok: true };
+    leasedBranches.clear();
+    leaseCalls.length = 0;
     release = vi.fn();
     completion = deferred();
     secondaryFlagOn = false;
@@ -124,8 +128,21 @@ describe('TowerSpawnTool', () => {
       get isActive() {
         return towerActive;
       },
-      enter: () => {},
-      exit: () => {},
+      enter: async () => ({ entered: true as const }),
+      exit: async () => {},
+      isBranchLeased: (branch: string) => leasedBranches.has(branch),
+      withBranchLease: async <T>(branch: string, run: () => Promise<T>) => {
+        leaseCalls.push(branch);
+        if (leasedBranches.has(branch)) throw new Error(`branch "${branch}" is already leased`);
+        leasedBranches.add(branch);
+        try {
+          return await run();
+        } finally {
+          leasedBranches.delete(branch);
+        }
+      },
+      markAgentDied: async () => false,
+      clearAgentDied: async () => false,
     } as unknown as IAgentTowerService);
     ix.stub(ITowerRateLimitService, {
       acquire: () => gate,
@@ -307,6 +324,14 @@ describe('TowerSpawnTool', () => {
     await vi.waitFor(() => {
       expect(release).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('leases the mission branch while creating its worktree and frees it after', async () => {
+    const result = await execute(WORKER_ARGS);
+
+    expect(result.isError).toBeUndefined();
+    expect(leaseCalls).toEqual(['feat/build-gemm']);
+    expect(leasedBranches.size).toBe(0);
   });
 
   it('pins the spawned agent to the auto permission mode', async () => {
