@@ -1048,6 +1048,60 @@ describe('merge gate', () => {
     ]);
   });
 
+  it('reports every conflicting open branch in mission order', async () => {
+    const first = await setupMission({
+      title: 'first touch',
+      scope: 'src/a/**',
+      file: 'src/a/shared.ts',
+      content: 'from first\n',
+    });
+    const second = await setupMission({
+      title: 'second touch',
+      scope: 'src/b/**',
+      file: 'src/b/b.ts',
+      content: 'from second\n',
+    });
+    const third = await setupMission({
+      title: 'third touch',
+      scope: 'src/c/**',
+      file: 'src/c/c.ts',
+      content: 'from third\n',
+    });
+    await commitFile(worktreeOf(second), 'src/a/shared.ts', 'second stray\n', 'second stray');
+    await commitFile(worktreeOf(third), 'src/a/shared.ts', 'third stray\n', 'third stray');
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: first.branch }),
+    );
+    await finalize(first);
+    await cleanReview('rev', first.branch);
+
+    const { conflictsWith } = await store.merge(first.branch);
+
+    expect(conflictsWith).toEqual([
+      { branch: second.branch, files: ['src/a/shared.ts'] },
+      { branch: third.branch, files: ['src/a/shared.ts'] },
+    ]);
+  });
+
+  it('skips an open mission whose branch does not exist yet', async () => {
+    const first = await setupMission({
+      title: 'first touch',
+      scope: 'src/a/**',
+      file: 'src/a/shared.ts',
+      content: 'from first\n',
+    });
+    await store.plan([{ title: 'not spawned yet', scope: ['src/b/**'] }]);
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: first.branch }),
+    );
+    await finalize(first);
+    await cleanReview('rev', first.branch);
+
+    const { conflictsWith } = await store.merge(first.branch);
+
+    expect(conflictsWith).toEqual([]);
+  });
+
   it('closes a zero-diff survey with a noop merge — no review, no git ceremony', async () => {
     const [mission] = await store.plan([
       { title: 'scan everything', scope: ['src/**'], kind: 'survey' },
@@ -1689,6 +1743,85 @@ describe('mapWithConcurrency', () => {
   it('exposes the tower file-io and git concurrency limits', () => {
     expect(TOWER_FILE_IO_CONCURRENCY).toBe(8);
     expect(TOWER_GIT_CONCURRENCY).toBe(4);
+  });
+});
+
+describe('bounded scans', () => {
+  beforeEach(async () => {
+    await store.init();
+    await store.registerAgent(rosterEntry({ name: 'w1', kind: 'worker' }));
+  });
+
+  it('reads an inbox fan-out wider than the file-io limit without dropping or reordering messages', async () => {
+    const total = TOWER_FILE_IO_CONCURRENCY * 3;
+    for (let index = 0; index < total; index += 1) {
+      await store.send('tower', { to: 'w1', subject: `bulk ${String(index)}`, body: 'x' });
+    }
+
+    const inbox = await store.readInbox('w1', total);
+
+    expect(inbox).toHaveLength(total);
+    expect(new Set(inbox.map((item) => item.subject)).size).toBe(total);
+    const stamps = inbox.map((item) => item.sentAt);
+    expect(stamps).toEqual([...stamps].toSorted((a, b) => b.localeCompare(a)));
+  });
+
+  it('skips an unreadable inbox entry instead of failing the whole scan', async () => {
+    await store.send('tower', { to: 'w1', subject: 'real', body: 'x' });
+    await mkdir(join(repo, '.tower/comms/inbox/broken.md'), { recursive: true });
+
+    const inbox = await store.readInbox('w1', 10);
+
+    expect(inbox.map((item) => item.subject)).toEqual(['real']);
+  });
+
+  it('reads a review fan-out wider than the file-io limit in sequence order', async () => {
+    const mission = await setupMission({
+      title: 'feature y',
+      scope: 'src/y/**',
+      file: 'src/y/y.ts',
+      content: 'y\n',
+    });
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
+    );
+    const total = TOWER_FILE_IO_CONCURRENCY + 4;
+    for (let index = 0; index < total; index += 1) {
+      await cleanReview('rev', mission.branch);
+    }
+
+    const reviews = await store.reviewsFor(mission.branch);
+
+    expect(reviews).toHaveLength(total);
+    expect(reviews.map((review) => review.seq)).toEqual(
+      Array.from({ length: total }, (_, index) => index + 1),
+    );
+    expect(reviews.map((review) => review.round)).toEqual(
+      Array.from({ length: total }, (_, index) => index + 1),
+    );
+    expect((await store.latestReview(mission.branch))?.round).toBe(total);
+  });
+
+  it('skips a review file without a parseable round', async () => {
+    const mission = await setupMission({
+      title: 'feature y',
+      scope: 'src/y/**',
+      file: 'src/y/y.ts',
+      content: 'y\n',
+    });
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
+    );
+    await cleanReview('rev', mission.branch);
+    await writeFile(
+      join(repo, '.tower/comms/reviews/review-feat-feature-y-rev-9.md'),
+      'no frontmatter here\n',
+    );
+
+    const reviews = await store.reviewsFor(mission.branch);
+
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]?.round).toBe(1);
   });
 });
 

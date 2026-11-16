@@ -6,6 +6,7 @@ import { dirname, join, posix, resolve } from 'node:path';
 import picomatch from 'picomatch';
 
 import { listBaseDirtyEntries, snapshotBaseWip } from './baseWip';
+import { mapWithConcurrency, TOWER_FILE_IO_CONCURRENCY, TOWER_GIT_CONCURRENCY } from './concurrency';
 import { parseFrontmatter, renderFrontmatter } from './frontmatter';
 import {
   branchExists,
@@ -978,32 +979,36 @@ export class TowerStore {
     } catch {
       return [];
     }
-    const items: TowerInboxItem[] = [];
-    for (const file of files.filter((f) => f.endsWith('.md'))) {
-      const rel = join(INBOX_DIR, file);
-      let text: string;
-      try {
-        text = await readFile(this.abs(rel), 'utf8');
-      } catch {
-        continue;
-      }
-      const { fields, body } = parseFrontmatter(text);
-      if (fields['type'] !== 'inbox') continue;
-      items.push({
-        messageId: fields['message_id'],
-        file: rel,
-        from: fields['from'] ?? 'unknown',
-        to: fields['to'] ?? '',
-        subject: fields['subject'] ?? '',
-        sentAt: fields['sent_at'] ?? '',
-        scope: fields['scope'],
-        action: fields['action'],
-        consentRef: fields['consent_ref'],
-        body,
-      });
-    }
-    items.sort((a, b) => b.sentAt.localeCompare(a.sentAt));
-    return items;
+    const loaded = await mapWithConcurrency(
+      files.filter((f) => f.endsWith('.md')),
+      TOWER_FILE_IO_CONCURRENCY,
+      async (file): Promise<TowerInboxItem | undefined> => {
+        const rel = join(INBOX_DIR, file);
+        let text: string;
+        try {
+          text = await readFile(this.abs(rel), 'utf8');
+        } catch {
+          return undefined;
+        }
+        const { fields, body } = parseFrontmatter(text);
+        if (fields['type'] !== 'inbox') return undefined;
+        return {
+          messageId: fields['message_id'],
+          file: rel,
+          from: fields['from'] ?? 'unknown',
+          to: fields['to'] ?? '',
+          subject: fields['subject'] ?? '',
+          sentAt: fields['sent_at'] ?? '',
+          scope: fields['scope'],
+          action: fields['action'],
+          consentRef: fields['consent_ref'],
+          body,
+        };
+      },
+    );
+    return loaded
+      .filter((item): item is TowerInboxItem => item !== undefined)
+      .toSorted((a, b) => b.sentAt.localeCompare(a.sentAt));
   }
 
   async fileFinding(callerName: string, input: TowerFindingInput): Promise<string> {
@@ -1140,34 +1145,38 @@ export class TowerStore {
       return [];
     }
     const prefix = `review-${targetSlug(target)}-`;
-    const reviews: TowerReviewInfo[] = [];
-    for (const file of files.filter((f) => f.startsWith(prefix) && f.endsWith('.md'))) {
-      const rel = join(REVIEWS_DIR, file);
-      let text: string;
-      try {
-        text = await readFile(this.abs(rel), 'utf8');
-      } catch {
-        continue;
-      }
-      const { fields } = parseFrontmatter(text);
-      const round = Number.parseInt(fields['round'] ?? '', 10);
-      if (Number.isNaN(round)) continue;
-      const seq = Number.parseInt(fields['seq'] ?? '', 10);
-      const { mtimeMs } = await stat(this.abs(rel));
-      reviews.push({
-        reviewer: fields['reviewer'] ?? 'unknown',
-        target: fields['target'] ?? target,
-        round,
-        status: fields['status'] ?? '',
-        merge: fields['merge'] ?? '',
-        reviewedCommit: fields['reviewed_commit'] ?? '',
-        date: fields['date'] ?? '',
-        file: rel,
-        mtimeMs,
-        seq: Number.isNaN(seq) ? undefined : seq,
-        mission: fields['mission'],
-      });
-    }
+    const loaded = await mapWithConcurrency(
+      files.filter((f) => f.startsWith(prefix) && f.endsWith('.md')),
+      TOWER_FILE_IO_CONCURRENCY,
+      async (file): Promise<TowerReviewInfo | undefined> => {
+        const rel = join(REVIEWS_DIR, file);
+        let text: string;
+        try {
+          text = await readFile(this.abs(rel), 'utf8');
+        } catch {
+          return undefined;
+        }
+        const { fields } = parseFrontmatter(text);
+        const round = Number.parseInt(fields['round'] ?? '', 10);
+        if (Number.isNaN(round)) return undefined;
+        const seq = Number.parseInt(fields['seq'] ?? '', 10);
+        const { mtimeMs } = await stat(this.abs(rel));
+        return {
+          reviewer: fields['reviewer'] ?? 'unknown',
+          target: fields['target'] ?? target,
+          round,
+          status: fields['status'] ?? '',
+          merge: fields['merge'] ?? '',
+          reviewedCommit: fields['reviewed_commit'] ?? '',
+          date: fields['date'] ?? '',
+          file: rel,
+          mtimeMs,
+          seq: Number.isNaN(seq) ? undefined : seq,
+          mission: fields['mission'],
+        };
+      },
+    );
+    const reviews = loaded.filter((review): review is TowerReviewInfo => review !== undefined);
     reviews.sort(
       (a, b) =>
         (a.seq ?? -1) - (b.seq ?? -1) ||
@@ -1274,16 +1283,25 @@ export class TowerStore {
     }
 
     const changedSet = new Set(observation.changedFiles);
-    const conflictsWith: Array<{ readonly branch: string; readonly files: readonly string[] }> = [];
-    for (const other of state.missions) {
-      if (other.branch === branch || !isOpenMission(other)) continue;
-      if (!(await branchExists(this.repoRoot, other.branch))) continue;
-      const otherChanged = await diffNameOnly(this.repoRoot, state.base, other.branch);
-      const overlap = otherChanged.filter((file) => changedSet.has(file));
-      if (overlap.length > 0) {
-        conflictsWith.push({ branch: other.branch, files: overlap });
-      }
-    }
+    const otherMissions = state.missions.filter(
+      (other) => other.branch !== branch && isOpenMission(other),
+    );
+    const conflicts = await mapWithConcurrency(
+      otherMissions,
+      TOWER_GIT_CONCURRENCY,
+      async (
+        other,
+      ): Promise<{ readonly branch: string; readonly files: readonly string[] } | undefined> => {
+        if (!(await branchExists(this.repoRoot, other.branch))) return undefined;
+        const otherChanged = await diffNameOnly(this.repoRoot, state.base, other.branch);
+        const overlap = otherChanged.filter((file) => changedSet.has(file));
+        return overlap.length > 0 ? { branch: other.branch, files: overlap } : undefined;
+      },
+    );
+    const conflictsWith = conflicts.filter(
+      (conflict): conflict is { readonly branch: string; readonly files: readonly string[] } =>
+        conflict !== undefined,
+    );
 
     mission.status = 'merged';
     await this.save(state);
