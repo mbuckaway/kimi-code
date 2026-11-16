@@ -34,7 +34,9 @@ import { createHooks } from '#/hooks';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import {
   isSubagentMeta,
-  subagentParentAgentId,
+  ownMeta,
+  subagentChildrenIndex,
+  subagentDescendantsChildFirst,
   tagsOf,
 } from '#/session/agentLifecycle/subagentMetadata';
 import { agentContextOf } from '#/agent/scopeContext/scopeContext';
@@ -75,6 +77,11 @@ import {
 interface OwnedAgentTarget {
   readonly agentId: string;
   readonly meta: AgentMeta;
+}
+
+interface AgentTreeIndex {
+  readonly agents: Readonly<Record<string, AgentMeta>>;
+  readonly children: ReadonlyMap<string, readonly string[]>;
 }
 
 export class SessionSubagentService extends Service implements ISessionSubagentService {
@@ -385,34 +392,51 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     callerAgentId: string,
     targets: DismissAgentsTargets,
   ): Promise<readonly OwnedAgentTarget[]> {
+    const index = await this.agentTreeIndex();
     const resolved: OwnedAgentTarget[] = [];
     const seen = new Set<string>();
+    const pushSubtree = (target: OwnedAgentTarget): void => {
+      for (const descendantId of subagentDescendantsChildFirst(target.agentId, index.children)) {
+        if (seen.has(descendantId)) continue;
+        const meta = ownMeta(index.agents, descendantId);
+        if (meta === undefined) continue;
+        seen.add(descendantId);
+        resolved.push({ agentId: descendantId, meta });
+      }
+      if (seen.has(target.agentId)) return;
+      seen.add(target.agentId);
+      resolved.push(target);
+    };
     for (const target of [...(targets.ids ?? []), ...(targets.names ?? [])]) {
-      const entry = await this.resolveOwnedTarget(callerAgentId, target);
-      if (seen.has(entry.agentId)) continue;
-      seen.add(entry.agentId);
-      resolved.push(entry);
+      pushSubtree(await this.resolveOwnedTarget(callerAgentId, target, index));
     }
     if (targets.all === true) {
-      const agents = await this.agentMetadata();
-      const owned = Object.entries(agents)
-        .filter(
-          ([, meta]) =>
-            isSubagentMeta(meta) && subagentParentAgentId(meta) === callerAgentId,
-        )
-        .toSorted((left, right) => left[0].localeCompare(right[0]));
-      for (const [agentId, meta] of owned) {
-        if (seen.has(agentId)) continue;
-        seen.add(agentId);
-        resolved.push({ agentId, meta });
+      for (const [agentId, meta] of this.ownedChildren(index, callerAgentId)) {
+        pushSubtree({ agentId, meta });
       }
     }
     return resolved;
   }
 
+  private ownedChildren(
+    index: AgentTreeIndex,
+    callerAgentId: string,
+  ): readonly (readonly [string, AgentMeta])[] {
+    return (index.children.get(callerAgentId) ?? []).flatMap((agentId) => {
+      const meta = ownMeta(index.agents, agentId);
+      return meta === undefined || !isSubagentMeta(meta) ? [] : [[agentId, meta] as const];
+    });
+  }
+
+  private async agentTreeIndex(): Promise<AgentTreeIndex> {
+    const agents = await this.agentMetadata();
+    return { agents, children: subagentChildrenIndex(agents) };
+  }
+
   private async resolveOwnedTarget(
     callerAgentId: string,
     target: string,
+    index?: AgentTreeIndex,
   ): Promise<OwnedAgentTarget> {
     const address = target.trim();
     if (address === MAIN_AGENT_ID) {
@@ -425,15 +449,18 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     if (address === callerAgentId) {
       throw new Error2(ErrorCodes.AGENT_NOT_OWNED, 'An agent cannot target itself.');
     }
-    const agents = await this.agentMetadata();
-    const direct = Object.hasOwn(agents, address) ? agents[address] : undefined;
+    const resolvedIndex = index ?? (await this.agentTreeIndex());
+    const subtree = new Set(
+      subagentDescendantsChildFirst(callerAgentId, resolvedIndex.children),
+    );
+    const direct = ownMeta(resolvedIndex.agents, address);
     if (direct !== undefined) {
       if (direct.type === 'main') {
         throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent "${address}" is not a subagent.`, {
           details: { agentId: address },
         });
       }
-      if (!isSubagentMeta(direct) || subagentParentAgentId(direct) !== callerAgentId) {
+      if (!subtree.has(address)) {
         throw new Error2(
           ErrorCodes.AGENT_NOT_OWNED,
           `Agent "${address}" is not owned by "${callerAgentId}".`,
@@ -442,21 +469,20 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
       }
       return { agentId: address, meta: direct };
     }
-    const named = Object.entries(agents)
+    const named = [...subtree]
+      .map((agentId) => ({ agentId, meta: ownMeta(resolvedIndex.agents, agentId) }))
       .filter(
-        ([, meta]) =>
-          isSubagentMeta(meta) &&
-          subagentParentAgentId(meta) === callerAgentId &&
-          agentNameOf(meta) === address,
+        (entry): entry is OwnedAgentTarget =>
+          entry.meta !== undefined && agentNameOf(entry.meta) === address,
       )
-      .toSorted((left, right) => left[0].localeCompare(right[0]));
+      .toSorted((left, right) => left.agentId.localeCompare(right.agentId));
     const match = named[0];
     if (match === undefined) {
       throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent "${address}" does not exist.`, {
         details: { agentId: address },
       });
     }
-    return { agentId: match[0], meta: match[1] };
+    return match;
   }
 
   private findNameHolder(

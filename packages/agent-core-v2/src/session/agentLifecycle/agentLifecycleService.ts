@@ -30,7 +30,7 @@ import {
   makeAgentScopeContext,
 } from '#/agent/scopeContext/scopeContext';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentProfileService, ProfileError, ProfileErrors } from '#/agent/profile/profile';
 import { abortError } from '#/_base/utils/abort';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
@@ -292,8 +292,18 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     handle: IAgentScopeHandle,
     opts: CreateAgentOptions,
   ): Promise<void> {
-    if (opts.binding !== undefined) {
-      await handle.accessor.get(IAgentProfileService).bind(opts.binding);
+    const binding = opts.binding;
+    if (binding !== undefined) {
+      const profile = handle.accessor.get(IAgentProfileService);
+      const current = profile.data().profileName;
+      if (current === undefined) await profile.bind(binding);
+      else if (current !== binding.profile) {
+        throw new ProfileError(
+          ProfileErrors.codes.PROFILE_ALREADY_BOUND,
+          `agent is already bound to profile "${current}"; cannot switch to "${binding.profile}" in this session. Spawn a new agent (new id or name) with profile "${binding.profile}" instead.`,
+          { current, requested: binding.profile },
+        );
+      }
     }
     const permissionMode = this.config.get<PermissionMode>(DEFAULT_PERMISSION_MODE_SECTION);
     const hasRestoredPermissionMode = handle.accessor

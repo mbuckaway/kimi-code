@@ -52,6 +52,7 @@ mark the row `merged-upstream` (keep the row as history).
 | enable tool-select by default | `feat/agent-defaults-on` | Flip `tool-select` to default on in both engines (`agent-core` v1 + `agent-core-v2`); the config/env off-switch stays | — | — | local |
 | document experimental flags in config | `feat/agent-defaults-on` | Document all experimental `[experimental]` flags with their defaults in `config-files.md` and `env-vars.md` (en + zh) | — | — | local |
 | port fleet-control tools to v1 | `feat/agent-defaults-on` | Add `StopAgent`, `StopAgents`, `InterruptAgent`, `DismissAgents`, `TagAgent`, `RenameAgent` to `agent-core` v1 behind a new `agent_fleet_control` flag (default on) so v1 and v2 expose the same tool set and the v1↔v2 parity test passes | — | — | local |
+| fleet coordination fixes | `feat/fleet-fixes` | Fix the live-test findings: subtree reach for messaging/lifecycle, child-first dismiss cascade, `AgentSwarm` per-item `subagent_types`, resume keeps the bound profile, raw-id messaging scoped to the subtree, and the agent-resume subtree alignment | — | — | local |
 
 The agent fleet/messaging features above ship in both engines (`agent-core` v1 and `agent-core-v2`).
 

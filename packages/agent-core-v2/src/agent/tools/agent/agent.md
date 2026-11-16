@@ -8,6 +8,7 @@ Writing the prompt:
 
 Usage notes:
 - When the task continues earlier work a subagent already did, prefer resuming that agent (pass its `resume` id) over spawning a fresh instance — the resumed agent keeps its prior context.
+- `resume` keeps the agent's bound profile, model, and name, so `subagent_type`, `model`, and `name` are ignored. `persona` is rejected with `resume` because a role is bound when the agent is spawned.
 - A persona layers a role onto the capability profile and never grants tools, so pass it only when the tool advertises `persona`.
 - A subagent's result is only visible to you, not to the user. When the user needs to see what a subagent produced, summarize the relevant parts yourself in your own reply.
 - Subagents use a fixed 2-hour timeout. If one times out, resume the same agent instead of starting over.

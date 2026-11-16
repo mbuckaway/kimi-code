@@ -740,9 +740,9 @@ describe('DismissAgentsTool', () => {
   });
 
   it.each([
-    [{ ids: ['agent-0', 'agent-1'] }, 'Dismissing agents: agent-0, agent-1'],
-    [{ names: ['reviewer'] }, 'Dismissing agents: reviewer'],
-    [{ all: true }, 'Dismissing all owned agents'],
+    [{ ids: ['agent-0', 'agent-1'] }, 'Dismissing agent subtrees: agent-0, agent-1'],
+    [{ names: ['reviewer'] }, 'Dismissing agent subtrees: reviewer'],
+    [{ all: true }, 'Dismissing the entire owned agent subtree'],
   ])('describes %o as %s', (args, description) => {
     const { host } = mockHost();
     const execution = new DismissAgentsTool(host).resolveExecution(args);
