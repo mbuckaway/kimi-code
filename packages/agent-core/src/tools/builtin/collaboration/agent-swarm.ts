@@ -35,6 +35,13 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Subagent type used for every new subagent spawned from items; defaults to coder when omitted. Resumed subagents always keep their original type, so passing subagent_type together with resume_agent_ids is allowed — it only affects the item-based spawns.',
       ),
+    subagent_types: z
+      .array(z.string().trim().min(1))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'One subagent type per new subagent, positionally aligned with items or prompts: pass exactly one type per item or prompt, in the same order. Every entry must be an existing agent type this agent may delegate to; all entries are validated before any subagent starts. Cannot be combined with subagent_type. Resumed subagents keep their existing type.',
+      ),
     model: z
       .enum(['primary', 'secondary'])
       .optional()
@@ -84,12 +91,16 @@ export type AgentSwarmToolInput = z.infer<typeof AgentSwarmToolInputSchema>;
 export const NAMES_EXPERIMENTAL_UNAVAILABLE =
   'names is disabled: the agent_messaging experimental flag is off.';
 
+const SUBAGENT_TYPE_WITH_SUBAGENT_TYPES_UNAVAILABLE =
+  'subagent_type and subagent_types cannot be combined; use subagent_type for one shared type or subagent_types per item/prompt.';
+
 interface AgentSwarmSpawnSpec {
   readonly kind: 'spawn';
   readonly index: number;
   readonly item?: string;
   readonly prompt: string;
   readonly name?: string;
+  readonly profileName?: string;
 }
 
 interface AgentSwarmResumeSpec {
@@ -134,6 +145,9 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     // parameter names newly spawned subagents. Off, `names` is stripped from
     // the advertised schema and rejected at run time.
     private readonly agentMessagingEnabled: boolean = true,
+    // Agent types this agent may delegate to, used to reject unknown
+    // `subagent_types` entries before any subagent starts.
+    private readonly subagentTypes?: readonly string[],
   ) {
     this.description =
       subagentModelDescription === undefined
@@ -192,13 +206,16 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     if (args.names !== undefined && !this.agentMessagingEnabled) {
       throw new Error(NAMES_EXPERIMENTAL_UNAVAILABLE);
     }
-    const profileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
+    const defaultProfileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
     const specs = createAgentSwarmSpecs(args, (agentId) => this.subagentHost.getSwarmItem(agentId));
+    this.requireKnownSubagentTypes(specs);
     const tasks = specs.map((spec): QueuedSubagentTask<AgentSwarmSpec> => {
+      const profileName =
+        spec.kind === 'resume' ? 'subagent' : (spec.profileName ?? defaultProfileName);
       const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
       const common = {
         data: spec,
-        profileName: spec.kind === 'resume' ? 'subagent' : profileName,
+        profileName,
         parentToolCallId: toolCallId,
         prompt: spec.prompt,
         description: childDescription(args.description, spec.index, descriptionName),
@@ -224,6 +241,22 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     });
     const results = await this.subagentHost.runQueued(tasks);
     return renderSwarmResults(results.map(({ task, ...result }) => ({ spec: task.data, ...result })));
+  }
+
+  private requireKnownSubagentTypes(specs: readonly AgentSwarmSpec[]): void {
+    const requested = specs.flatMap((spec) =>
+      spec.kind === 'spawn' && spec.profileName !== undefined ? [spec.profileName] : [],
+    );
+    if (requested.length === 0) return;
+    const allowed =
+      this.subagentTypes ?? Object.keys(this.subagentHost.delegatableSubagents());
+    for (const profileName of requested) {
+      if (allowed.includes(profileName)) continue;
+      if (this.subagentHost.subagentTypeExists(profileName)) {
+        throw new Error(subagentTypeNotAllowedMessage(profileName, allowed));
+      }
+      throw new Error(`Unknown agent type: "${profileName}"`);
+    }
   }
 }
 
@@ -264,6 +297,15 @@ function createAgentSwarmSpecs(
     );
   }
   const namedSpecs = resolveSpecNames(args.names, newCount, promptCount, itemCount);
+  if (args.subagent_types !== undefined && args.subagent_type !== undefined) {
+    throw new Error(SUBAGENT_TYPE_WITH_SUBAGENT_TYPES_UNAVAILABLE);
+  }
+  const requestedTypes = resolveSpecTypes(
+    args.subagent_types,
+    newCount,
+    promptCount,
+    itemCount,
+  );
 
   const seenPrompts = new Map<string, number>();
   const specs: AgentSwarmSpec[] = [];
@@ -288,6 +330,7 @@ function createAgentSwarmSpecs(
         index: specs.length + 1,
         prompt,
         name: namedSpecs?.[index],
+        profileName: requestedTypes?.[index],
       });
     });
   } else if (items.length > 0) {
@@ -307,10 +350,27 @@ function createAgentSwarmSpecs(
         item,
         prompt,
         name: namedSpecs?.[index],
+        profileName: requestedTypes?.[index],
       });
     });
   }
   return specs;
+}
+
+function resolveSpecTypes(
+  types: readonly string[] | undefined,
+  newCount: number,
+  promptCount: number,
+  itemCount: number,
+): readonly string[] | undefined {
+  return resolveCohortValues(
+    types,
+    newCount,
+    promptCount,
+    itemCount,
+    'subagent_types',
+    'subagent_types requires items or prompts; resumed subagents keep their existing types.',
+  )?.map((type) => type.trim());
 }
 
 function resolveSpecNames(
@@ -319,20 +379,17 @@ function resolveSpecNames(
   promptCount: number,
   itemCount: number,
 ): readonly string[] | undefined {
-  if (names === undefined) return undefined;
-  if (newCount === 0) {
-    throw new Error(
-      'names requires items or prompts; resumed subagents keep their existing names.',
-    );
-  }
-  const expected = promptCount > 0 ? promptCount : itemCount;
-  if (names.length !== expected) {
-    throw new Error(
-      `AgentSwarm names must match the number of items/prompts (expected ${String(expected)}, got ${String(names.length)}).`,
-    );
-  }
+  const resolved = resolveCohortValues(
+    names,
+    newCount,
+    promptCount,
+    itemCount,
+    'names',
+    'names requires items or prompts; resumed subagents keep their existing names.',
+  );
+  if (resolved === undefined) return undefined;
   const seenNames = new Set<string>();
-  return names.map((raw) => {
+  return resolved.map((raw) => {
     const name = raw.trim();
     if (seenNames.has(name)) {
       throw new Error('Duplicate subagent names. AgentSwarm requires distinct names.');
@@ -340,6 +397,33 @@ function resolveSpecNames(
     seenNames.add(name);
     return name;
   });
+}
+
+function resolveCohortValues(
+  values: readonly string[] | undefined,
+  newCount: number,
+  promptCount: number,
+  itemCount: number,
+  label: string,
+  missingMessage: string,
+): readonly string[] | undefined {
+  if (values === undefined) return undefined;
+  if (newCount === 0) throw new Error(missingMessage);
+  const expected = promptCount > 0 ? promptCount : itemCount;
+  if (values.length !== expected) {
+    throw new Error(
+      `AgentSwarm ${label} must match the number of items/prompts (expected ${String(expected)}, got ${String(values.length)}).`,
+    );
+  }
+  return values;
+}
+
+function subagentTypeNotAllowedMessage(
+  profileName: string,
+  allowed: readonly string[],
+): string {
+  const list = allowed.length === 0 ? 'none' : allowed.join(', ');
+  return `Subagent type "${profileName}" is not allowed for this agent. Allowed subagent types: ${list}.`;
 }
 
 function hasMinimumAgentSwarmInputs(itemCount: number, resumeCount: number): boolean {

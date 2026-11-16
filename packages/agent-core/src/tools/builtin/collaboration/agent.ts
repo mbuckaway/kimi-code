@@ -68,7 +68,7 @@ export const AgentToolInputSchema = z.preprocess(
       .string()
       .optional()
       .describe(
-        'One of the available agent types (see "Available agent types" in this tool description). Defaults to "coder" when omitted.',
+        'One of the available agent types (see "Available agent types" in this tool description) for a newly spawned agent. Defaults to "coder" when omitted. Ignored when resume is set: a resumed agent keeps its bound type.',
       ),
     model: z
       .enum(['primary', 'secondary'])
@@ -80,7 +80,7 @@ export const AgentToolInputSchema = z.preprocess(
       .string()
       .optional()
       .describe(
-        'Optional agent ID to resume instead of creating a new instance. When set, do not also pass subagent_type — the resumed agent keeps its own type, and supplying both is rejected.',
+        'Optional agent ID to resume instead of creating a new instance. The resumed agent keeps its bound profile, model, and type; subagent_type is ignored.',
       ),
     name: z
       .string()
@@ -89,7 +89,7 @@ export const AgentToolInputSchema = z.preprocess(
       .max(64)
       .optional()
       .describe(
-        'Optional name for the new subagent, so you and its siblings can address it with SendMessage (for example "reviewer"). At most 64 characters of letters, digits, ".", "_" or "-"; "main" is reserved; it must be unique among the agents you can address, and it must not look like an agent id.',
+        'Optional name for the new subagent, so you and your own agents can address it with SendMessage (for example "reviewer"). At most 64 characters of letters, digits, ".", "_" or "-"; "main" is reserved; it must be unique across the session, and it must not look like an agent id.',
       ),
     run_in_background: z
       .boolean()
@@ -218,16 +218,6 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       const runInBackground = args.run_in_background === true;
       const requestedProfileName = args.subagent_type?.length ? args.subagent_type : undefined;
       const resumeAgentId = args.resume?.trim();
-      if (
-        resumeAgentId !== undefined &&
-        resumeAgentId.length > 0 &&
-        requestedProfileName !== undefined
-      ) {
-        return {
-          output: 'Cannot set subagent_type when resuming an existing agent. Resume by agent id only.',
-          isError: true,
-        };
-      }
 
       if (runInBackground && !this.allowBackground) {
         return {

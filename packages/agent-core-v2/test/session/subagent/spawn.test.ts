@@ -1067,6 +1067,123 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       );
     });
 
+    it('dismissAgents_parentWithGrandchildren_dismissesTheWholeSubtreeChildFirst', async () => {
+      expect.assertions(5);
+      const order: string[] = [];
+      removeAgent.mockImplementation(async (context) => {
+        order.push(`remove:${context.agentId}`);
+      });
+      unregisterAgent.mockImplementation(async (agentId) => {
+        order.push(`unregister:${agentId}`);
+        delete sessionAgents[agentId];
+      });
+      addSubagent('agent-2');
+      addSubagent('agent-4', { parentAgentId: 'agent-2' });
+      addSubagent('agent-5', { parentAgentId: 'agent-4' });
+      attachHandle('agent-2');
+      attachHandle('agent-4');
+      attachHandle('agent-5');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { ids: ['agent-2'] });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual([
+        'agent-5',
+        'agent-4',
+        'agent-2',
+      ]);
+      expect(order).toEqual([
+        'remove:agent-5',
+        'unregister:agent-5',
+        'remove:agent-4',
+        'unregister:agent-4',
+        'remove:agent-2',
+        'unregister:agent-2',
+      ]);
+      expect(removeAgent).toHaveBeenCalledTimes(3);
+      expect(unregisterAgent).toHaveBeenCalledTimes(3);
+      expect(Object.keys(sessionAgents).filter((agentId) => agentId !== 'main')).toEqual([]);
+    });
+
+    it('dismissAgents_allInCallerSubtree_clearsEveryGeneration', async () => {
+      expect.assertions(4);
+      addSubagent('agent-1');
+      addSubagent('agent-2', { parentAgentId: 'agent-1' });
+      addSubagent('agent-3', { parentAgentId: 'agent-1' });
+      addSubagent('agent-4', { parentAgentId: 'agent-2' });
+      addSubagent('agent-5');
+      attachHandle('agent-2');
+      attachHandle('agent-3');
+      attachHandle('agent-4');
+      attachHandle('agent-5');
+      const svc = service();
+
+      const result = await svc.dismissAgents('agent-1', { all: true });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual([
+        'agent-4',
+        'agent-2',
+        'agent-3',
+      ]);
+      expect(unregisterAgent).toHaveBeenCalledTimes(3);
+      expect(unregisterAgent).not.toHaveBeenCalledWith('agent-5');
+      expect(unregisterAgent).not.toHaveBeenCalledWith('main');
+    });
+
+    it('dismissAgents_all_sweepsALiveForkedSideQuestionChild', async () => {
+      expect.assertions(3);
+      addSubagent('agent-2');
+      sessionAgents['agent-7'] = { type: 'sub', parentAgentId: CALLER_ID, forkedFrom: CALLER_ID };
+      attachHandle('agent-2');
+      attachHandle('agent-7');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { all: true });
+
+      expect(result.dismissed.map((entry) => [entry.agentId, entry.ghost])).toEqual([
+        ['agent-2', false],
+        ['agent-7', false],
+      ]);
+      expect(removeAgent).toHaveBeenCalledTimes(2);
+      expect(removeAgent).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-7' }));
+    });
+
+    it('dismissAgents_grandchildByDeepestName_dismissesThatSubtree', async () => {
+      expect.assertions(4);
+      addSubagent('agent-2');
+      addSubagent('agent-4', { parentAgentId: 'agent-2' });
+      addSubagent('agent-5', { parentAgentId: 'agent-4', name: 'deep' });
+      addSubagent('agent-6', { parentAgentId: 'agent-5' });
+      attachHandle('agent-5');
+      attachHandle('agent-6');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { names: ['deep'] });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual(['agent-6', 'agent-5']);
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-6');
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-5');
+      expect(unregisterAgent).not.toHaveBeenCalledWith('agent-4');
+    });
+
+    it('dismissAgents_targetOutsideCallerSubtree_rejectsAndLeavesTheTreeIntact', async () => {
+      expect.assertions(4);
+      addSubagent('agent-1');
+      addSubagent('agent-2', { parentAgentId: 'agent-1' });
+      addSubagent('agent-4');
+      addSubagent('agent-5', { parentAgentId: 'agent-4', name: 'cousin' });
+      attachHandle('agent-2');
+      attachHandle('agent-5');
+      const svc = service();
+
+      const error = await failure(svc.dismissAgents('agent-1', { ids: ['agent-5'] }));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_OWNED);
+      expect(error.message).toBe('Agent "agent-5" is not owned by "agent-1".');
+      expect(removeAgent).not.toHaveBeenCalled();
+      expect(unregisterAgent).not.toHaveBeenCalled();
+    });
+
     it('dismisses a child addressed by its name', async () => {
       expect.assertions(2);
       addSubagent('agent-2', { name: 'scout' });

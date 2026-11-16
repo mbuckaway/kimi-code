@@ -46,6 +46,9 @@ import AGENT_SWARM_FORK_DESCRIPTION from './agent-swarm-fork.md?raw';
 const PERSONA_WITH_PERSONAS_UNAVAILABLE =
   'persona and personas cannot be combined; use persona for every member or personas per item/prompt.';
 
+const SUBAGENT_TYPE_WITH_SUBAGENT_TYPES_UNAVAILABLE =
+  'subagent_type and subagent_types cannot be combined; use subagent_type for one shared type or subagent_types per item/prompt.';
+
 const AGENT_SWARM_PARAMETERS = toInputJsonSchema(AgentSwarmToolInputSchema);
 const AGENT_SWARM_PARAMETERS_NO_MODEL = stripSubagentModelParameter(AGENT_SWARM_PARAMETERS);
 
@@ -56,6 +59,7 @@ interface AgentSwarmSpawnSpec {
   readonly prompt: string;
   readonly name?: string;
   readonly persona?: string;
+  readonly profileName?: string;
 }
 
 interface AgentSwarmResumeSpec {
@@ -187,10 +191,12 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     }
     if ((args.items?.length ?? 0) > 0 || (args.prompts?.length ?? 0) > 0) {
       if (fork) {
-        const incompatible = forkIncompatibility(
-          { subagent_type: args.subagent_type, model: args.model },
-          this.profile.data(),
-        );
+        const own = this.profile.data();
+        const incompatible =
+          forkIncompatibility({ subagent_type: args.subagent_type, model: args.model }, own) ??
+          (args.subagent_types ?? [])
+            .map((subagentType) => forkIncompatibility({ subagent_type: subagentType }, own))
+            .find((message) => message !== undefined);
         if (incompatible !== undefined) {
           throw new Error2(ErrorCodes.VALIDATION_FAILED, incompatible);
         }
@@ -248,13 +254,13 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     const plans = new Map<string, SubagentSpawnPlan>();
     for (const spec of specs) {
       if (spec.kind === 'resume') continue;
-      const key = spec.persona ?? '';
+      const key = spawnPlanKey(spec);
       if (plans.has(key)) continue;
       plans.set(
         key,
         await this.subagents.planSpawn({
           callerAgentId: this.callerAgentId,
-          profileName: args.subagent_type,
+          profileName: spec.profileName ?? args.subagent_type,
           model: args.model,
           fork,
           persona: spec.persona,
@@ -265,11 +271,15 @@ export class AgentSwarmTool implements IAgentSwarmTool {
   }
 }
 
+function spawnPlanKey(spec: AgentSwarmSpawnSpec): string {
+  return `${spec.profileName ?? ''}\u0000${spec.persona ?? ''}`;
+}
+
 function requirePlan(
   plans: ReadonlyMap<string, SubagentSpawnPlan>,
   spec: AgentSwarmSpawnSpec,
 ): SubagentSpawnPlan {
-  const plan = plans.get(spec.persona ?? '');
+  const plan = plans.get(spawnPlanKey(spec));
   if (plan === undefined) {
     throw new BugIndicatingError(`No spawn plan recorded for swarm member ${String(spec.index)}`);
   }
@@ -333,6 +343,17 @@ async function createAgentSwarmSpecs(
     itemCount,
   );
   const sharedPersona = normalizeOptionalString(args.persona);
+  if (args.subagent_types !== undefined && args.subagent_type !== undefined) {
+    throw new Error2(ErrorCodes.VALIDATION_FAILED, SUBAGENT_TYPE_WITH_SUBAGENT_TYPES_UNAVAILABLE);
+  }
+  const requestedTypes = resolveCohortValues(
+    args.subagent_types,
+    newCount,
+    promptCount,
+    itemCount,
+    'subagent_types',
+    'subagent_types requires items or prompts; resumed subagents keep their existing types.',
+  );
 
   const seenPrompts = new Map<string, number>();
   const specs: AgentSwarmSpec[] = [];
@@ -362,6 +383,7 @@ async function createAgentSwarmSpecs(
         prompt,
         name: namedSpecs?.[index],
         persona: requestedPersonas?.[index] ?? sharedPersona,
+        profileName: requestedTypes?.[index],
       });
     });
   } else if (items.length > 0) {
@@ -384,6 +406,7 @@ async function createAgentSwarmSpecs(
         prompt,
         name: namedSpecs?.[index],
         persona: requestedPersonas?.[index] ?? sharedPersona,
+        profileName: requestedTypes?.[index],
       });
     });
   }
@@ -413,7 +436,7 @@ function resolveCohortValues(
       `AgentSwarm ${label} must match the number of items/prompts (expected ${String(expected)}, got ${String(values.length)}).`,
     );
   }
-  return values;
+  return values.map((value) => value.trim());
 }
 
 function resolveSpecNames(
@@ -460,7 +483,7 @@ function resolveSpecPersonas(
     itemCount,
     'personas',
     'personas requires items or prompts; resumed subagents keep their existing roles.',
-  )?.map((persona) => persona.trim());
+  );
 }
 
 function childDescription(swarmDescription: string, index: number, profileName: string): string {

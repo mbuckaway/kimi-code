@@ -17,7 +17,12 @@ import {
 import { BuiltinAgentProfileLoaderService } from '#/app/agentProfileCatalog/builtinAgentProfileLoaderService';
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import type { ToolCall } from '#/kosong/contract/message';
-import { IAgentProfileService, type ResolvedAgentProfile } from '#/agent/profile/profile';
+import {
+  IAgentProfileService,
+  ProfileError,
+  ProfileErrors,
+  type ResolvedAgentProfile,
+} from '#/agent/profile/profile';
 import type { HostFsChange } from '#/os/interface/hostFsWatch';
 import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminder';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
@@ -320,14 +325,27 @@ describe('AgentProfileService.bind', () => {
     expect(svc.data().profileName).toBe(DEFAULT_AGENT_PROFILE_NAME);
   });
 
-  it('rejects binding a different profile once bound', async () => {
+  it('rejects binding a different profile once bound with an actionable error', async () => {
+    expect.assertions(5);
     const { profile: svc } = buildContext();
 
     await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
 
-    await expect(svc.bind({ profile: 'coder', model: MOCK_MODEL })).rejects.toThrow(
-      /already bound/,
+    const rejection = await svc
+      .bind({ profile: 'coder', model: MOCK_MODEL })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(rejection).toBeInstanceOf(ProfileError);
+    expect(rejection).toMatchObject({
+      code: ProfileErrors.codes.PROFILE_ALREADY_BOUND,
+    });
+    expect((rejection as Error).message).toContain(
+      'agent is already bound to profile "agent"; cannot switch to "coder" in this session',
     );
+    expect((rejection as Error).message).toMatch(/spawn a new agent/i);
     expect(svc.data().profileName).toBe(DEFAULT_AGENT_PROFILE_NAME);
   });
 

@@ -576,7 +576,7 @@ export class Session {
     if (currentProfileName === requestedProfileName) return;
     throw new KimiError(
       ErrorCodes.REQUEST_INVALID,
-      `agent is already bound to profile "${currentProfileName}"; cannot switch to "${requestedProfileName}" in this session`,
+      `agent is already bound to profile "${currentProfileName}"; cannot switch to "${requestedProfileName}" in this session. Spawn a new agent (new id or name) with profile "${requestedProfileName}" instead.`,
     );
   }
 

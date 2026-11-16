@@ -79,9 +79,9 @@ function dismissRuleSubject(args: DismissAgentsToolInput): string {
 }
 
 function describeDismissTargets(args: DismissAgentsToolInput): string {
-  if (args.ids !== undefined) return `Dismissing agents: ${args.ids.join(', ')}`;
-  if (args.names !== undefined) return `Dismissing agents: ${args.names.join(', ')}`;
-  return 'Dismissing all owned agents';
+  if (args.ids !== undefined) return `Dismissing agent subtrees: ${args.ids.join(', ')}`;
+  if (args.names !== undefined) return `Dismissing agent subtrees: ${args.names.join(', ')}`;
+  return 'Dismissing the entire owned agent subtree';
 }
 
 function formatDismissResult(result: DismissAgentsResult): string {

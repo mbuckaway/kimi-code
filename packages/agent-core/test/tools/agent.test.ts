@@ -119,16 +119,16 @@ describe('AgentTool', () => {
     expect(properties['run_in_background']?.description).toContain('false');
   });
 
-  it('documents that resume excludes subagent_type', () => {
+  it('documents that resume ignores subagent_type', () => {
     const host = mockSubagentHost({ spawn: vi.fn() });
     const tool = agentTool(host);
     const properties = (
       tool.parameters as { properties: Record<string, { description?: string }> }
     ).properties;
 
-    // Passing both resume and subagent_type is rejected at runtime (agent.ts execution()),
-    // so the resume param must steer the model away from it.
-    expect((properties['resume']?.description ?? '').toLowerCase()).toContain('subagent_type');
+    const resumeDescription = (properties['resume']?.description ?? '').toLowerCase();
+    expect(resumeDescription).toContain('subagent_type');
+    expect(resumeDescription).toContain('ignored');
   });
 
   it('does not expose a timeout parameter in the JSON schema', () => {
@@ -400,10 +400,15 @@ describe('AgentTool', () => {
     expect(result.output).toContain('resumed result');
   });
 
-  it('returns an error when resuming with a subagent type', async () => {
+  it('ignores subagent_type when resuming and keeps the bound profile', async () => {
     const host = mockSubagentHost({
       spawn: vi.fn(),
-      resume: vi.fn(),
+      resume: vi.fn().mockResolvedValue({
+        agentId: 'agent-existing',
+        profileName: 'explore',
+        resumed: true,
+        completion: Promise.resolve({ result: 'resumed result' }),
+      }),
     });
     const tool = agentTool(host);
 
@@ -412,15 +417,28 @@ describe('AgentTool', () => {
         prompt: 'Continue',
         description: 'Continue work',
         resume: 'agent-existing',
-        subagent_type: 'explore',
+        subagent_type: 'coder',
       }),
     );
 
-    expect(result).toMatchObject({
-      isError: true,
-      output: 'Cannot set subagent_type when resuming an existing agent. Resume by agent id only.',
-    });
-    expect(host.resume).not.toHaveBeenCalled();
+    expect(result.isError).toBeFalsy();
+    expect(host.spawn).not.toHaveBeenCalled();
+    expect(host.resume).toHaveBeenCalledWith(
+      'agent-existing',
+      expect.objectContaining({
+        parentToolCallId: 'call_agent',
+        prompt: 'Continue',
+        description: 'Continue work',
+        runInBackground: false,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(host.resume).toHaveBeenCalledWith(
+      'agent-existing',
+      expect.not.objectContaining({ profileName: expect.anything() }),
+    );
+    expect(result.output).toContain('actual_subagent_type: explore');
+    expect(result.output).toContain('resumed result');
   });
 
   it('does not consume a background task slot when validation fails before launch', async () => {
@@ -435,14 +453,15 @@ describe('AgentTool', () => {
       }),
       resume: vi.fn(),
     });
+    const foregroundOnlyTool = new AgentTool(host, background, undefined, {
+      allowBackground: false,
+    });
     const tool = new AgentTool(host, background);
 
-    const invalid = await executeTool(tool,
+    const invalid = await executeTool(foregroundOnlyTool,
       context({
-        prompt: 'Continue',
-        description: 'Invalid background resume',
-        resume: 'agent-existing',
-        subagent_type: 'explore',
+        prompt: 'Investigate',
+        description: 'Invalid background launch',
         run_in_background: true,
       }),
     );
@@ -456,7 +475,8 @@ describe('AgentTool', () => {
 
     expect(invalid).toMatchObject({
       isError: true,
-      output: 'Cannot set subagent_type when resuming an existing agent. Resume by agent id only.',
+      output:
+        'Background agent execution is not available for this agent because TaskList, TaskOutput, and TaskStop are not enabled.',
     });
     expect(valid.output).toContain('status: running');
     expect(host.resume).not.toHaveBeenCalled();

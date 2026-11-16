@@ -16,9 +16,9 @@ export const AGENT_MESSAGING_ROSTER_CHANGE_VARIANT = 'agent_messaging_roster_cha
 
 export const MESSAGING_INSTRUCTIONS = [
   'Agent messaging is available.',
-  'Use SendMessage to reach `main`, your parent, or a sibling agent by name or id.',
+  'Use SendMessage to reach `main`, your ancestors, or an agent in your own subtree, by name or id.',
   'Use ListMessages to see the messages you received, newest first, with the id for ReplyMessage.',
-  'Use ReplyMessage to answer the original sender of an inbox message id.',
+  'Use ReplyMessage to answer the original sender of an inbox message id; a reply reaches that origin even outside your subtree.',
   'Use BroadcastMessage to send one message to every agent you can address.',
   'ListAgents lists the addressable agents.',
   'A message from another agent arrives inside an <agent-message> envelope.',

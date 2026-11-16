@@ -717,7 +717,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     if (current !== undefined && current !== requested) {
       throw new ProfileError(
         ProfileErrors.codes.PROFILE_ALREADY_BOUND,
-        `agent is already bound to profile "${current}"; cannot switch to "${requested}" in this session`,
+        `agent is already bound to profile "${current}"; cannot switch to "${requested}" in this session. Spawn a new agent (new id or name) with profile "${requested}" instead.`,
         { current, requested },
       );
     }

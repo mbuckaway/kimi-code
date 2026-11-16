@@ -975,6 +975,68 @@ describe('AgentLifecycleService', () => {
     expect(permissionModeSetMode).not.toHaveBeenCalled();
   });
 
+  it('rejects a differing spawn binding on a restored agent', async () => {
+    expect.assertions(3);
+    const log = recordingAppendLog([
+      createWireMetadataRecord(1),
+      {
+        type: 'profile.bind',
+        agentId: 'main',
+        profileName: 'explore',
+        modelAlias: 'restored-model',
+        thinkingEffort: 'off',
+        systemPrompt: 'restored prompt',
+        disallowedTools: [],
+        time: 2,
+      },
+    ]);
+    ix.stub(IAppendLogStore, log.store);
+    const svc = ix.get(IAgentLifecycleService);
+
+    await expect(
+      svc.create({
+        agentId: 'main',
+        binding: { profile: 'coder', model: 'spawn-model' },
+      }),
+    ).rejects.toMatchObject({ code: 'profile.already_bound' });
+    await expect(
+      svc.create({
+        agentId: 'main',
+        binding: { profile: 'coder', model: 'spawn-model' },
+      }),
+    ).rejects.toThrow(/already bound to profile "explore"; cannot switch to "coder"/);
+    expect(svc.handleOf('main')).toBeUndefined();
+  });
+
+  it('keeps the restored profile when resuming an existing agent without a binding', async () => {
+    const log = recordingAppendLog([
+      createWireMetadataRecord(1),
+      {
+        type: 'profile.bind',
+        agentId: 'main',
+        profileName: 'explore',
+        modelAlias: 'restored-model',
+        thinkingEffort: 'off',
+        systemPrompt: 'restored prompt',
+        disallowedTools: [],
+        time: 2,
+      },
+    ]);
+    ix.stub(IAppendLogStore, log.store);
+    const svc = ix.get(IAgentLifecycleService);
+
+    const resumed = await svc.create({ agentId: 'main' });
+    const handle = svc.handleOf(resumed.agentId)!;
+
+    expect(handle.accessor.get(IAgentProfileService).data()).toMatchObject({
+      profileName: 'explore',
+      modelAlias: 'restored-model',
+      systemPrompt: 'restored prompt',
+    });
+    await handle.accessor.get(IWireService).flush();
+    expect(log.appended.some((record) => record.type === 'profile.bind')).toBe(false);
+  });
+
   it('restores the runtime binding without persisting a generation', async () => {
     ix.stub(IAppendLogStore, recordingAppendLog([
       createWireMetadataRecord(1),
