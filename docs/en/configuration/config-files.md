@@ -499,7 +499,7 @@ This section is read by the default `agent-core-v2` engine. It is ignored by the
 | `secondary-model` | `boolean` | `false` | Let newly spawned subagents use a separately configured secondary model by default, with an explicit primary-model override for quality-sensitive tasks; off by default |
 | `subagent_fork` | `boolean` | `false` | Let `Agent` and `AgentSwarm` start a subagent with a snapshot of the caller's conversation history through the `fork` parameter; off by default |
 | `wait_for` | `boolean` | `true` | Give the model the `WaitFor` tool so it can wait for background tasks inside the current turn instead of ending the turn; enabled by default |
-| `tower` | `boolean` | `false` | Enable tower mode, which coordinates multiple agents on a shared objective and is toggled with `/tower`; off by default |
+| `tower` | `boolean` | `true` | Enable tower mode, which coordinates multiple agents on a shared objective and is toggled with `/tower`; enabled by default — set `false` to disable |
 
 ## `services`
 

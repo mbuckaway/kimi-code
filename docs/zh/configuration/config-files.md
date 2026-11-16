@@ -498,7 +498,7 @@ reply_language = "en"     # 可选 — 默认值为 "en"
 | `secondary-model` | `boolean` | `false` | 让新派生的 subagent 默认使用单独配置的次级模型，并可对质量敏感任务显式指定主模型；默认关闭 |
 | `subagent_fork` | `boolean` | `false` | 让 `Agent` 和 `AgentSwarm` 通过 `fork` 参数以调用方对话历史的快照启动 subagent；默认关闭 |
 | `wait_for` | `boolean` | `true` | 向模型提供 `WaitFor` 工具，使其可以在当前轮次内等待后台任务，而不是结束轮次；默认启用 |
-| `tower` | `boolean` | `false` | 启用 tower 模式，在共享目标上协调多个 Agent，通过 `/tower` 切换；默认关闭 |
+| `tower` | `boolean` | `true` | 启用 tower 模式，在共享目标上协调多个 Agent，通过 `/tower` 切换；默认启用，设为 `false` 可关闭 |
 
 ## `services`
 

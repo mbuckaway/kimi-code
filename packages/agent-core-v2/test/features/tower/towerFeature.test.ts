@@ -157,13 +157,13 @@ describe('tower flag — resolution', () => {
     return { config: ix.get(IConfigService), flags: ix.get(IFlagService) };
   }
 
-  it('is registered and disabled by default', () => {
+  it('is registered and enabled by default', () => {
     const { flags } = makeFlags();
     expect(flags.explain(TOWER_FLAG_ID)).toMatchObject({
       id: TOWER_FLAG_ID,
       env: TOWER_FLAG_ENV,
-      defaultEnabled: false,
-      enabled: false,
+      defaultEnabled: true,
+      enabled: true,
       source: 'default',
     });
   });
