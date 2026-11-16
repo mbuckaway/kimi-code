@@ -1,0 +1,30 @@
+{
+  "version": "0.39.1-MB.1.55",
+  "tag": "v0.39.1-MB.1.55",
+  "platforms": {
+    "darwin-arm64": {
+      "filename": "kimi-code-darwin-arm64.zip",
+      "checksum": "0f99e921934596d0b6ad3959bf5ec1c1b030489c18338b285b16053b3d351b56"
+    },
+    "darwin-x64": {
+      "filename": "kimi-code-darwin-x64.zip",
+      "checksum": "cd46ff4cdb5c8e2cbcbfdd2d7a6fa5ae77f6688494abe12ff078b193431ee8b4"
+    },
+    "linux-arm64": {
+      "filename": "kimi-code-linux-arm64.zip",
+      "checksum": "8d1bde48b2eb29910c015bbb543465737c14621e53f6f639ec76aaac844ca899"
+    },
+    "linux-x64": {
+      "filename": "kimi-code-linux-x64.zip",
+      "checksum": "d764760327ba71d7d74c68840316751fa8da9b49f8d263735ed948504fa0f255"
+    },
+    "win32-arm64": {
+      "filename": "kimi-code-win32-arm64.zip",
+      "checksum": "ec2aa1df60a544a363f4184d2cba46aa936c80dbc1d5b93158b5b0d28ea79671"
+    },
+    "win32-x64": {
+      "filename": "kimi-code-win32-x64.zip",
+      "checksum": "3bfbd47d5795e34d98dbc5e341f772e7b70fb9e4a0215403a74f8109fedd1944"
+    }
+  }
+}
