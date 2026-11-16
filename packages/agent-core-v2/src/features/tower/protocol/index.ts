@@ -1,6 +1,7 @@
 export * from './concurrency';
 export * from './frontmatter';
 export * from './git';
+export * from './missionGate';
 export * from './paths';
 export * from './repoRoot';
 export * from './store';

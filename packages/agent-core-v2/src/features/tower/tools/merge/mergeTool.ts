@@ -32,12 +32,40 @@ export class TowerMergeTool implements ITowerMergeTool {
       execute: () =>
         runTowerTool(async () => {
           const store = newTowerStore(this.sessionContext);
-          const { mergeCommit, conflictsWith, noop } = await store.merge(args.branch);
-          if (noop === true) {
+          const result = await store.merge(args.branch);
+          const { status, mergeCommit, conflictsWith, evaluatedBranchTip, currentBranchTip } =
+            result;
+          if (status === 'advanced') {
+            if (result.noop === true) {
+              return {
+                isError: true,
+                output: `SURVEY NOT CLOSED: ${args.branch} advanced from the evaluated zero-diff tip ${evaluatedBranchTip} to ${currentBranchTip} before the mission could be closed — no git merge was performed and the mission was not marked merged; re-evaluate the new tip`,
+              };
+            }
+            return {
+              isError: true,
+              output: [
+                `PARTIAL MERGE: ${args.branch} was evaluated at ${evaluatedBranchTip} and a merge commit ${mergeCommit} was created.`,
+                `The branch advanced during the merge to ${currentBranchTip}; commits past the evaluated tip may have been merged without passing the gate.`,
+                'The mission was not marked merged. Review the new exact tip, then retry TowerMerge. Do not treat the partial merge as a completed mission merge.',
+              ].join('\n'),
+            };
+          }
+          const after = await store.load();
+          const allClosed =
+            after.missions.length > 0 &&
+            after.missions.every(
+              (mission) => mission.status === 'merged' || mission.status === 'abandoned',
+            );
+          const teardownHint =
+            'Every mission is now merged or abandoned — ready for TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).';
+          if (status === 'noop') {
             return {
               output: [
                 `${args.branch} is a read-only survey with a zero-diff branch — mission marked merged, no git merge needed.`,
-                'Continue with the remaining missions in Dependency Flow order.',
+                allClosed
+                  ? teardownHint
+                  : 'Continue with the remaining missions in Dependency Flow order.',
               ].join('\n'),
             };
           }
@@ -54,12 +82,15 @@ export class TowerMergeTool implements ITowerMergeTool {
               ),
               'Tell each affected worker (Agent resume) to rebase onto the updated base, resolve, push, and request a re-review.',
             );
+          } else if (allClosed) {
+            lines.push(`The mission is now marked merged. ${teardownHint}`);
           } else {
-            lines.push('The mission is now marked merged. Continue with the remaining missions in Dependency Flow order.');
+            lines.push(
+              'The mission is now marked merged. Continue with the remaining missions in Dependency Flow order.',
+            );
           }
           return { output: lines.join('\n') };
         }),
     };
   }
 }
-

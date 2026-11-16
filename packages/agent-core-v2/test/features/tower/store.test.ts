@@ -12,13 +12,18 @@ import {
   TowerProtocolError,
   TowerStore,
   diffNameOnly,
+  evaluateMissionGate,
   git as protocolGit,
   mapWithConcurrency,
   parseFrontmatter,
+  selectMissionReview,
 } from '../../../src/features/tower/protocol';
 import type {
   TowerFindingType,
   TowerMission,
+  TowerMissionGitObservations,
+  TowerMissionWorkerRuntime,
+  TowerReviewInfo,
   TowerRosterEntry,
   TowerState,
 } from '../../../src/features/tower/protocol';
@@ -96,6 +101,83 @@ async function cleanReview(reviewer: string, target: string): Promise<void> {
     findings: 'none',
     checks: ['tests pass'],
     decision: 'looks good',
+  });
+}
+
+function finalize(mission: TowerMission): Promise<TowerMission> {
+  return store.updateMission('tower', mission.id, { status: 'completed' });
+}
+
+function gateMission(overrides: Partial<TowerMission> = {}): TowerMission {
+  return {
+    id: 'M1',
+    title: 'feature x',
+    slug: 'feature-x',
+    kind: 'build',
+    scope: ['src/x/**'],
+    branch: 'feat/feature-x',
+    worktree: 'wt-1',
+    deps: [],
+    status: 'completed',
+    tasks: [],
+    notes: [],
+    blockers: [],
+    ...overrides,
+  };
+}
+
+function gateState(missions: readonly TowerMission[]): TowerState {
+  return {
+    version: 1,
+    base: 'main',
+    mode: 'branch',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    roster: { agents: [] },
+    missions: [...missions],
+  };
+}
+
+function gateReview(overrides: Partial<TowerReviewInfo> = {}): TowerReviewInfo {
+  return {
+    reviewer: 'rev',
+    target: 'feat/feature-x',
+    round: 1,
+    status: 'clean',
+    merge: 'merge',
+    reviewedCommit: 'tip1',
+    date: '2026-01-01',
+    file: '.tower/comms/reviews/review-feat-feature-x-rev-1.md',
+    mission: 'M1',
+    ...overrides,
+  };
+}
+
+function gateObservations(
+  overrides: Partial<TowerMissionGitObservations> = {},
+): TowerMissionGitObservations {
+  return {
+    baseTip: 'base1',
+    headTip: 'head1',
+    checkedOutBranch: 'main',
+    branch: { tip: 'tip1', changedFiles: ['src/x/x.ts'] },
+    ...overrides,
+  };
+}
+
+function runGate(input: {
+  readonly mission?: TowerMission;
+  readonly missions?: readonly TowerMission[];
+  readonly reviews?: readonly TowerReviewInfo[];
+  readonly workers?: readonly TowerMissionWorkerRuntime[];
+  readonly observations?: TowerMissionGitObservations;
+}) {
+  const mission = input.mission ?? gateMission();
+  return evaluateMissionGate({
+    state: gateState(input.missions ?? [mission]),
+    mission,
+    reviews: input.reviews ?? [gateReview()],
+    workers: input.workers ?? [],
+    observations: input.observations ?? gateObservations(),
   });
 }
 
@@ -441,6 +523,233 @@ describe('findings', () => {
   });
 });
 
+describe('selectMissionReview', () => {
+  it('prefers the review stamped with the mission id', () => {
+    const mission = gateMission();
+    const stamped = gateReview({ mission: 'M1', round: 2 });
+    const unstamped = gateReview({ mission: undefined, round: 3 });
+    const selected = selectMissionReview(gateState([mission]), mission, [unstamped, stamped]);
+    expect(selected).toBe(stamped);
+  });
+
+  it('accepts an unstamped review when no sibling mission shares the branch', () => {
+    const mission = gateMission();
+    const unstamped = gateReview({ mission: undefined });
+    const selected = selectMissionReview(gateState([mission]), mission, [unstamped]);
+    expect(selected).toBe(unstamped);
+  });
+
+  it('returns an unstamped review even when another mission shares the branch', () => {
+    const mission = gateMission();
+    const sibling = gateMission({ id: 'M2', slug: 'feature-x-again' });
+    const unstamped = gateReview({ mission: undefined });
+    const selected = selectMissionReview(gateState([mission, sibling]), mission, [unstamped]);
+    expect(selected).toBe(unstamped);
+  });
+
+  it('ignores reviews stamped for a sibling mission', () => {
+    const mission = gateMission();
+    const sibling = gateMission({ id: 'M2', slug: 'feature-x-again' });
+    const siblingReview = gateReview({ mission: 'M2' });
+    const selected = selectMissionReview(gateState([mission, sibling]), mission, [siblingReview]);
+    expect(selected).toBeUndefined();
+  });
+});
+
+describe('evaluateMissionGate', () => {
+  it('blocks a mission that is not completed', () => {
+    const result = runGate({ mission: gateMission({ status: 'active' }) });
+    expect(result.ready).toBe(false);
+    expect(result.blocks.map((block) => block.reason)).toEqual(['not-completed']);
+    expect(result.blocks[0]?.message).toContain('only a completed mission can merge');
+  });
+
+  it('blocks when open tasks remain and ignores dropped tasks', () => {
+    const result = runGate({
+      mission: gateMission({
+        tasks: [
+          { text: 'done', done: true },
+          { text: 'open', done: false },
+          { text: 'dropped', done: false, dropped: true },
+        ],
+      }),
+    });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['open-tasks']);
+    expect(result.blocks[0]?.message).toContain('has 1 open task(s): "open"');
+  });
+
+  it('blocks when the mission carries blockers', () => {
+    const result = runGate({ mission: gateMission({ blockers: ['waiting on api'] }) });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['blockers']);
+    expect(result.blocks[0]?.message).toContain('waiting on api');
+  });
+
+  it('blocks while a mission worker is mid-turn', () => {
+    const result = runGate({
+      workers: [{ agentId: 'agent-w1', name: 'w1', status: 'busy' }],
+    });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['worker-busy']);
+    expect(result.blocks[0]?.message).toContain('w1');
+  });
+
+  it('reports every common block at once', () => {
+    const result = runGate({
+      mission: gateMission({ status: 'active', tasks: [{ text: 'open', done: false }] }),
+      workers: [{ agentId: 'agent-w1', name: 'w1', status: 'busy' }],
+    });
+    expect(result.blocks.map((block) => block.reason)).toEqual([
+      'not-completed',
+      'open-tasks',
+      'worker-busy',
+    ]);
+  });
+
+  it('blocks when the mission branch does not exist yet', () => {
+    const result = runGate({ observations: gateObservations({ branch: undefined }) });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['branch-missing']);
+    expect(result.blocks[0]?.message).toContain('does not exist');
+  });
+
+  it('blocks while dependencies are unmerged', () => {
+    const dependency = gateMission({ id: 'M0', slug: 'base', branch: 'feat/base', status: 'active' });
+    const mission = gateMission({ deps: ['M0'] });
+    const result = runGate({ mission, missions: [dependency, mission] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['deps-unmerged']);
+    expect(result.blocks[0]?.message).toContain('M0');
+  });
+
+  it('treats an abandoned dependency as merged', () => {
+    const dependency = gateMission({ id: 'M0', slug: 'base', branch: 'feat/base', status: 'abandoned' });
+    const mission = gateMission({ deps: ['M0'] });
+    expect(runGate({ mission, missions: [dependency, mission] }).ready).toBe(true);
+  });
+
+  it('closes a zero-diff survey as a noop', () => {
+    const result = runGate({
+      mission: gateMission({ kind: 'survey' }),
+      reviews: [],
+      observations: gateObservations({ branch: { tip: 'tip1', changedFiles: [] } }),
+    });
+    expect(result.ready).toBe(true);
+    expect(result.noop).toBe(true);
+    expect(result.selectedReview).toBeUndefined();
+  });
+
+  it('blocks a survey branch that has changes', () => {
+    const result = runGate({ mission: gateMission({ kind: 'survey' }), reviews: [] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['read-only-survey']);
+    expect(result.blocks[0]?.message).toContain('read-only');
+  });
+
+  it('blocks a mission without a review', () => {
+    const result = runGate({ reviews: [] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['no-review']);
+    expect(result.blocks[0]?.message).toContain('assign a reviewer first');
+  });
+
+  it('blocks a hold verdict', () => {
+    const result = runGate({ reviews: [gateReview({ merge: 'hold' })] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['review-hold']);
+    expect(result.blocks[0]?.message).toContain('says hold');
+  });
+
+  it('blocks a review that is not clean', () => {
+    const result = runGate({ reviews: [gateReview({ status: 'p2-1items' })] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['not-clean']);
+    expect(result.blocks[0]?.message).toContain('clean round is required');
+  });
+
+  it('blocks fix-then-merge even when the review is clean', () => {
+    const result = runGate({ reviews: [gateReview({ merge: 'fix-then-merge' })] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['review-not-approved']);
+    expect(result.blocks[0]?.message).toContain('fix-then-merge is not approval');
+  });
+
+  it('blocks when the branch moved after the review', () => {
+    const result = runGate({
+      reviews: [gateReview({ reviewedCommit: 'tip0' })],
+    });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['tip-moved']);
+    expect(result.reviewBinding).toBe('stale-tip');
+  });
+
+  it('accepts a review waived by a recorded clean rebase', () => {
+    const mission = gateMission({ lastRebase: { fromCommit: 'tip0', toCommit: 'tip1' } });
+    const result = runGate({ mission, reviews: [gateReview({ reviewedCommit: 'tip0' })] });
+    expect(result.ready).toBe(true);
+    expect(result.reviewBinding).toBe('clean-rebase-waived');
+  });
+
+  it('binds an exact-tip review without a rebase', () => {
+    expect(runGate({}).reviewBinding).toBe('exact-tip');
+  });
+
+  it('blocks changes outside the mission scope', () => {
+    const result = runGate({
+      observations: gateObservations({
+        branch: { tip: 'tip1', changedFiles: ['src/x/x.ts', 'src/y/y.ts'] },
+      }),
+    });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['out-of-scope']);
+    expect(result.blocks[0]?.message).toContain('src/y/y.ts');
+  });
+
+  it('blocks when the main checkout is on another branch', () => {
+    const result = runGate({ observations: gateObservations({ checkedOutBranch: 'hotfix' }) });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['base-mismatch']);
+    expect(result.blocks[0]?.message).toContain('not the recorded base');
+  });
+
+  it('blocks when the main checkout is detached', () => {
+    const result = runGate({ observations: gateObservations({ checkedOutBranch: undefined }) });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['base-mismatch']);
+    expect(result.blocks[0]?.message).toContain('detached HEAD');
+  });
+
+  it('blocks a shared-branch mission whose only review is unstamped', () => {
+    const mission = gateMission();
+    const sibling = gateMission({ id: 'M2', slug: 'feature-x-again' });
+    const result = runGate({
+      mission,
+      missions: [mission, sibling],
+      reviews: [gateReview({ mission: undefined })],
+    });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['review-mission-mismatch']);
+    expect(result.blocks[0]?.message).toContain('predates mission-stamped reviews');
+  });
+
+  it('blocks artifact acceptance that is not recorded by the tower', () => {
+    const mission = gateMission({ kind: 'artifact', completionTip: 'tip1' });
+    const result = runGate({
+      mission,
+      reviews: [gateReview({ reviewer: 'rev' })],
+    });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['no-review']);
+    expect(result.blocks[0]?.message).toContain('explicit human acceptance recorded by reviewer=tower');
+  });
+
+  it('blocks artifact acceptance without a recorded completion tip', () => {
+    const mission = gateMission({ kind: 'artifact' });
+    const result = runGate({ mission, reviews: [gateReview({ reviewer: 'tower' })] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['completion-tip-mismatch']);
+    expect(result.blocks[0]?.message).toContain('no recorded completion tip');
+  });
+
+  it('blocks artifact acceptance recorded against a different completion tip', () => {
+    const mission = gateMission({ kind: 'artifact', completionTip: 'tip2' });
+    const result = runGate({ mission, reviews: [gateReview({ reviewer: 'tower' })] });
+    expect(result.blocks.map((block) => block.reason)).toEqual(['completion-tip-mismatch']);
+    expect(result.blocks[0]?.message).toContain('the user approved a different tip');
+  });
+
+  it('passes artifact acceptance bound to the completion tip', () => {
+    const mission = gateMission({ kind: 'artifact', completionTip: 'tip1' });
+    const result = runGate({ mission, reviews: [gateReview({ reviewer: 'tower' })] });
+    expect(result.ready).toBe(true);
+    expect(result.noop).toBe(false);
+  });
+});
+
 describe('merge gate', () => {
   beforeEach(async () => {
     await store.init();
@@ -456,6 +765,7 @@ describe('merge gate', () => {
     await store.registerAgent(
       rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
     );
+    await finalize(mission);
 
     await expect(store.merge(mission.branch)).rejects.toThrow(/no review/);
 
@@ -481,8 +791,11 @@ describe('merge gate', () => {
     expect(reReviewed?.round).toBe(3);
     expect(reReviewed?.reviewedCommit).toBe(await git(repo, 'rev-parse', mission.branch));
 
-    const { mergeCommit } = await store.merge(mission.branch);
-    expect(mergeCommit).toBe(await git(repo, 'rev-parse', 'HEAD'));
+    const result = await store.merge(mission.branch);
+    expect(result.status).toBe('merged');
+    expect(result.evaluatedBranchTip).toBe(result.currentBranchTip);
+    expect(result.mergeCommit).toBe(await git(repo, 'rev-parse', 'HEAD'));
+    expect(result.conflictsWith).toEqual([]);
     const state = await store.load();
     expect(state.missions.find((m) => m.id === mission.id)?.status).toBe('merged');
     const index = await readFile(join(repo, '.tower/comms/MISSIONS.md'), 'utf8');
@@ -499,6 +812,7 @@ describe('merge gate', () => {
     await store.registerAgent(
       rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
     );
+    await finalize(mission);
     await cleanReview('rev', mission.branch);
 
     await git(repo, 'checkout', '-b', 'hotfix');
@@ -529,6 +843,7 @@ describe('merge gate', () => {
     await store.registerAgent(
       rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
     );
+    await finalize(mission);
     await cleanReview('rev', mission.branch);
 
     await git(repo, 'checkout', '--detach', 'HEAD');
@@ -586,6 +901,8 @@ describe('merge gate', () => {
     await store.registerAgent(
       rosterEntry({ name: 'rev-app', kind: 'reviewer', reviewTarget: consumer.branch }),
     );
+    await finalize(base);
+    await finalize(consumer);
     await cleanReview('rev-app', consumer.branch);
     await expect(store.merge(consumer.branch)).rejects.toThrow(
       new RegExp(`dependencies not merged yet \\(${base.id}\\)`),
@@ -611,6 +928,7 @@ describe('merge gate', () => {
     await store.registerAgent(
       rosterEntry({ name: 'w1', kind: 'worker', missionId: mission.id }),
     );
+    await finalize(mission);
     await cleanReview('rev', mission.branch);
 
     await expect(store.merge(mission.branch)).rejects.toThrow(/outside mission M1 scope/);
@@ -649,6 +967,8 @@ describe('merge gate', () => {
     await store.registerAgent(
       rosterEntry({ name: 'rev-2', kind: 'reviewer', reviewTarget: second.branch }),
     );
+    await finalize(first);
+    await finalize(second);
     await cleanReview('rev-1', first.branch);
     await cleanReview('rev-2', second.branch);
 
@@ -668,10 +988,14 @@ describe('merge gate', () => {
     ]);
     const state = await store.load();
     await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await finalize(mission!);
 
     const baseTip = await git(repo, 'rev-parse', 'HEAD');
     const result = await store.merge(mission!.branch);
+    expect(result.status).toBe('noop');
     expect(result.noop).toBe(true);
+    expect(result.evaluatedBranchTip).toBe(baseTip);
+    expect(result.currentBranchTip).toBe(baseTip);
     expect(result.mergeCommit).toBe(baseTip);
     expect((await store.load()).missions[0]?.status).toBe('merged');
     expect((await store.recentLog(3)).join('\n')).toContain('merge.noop');
@@ -684,6 +1008,7 @@ describe('merge gate', () => {
     ]);
     const state = await store.load();
     await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await finalize(mission!);
     await commitFile(worktreeOf(mission!), 'src/layer/notes.ts', 'oops\n', 'stray edit');
 
     await expect(store.merge(mission!.branch)).rejects.toThrow(/read-only/);
@@ -703,6 +1028,8 @@ describe('merge gate', () => {
     });
     const state = await store.load();
     await store.addWorktree(survey!.worktree, survey!.branch, state.base);
+    await finalize(survey!);
+    await finalize(build);
     await store.registerAgent(
       rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: build.branch }),
     );
@@ -722,6 +1049,7 @@ describe('merge gate', () => {
     const state = await store.load();
     await store.addWorktree(followUp!.worktree, followUp!.branch, state.base);
     await commitFile(worktreeOf(followUp!), 'src/b/b.ts', 'b\n', 'work on M2');
+    await finalize(followUp!);
     await store.registerAgent(
       rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: followUp!.branch }),
     );
@@ -744,6 +1072,7 @@ describe('merge gate', () => {
     await store.addWorktree(second!.worktree, second!.branch, state.base);
     await commitFile(worktreeOf(first!), 'src/a/shared.ts', 'from first\n', 'first');
     await commitFile(worktreeOf(second!), 'src/a/shared.ts', 'from second\n', 'second strays');
+    await finalize(first!);
     await store.registerAgent(
       rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: first!.branch }),
     );
@@ -756,6 +1085,7 @@ describe('merge gate', () => {
     const [third] = await store.plan([{ title: 'third', scope: ['src/a/**'] }]);
     await store.addWorktree(third!.worktree, third!.branch, state.base);
     await commitFile(worktreeOf(third!), 'src/a/shared.ts', 'from third\n', 'third');
+    await finalize(third!);
     await store.registerAgent(
       rosterEntry({ name: 'rev3', kind: 'reviewer', reviewTarget: third!.branch }),
     );
@@ -763,6 +1093,102 @@ describe('merge gate', () => {
 
     const after = await store.merge(third!.branch);
     expect(after.conflictsWith.map((c) => c.branch)).not.toContain(second!.branch);
+  });
+
+  it('refuses to merge before the mission is completed and records the gate reason', async () => {
+    const mission = await setupMission({
+      title: 'feature x',
+      scope: 'src/x/**',
+      file: 'src/x/x.ts',
+      content: 'x\n',
+    });
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
+    );
+    await cleanReview('rev', mission.branch);
+
+    await expect(store.merge(mission.branch)).rejects.toThrow(
+      /only a completed mission can merge/,
+    );
+    expect((await store.recentLog(5)).join('\n')).toContain('reason=not-completed');
+    expect((await store.load()).missions.find((m) => m.id === mission.id)?.status).toBe('planned');
+  });
+
+  it('stamps every review with its mission and an increasing sequence', async () => {
+    const mission = await setupMission({
+      title: 'feature x',
+      scope: 'src/x/**',
+      file: 'src/x/x.ts',
+      content: 'x\n',
+    });
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
+    );
+    await cleanReview('rev', mission.branch);
+    await cleanReview('rev', mission.branch);
+
+    const reviews = await store.reviewsFor(mission.branch);
+    expect(reviews.map((review) => review.mission)).toEqual([mission.id, mission.id]);
+    expect(reviews.map((review) => review.seq)).toEqual([1, 2]);
+    expect(reviews[0]?.mtimeMs).toBeGreaterThan(0);
+    expect((await store.latestReview(mission.branch))?.round).toBe(2);
+  });
+
+  it('reports advanced and leaves the mission open when the branch moves during the merge', async () => {
+    const mission = await setupMission({
+      title: 'feature x',
+      scope: 'src/x/**',
+      file: 'src/x/x.ts',
+      content: 'x\n',
+    });
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
+    );
+    await cleanReview('rev', mission.branch);
+    await finalize(mission);
+    await mkdir(join(repo, '.git/hooks'), { recursive: true });
+    await writeFile(
+      join(repo, '.git/hooks/post-merge'),
+      `#!/bin/sh\ngit -C '${worktreeOf(mission)}' commit --allow-empty -m 'advanced during merge'\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await store.merge(mission.branch);
+
+    expect(result.status).toBe('advanced');
+    expect(result.evaluatedBranchTip).not.toBe(result.currentBranchTip);
+    expect(result.currentBranchTip).toBe(await git(repo, 'rev-parse', mission.branch));
+    expect(result.mergeCommit).toBe(await git(repo, 'rev-parse', 'HEAD'));
+    expect((await store.load()).missions.find((m) => m.id === mission.id)?.status).toBe(
+      'completed',
+    );
+    expect((await store.recentLog(5)).join('\n')).toContain('merge.advanced');
+  });
+
+  it('refuses to merge a branch owned only by closed missions', async () => {
+    const mission = await setupMission({
+      title: 'feature x',
+      scope: 'src/x/**',
+      file: 'src/x/x.ts',
+      content: 'x\n',
+    });
+    await store.registerAgent(
+      rosterEntry({ name: 'rev', kind: 'reviewer', reviewTarget: mission.branch }),
+    );
+    await finalize(mission);
+    await cleanReview('rev', mission.branch);
+    await store.merge(mission.branch);
+
+    await expect(store.merge(mission.branch)).rejects.toThrow(
+      new RegExp(`closed mission\\(s\\) ${mission.id} \\(merged\\)`),
+    );
+  });
+
+  it('rejects an unknown branch', async () => {
+    await expect(store.merge('feat/ghost')).rejects.toThrow(
+      TowerProtocolError,
+    );
+    await expect(store.merge('feat/ghost')).rejects.toThrow(/no tower mission owns branch/);
   });
 });
 
@@ -821,7 +1247,10 @@ describe('updateMission', () => {
   });
 
   it('logs merge refusals with their reason', async () => {
-    await store.plan([{ title: 'gamma', scope: ['src/gamma/**'] }]);
+    const [gamma] = await store.plan([{ title: 'gamma', scope: ['src/gamma/**'] }]);
+    const state = await store.load();
+    await store.addWorktree(gamma!.worktree, gamma!.branch, state.base);
+    await store.updateMission('tower', 'M3', { status: 'completed' });
     await expect(store.merge('feat/gamma')).rejects.toThrow(/no review/);
     const log = (await store.recentLog(5)).join('\n');
     expect(log).toContain('merge.blocked');

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, stat, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, stat, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -281,6 +281,107 @@ describe('TowerPlanTool', () => {
     expect(result.output).toContain('planned 2 mission(s):');
     expect(result.output).toContain('| M1 | Build engine | build | feat/build-engine | wt-1 | src/engine/** |');
     expect(result.output).toContain('| M2 | Build UI | build | feat/build-ui | wt-2 | src/ui/** |');
+  });
+});
+
+describe('TowerMergeTool', () => {
+  async function setupMergeableMission(): Promise<{
+    store: TowerStore;
+    missionId: string;
+    branch: string;
+    worktree: string;
+  }> {
+    await initViaTool();
+    const store = new TowerStore(repo);
+    const [mission] = await store.plan([{ title: 'merge me', scope: ['src/merge/**'] }]);
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    const worktree = join(repo, '.tower/worktrees', mission!.worktree);
+    await commitFile(worktree, 'src/merge/a.ts', 'export const a = 1;\n', 'mission work');
+    await store.registerAgent({
+      name: 'rev-m',
+      agentId: 'agent-rev-m',
+      kind: 'reviewer',
+      reviewTarget: mission!.branch,
+      spawnedAt: new Date().toISOString(),
+    });
+    await store.submitReview('rev-m', {
+      target: mission!.branch,
+      status: 'clean',
+      merge: 'merge',
+      findings: 'none',
+      decision: 'ship it',
+    });
+    await store.updateMission('tower', mission!.id, { status: 'completed' });
+    return { store, missionId: mission!.id, branch: mission!.branch, worktree };
+  }
+
+  it('merges a completed, cleanly reviewed mission and suggests teardown', async () => {
+    const { store, missionId, branch } = await setupMergeableMission();
+
+    const result = await run(ix.get(ITowerMergeTool), { branch });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain(`merged ${branch} (merge commit`);
+    expect(result.output).toContain('The mission is now marked merged.');
+    expect(result.output).toContain('ready for TowerTeardown');
+    expect((await store.load()).missions.find((m) => m.id === missionId)?.status).toBe('merged');
+  });
+
+  it('surfaces a gate refusal as an error result', async () => {
+    await initViaTool();
+    const store = new TowerStore(repo);
+    const [mission] = await store.plan([{ title: 'not ready', scope: ['src/ready/**'] }]);
+
+    const result = await run(ix.get(ITowerMergeTool), { branch: mission!.branch });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('only a completed mission can merge');
+  });
+
+  it('closes a zero-diff survey as a noop', async () => {
+    await initViaTool();
+    const store = new TowerStore(repo);
+    const [mission] = await store.plan([
+      { title: 'scan all', scope: ['src/**'], kind: 'survey' },
+    ]);
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await store.updateMission('tower', mission!.id, { status: 'completed' });
+
+    const result = await run(ix.get(ITowerMergeTool), { branch: mission!.branch });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('read-only survey with a zero-diff branch');
+    expect(result.output).toContain('ready for TowerTeardown');
+  });
+
+  it('does not suggest teardown while another mission is still open', async () => {
+    const { store, branch } = await setupMergeableMission();
+    await store.plan([{ title: 'later work', scope: ['src/later/**'] }]);
+
+    const result = await run(ix.get(ITowerMergeTool), { branch });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('Continue with the remaining missions in Dependency Flow order.');
+    expect(result.output).not.toContain('ready for TowerTeardown');
+  });
+
+  it('reports a partial merge when the branch advances during the merge', async () => {
+    const { branch, worktree } = await setupMergeableMission();
+    await mkdir(join(repo, '.git/hooks'), { recursive: true });
+    const hook = join(repo, '.git/hooks/post-merge');
+    await writeFile(
+      hook,
+      `#!/bin/sh\ngit -C '${worktree}' commit --allow-empty -m 'advanced during merge'\n`,
+    );
+    await chmod(hook, 0o755);
+
+    const result = await run(ix.get(ITowerMergeTool), { branch });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('PARTIAL MERGE');
+    expect(result.output).toContain('was not marked merged');
   });
 });
 

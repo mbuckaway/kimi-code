@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-
-import picomatch from 'picomatch';
 
 import { parseFrontmatter, renderFrontmatter } from './frontmatter';
 import {
@@ -18,6 +16,8 @@ import {
   worktreeAdd,
   worktreeRemove,
 } from './git';
+import { evaluateMissionGate } from './missionGate';
+import type { TowerMissionGateResult, TowerMissionGitObservations } from './missionGate';
 import {
   ACTIVITY_LOG,
   BROADCAST_NAME,
@@ -112,6 +112,22 @@ export interface TowerMissionPatch {
   readonly scope?: readonly string[];
 }
 
+export interface TowerMissionRuntimeOptions {
+  readonly activeAgentIds?: ReadonlySet<string> | (() => ReadonlySet<string>);
+}
+
+export interface TowerMergeResult {
+  readonly status: 'merged' | 'advanced' | 'noop';
+  readonly mergeCommit: string;
+  readonly evaluatedBranchTip: string;
+  readonly currentBranchTip: string;
+  readonly conflictsWith: ReadonlyArray<{
+    readonly branch: string;
+    readonly files: readonly string[];
+  }>;
+  readonly noop?: boolean;
+}
+
 const FINDING_TYPES: readonly TowerFindingType[] = ['bug', 'improve', 'vuln', 'idea'];
 const STATUS_EMOJI: Record<TowerMissionStatus, string> = {
   planned: '🟡',
@@ -125,6 +141,25 @@ const STATUS_EMOJI: Record<TowerMissionStatus, string> = {
 
 function isOpenMission(mission: Pick<TowerMission, 'status'>): boolean {
   return mission.status !== 'merged' && mission.status !== 'abandoned';
+}
+
+function missionNumber(id: string): number {
+  const parsed = Number.parseInt(id.replace(/^M/, ''), 10);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function resolveMissionByBranch(
+  state: TowerState,
+  branch: string,
+): TowerMission | undefined {
+  let resolved: TowerMission | undefined;
+  for (const mission of state.missions) {
+    if (mission.branch !== branch || !isOpenMission(mission)) continue;
+    if (resolved === undefined || missionNumber(mission.id) > missionNumber(resolved.id)) {
+      resolved = mission;
+    }
+  }
+  return resolved;
 }
 
 export class TowerStore {
@@ -650,16 +685,22 @@ export class TowerStore {
     const existing = await this.reviewsFor(input.target);
     const myRounds = existing.filter((r) => r.reviewer === callerName).length;
     const round = myRounds + 1;
+    const seq = existing.length + 1;
     const reviewedCommit = await branchTip(this.repoRoot, input.target);
+    const reviewMissionId =
+      (callerName === TOWER_NAME ? undefined : this.findAgent(state, callerName)?.reviewMissionId) ??
+      resolveMissionByBranch(state, input.target)?.id;
 
     const frontmatter = renderFrontmatter({
       date: dateDash(),
       reviewer: callerName,
       target: input.target,
       round: String(round),
+      seq: String(seq),
       status: input.status,
       merge: input.merge,
       reviewed_commit: reviewedCommit,
+      mission: reviewMissionId,
     });
     const checks = (input.checks ?? []).map((c) => `- [x] ${c}`).join('\n');
     const content = [
@@ -710,6 +751,8 @@ export class TowerStore {
       const { fields } = parseFrontmatter(text);
       const round = Number.parseInt(fields['round'] ?? '', 10);
       if (Number.isNaN(round)) continue;
+      const seq = Number.parseInt(fields['seq'] ?? '', 10);
+      const { mtimeMs } = await stat(this.abs(rel));
       reviews.push({
         reviewer: fields['reviewer'] ?? 'unknown',
         target: fields['target'] ?? target,
@@ -719,9 +762,18 @@ export class TowerStore {
         reviewedCommit: fields['reviewed_commit'] ?? '',
         date: fields['date'] ?? '',
         file: rel,
+        mtimeMs,
+        seq: Number.isNaN(seq) ? undefined : seq,
+        mission: fields['mission'],
       });
     }
-    reviews.sort((a, b) => a.round - b.round);
+    reviews.sort(
+      (a, b) =>
+        (a.seq ?? -1) - (b.seq ?? -1) ||
+        (a.mtimeMs ?? 0) - (b.mtimeMs ?? 0) ||
+        a.round - b.round ||
+        a.file.localeCompare(b.file),
+    );
     return reviews;
   }
 
@@ -730,101 +782,97 @@ export class TowerStore {
     return reviews.at(-1);
   }
 
-  async merge(branch: string): Promise<{
-    readonly mergeCommit: string;
-    readonly conflictsWith: ReadonlyArray<{ readonly branch: string; readonly files: readonly string[] }>;
-    readonly noop?: boolean;
-  }> {
+  async merge(
+    branch: string,
+    runtime: TowerMissionRuntimeOptions = {},
+  ): Promise<TowerMergeResult> {
     const state = await this.load();
-    const mission = state.missions.find((m) => m.branch === branch);
-    if (mission === undefined) {
-      throw new TowerProtocolError(`no tower mission owns branch "${branch}"`);
-    }
     const block = async (reason: string, message: string): Promise<TowerProtocolError> => {
       await this.appendLog(TOWER_NAME, 'merge.blocked', { branch, reason });
       return new TowerProtocolError(message);
     };
-
-    const unmergedDeps = mission.deps.filter((dep) => {
-      const depMission = state.missions.find((m) => m.id === dep);
-      return depMission !== undefined && isOpenMission(depMission);
-    });
-    if (unmergedDeps.length > 0) {
-      throw await block(
-        'deps-unmerged',
-        `merge blocked: dependencies not merged yet (${unmergedDeps.join(', ')}) — merge in Dependency Flow order`,
-      );
+    const mission = resolveMissionByBranch(state, branch);
+    if (mission === undefined) {
+      const closed = state.missions.filter((candidate) => candidate.branch === branch);
+      if (closed.length > 0) {
+        throw await block(
+          'branch-owned-by-closed-missions',
+          `merge blocked: branch "${branch}" resolves only to closed mission(s) ${closed.map((candidate) => `${candidate.id} (${candidate.status})`).join(', ')} — TowerMerge never flips a closed mission's status; re-plan the work under a new title if it should land`,
+        );
+      }
+      throw new TowerProtocolError(`no tower mission owns branch "${branch}"`);
     }
 
-    if (mission.kind === 'survey') {
-      const changed = await diffNameOnly(this.repoRoot, state.base, branch);
-      if (changed.length > 0) {
-        throw await block(
-          'read-only-survey',
-          `merge blocked: survey mission ${mission.id} is read-only but ${branch} has ${String(changed.length)} changed file(s): ${changed.slice(0, 5).join(', ')} — investigate the worker; if the changes are worth keeping, move them onto a build mission's branch`,
-        );
+    const gate = await this.missionGate(state, mission, runtime);
+    if (!gate.ready) {
+      const primary = gate.blocks[0];
+      if (primary !== undefined) {
+        throw await block(primary.reason, primary.message);
+      }
+      throw new TowerProtocolError(
+        `merge blocked: the mission gate produced no reason for "${branch}"`,
+      );
+    }
+    const observation = gate.observations.branch;
+    if (observation === undefined) {
+      throw await block(
+        'branch-missing',
+        `merge blocked: mission ${mission.id} branch "${branch}" does not exist`,
+      );
+    }
+    const evaluatedBranchTip = observation.tip;
+
+    if (gate.noop) {
+      const currentBranchTip = await branchTip(this.repoRoot, branch);
+      if (currentBranchTip !== evaluatedBranchTip) {
+        await this.appendLog(TOWER_NAME, 'merge.advanced', {
+          branch,
+          evaluated: evaluatedBranchTip.slice(0, 7),
+          current: currentBranchTip.slice(0, 7),
+        });
+        return {
+          status: 'advanced',
+          mergeCommit: gate.observations.headTip,
+          evaluatedBranchTip,
+          currentBranchTip,
+          conflictsWith: [],
+          noop: true,
+        };
       }
       mission.status = 'merged';
       await this.save(state);
       await this.renderMissionsIndex(state);
       await this.renderMissionFile(mission);
-      const tip = await branchTip(this.repoRoot, state.base);
       await this.appendLog(TOWER_NAME, 'merge.noop', { branch, kind: 'survey' });
-      return { mergeCommit: tip, conflictsWith: [], noop: true };
-    }
-
-    const review = await this.latestReview(branch);
-    if (review === undefined) {
-      throw await block(
-        'no-review',
-        `merge blocked: ${branch} has no review — assign a reviewer first`,
-      );
-    }
-    if (review.status !== 'clean') {
-      throw await block(
-        'not-clean',
-        `merge blocked: latest review (round ${review.round} by ${review.reviewer}) is "${review.status}" — a clean round is required`,
-      );
-    }
-    const tip = await branchTip(this.repoRoot, branch);
-    if (review.reviewedCommit !== tip) {
-      throw await block(
-        'tip-moved',
-        `merge blocked: ${branch} moved since the clean review (reviewed ${review.reviewedCommit.slice(0, 7)}, tip ${tip.slice(0, 7)}) — re-review required`,
-      );
-    }
-
-    const changed = await diffNameOnly(this.repoRoot, state.base, branch);
-    const outOfScope = changed.filter(
-      (file) => !mission.scope.some((glob) => picomatch.isMatch(file, glob)),
-    );
-    if (outOfScope.length > 0) {
-      throw await block(
-        'out-of-scope',
-        `merge blocked: ${branch} changed files outside mission ${mission.id} scope (${mission.scope.join(', ')}): ${outOfScope.join(', ')} — the tower must widen the mission scope (TowerMission scope patch) or revert those changes`,
-      );
-    }
-
-    let checkedOut: string;
-    try {
-      checkedOut = await currentBranch(this.repoRoot);
-    } catch {
-      throw await block(
-        'base-mismatch',
-        `merge blocked: the main checkout is in a detached HEAD state — check out the recorded base branch "${state.base}" before merging; nothing was merged`,
-      );
-    }
-    if (checkedOut !== state.base) {
-      throw await block(
-        'base-mismatch',
-        `merge blocked: the main checkout is on "${checkedOut}", not the recorded base "${state.base}" — switch it back (\`git checkout ${state.base}\`) and retry; nothing was merged`,
-      );
+      return {
+        status: 'noop',
+        mergeCommit: gate.observations.headTip,
+        evaluatedBranchTip,
+        currentBranchTip,
+        conflictsWith: [],
+        noop: true,
+      };
     }
 
     const mergeCommit = await mergeNoFf(this.repoRoot, branch);
-    mission.status = 'merged';
+    const currentBranchTip = await branchTip(this.repoRoot, branch);
+    if (currentBranchTip !== evaluatedBranchTip) {
+      await this.appendLog(TOWER_NAME, 'merge.advanced', {
+        branch,
+        evaluated: evaluatedBranchTip.slice(0, 7),
+        current: currentBranchTip.slice(0, 7),
+        merge_commit: mergeCommit.slice(0, 7),
+      });
+      return {
+        status: 'advanced',
+        mergeCommit,
+        evaluatedBranchTip,
+        currentBranchTip,
+        conflictsWith: [],
+      };
+    }
 
-    const changedSet = new Set(changed);
+    const changedSet = new Set(observation.changedFiles);
     const conflictsWith: Array<{ readonly branch: string; readonly files: readonly string[] }> = [];
     for (const other of state.missions) {
       if (other.branch === branch || !isOpenMission(other)) continue;
@@ -836,11 +884,78 @@ export class TowerStore {
       }
     }
 
+    mission.status = 'merged';
     await this.save(state);
     await this.renderMissionsIndex(state);
     await this.renderMissionFile(mission);
-    await this.appendLog(TOWER_NAME, 'merge', { branch, base: state.base, merge_commit: mergeCommit.slice(0, 7) });
-    return { mergeCommit, conflictsWith };
+    await this.appendLog(TOWER_NAME, 'merge', {
+      branch,
+      base: state.base,
+      merge_commit: mergeCommit.slice(0, 7),
+      review_waived: gate.reviewBinding === 'clean-rebase-waived' ? 'yes' : undefined,
+    });
+    return {
+      status: 'merged',
+      mergeCommit,
+      evaluatedBranchTip,
+      currentBranchTip,
+      conflictsWith,
+    };
+  }
+
+  async missionGate(
+    state: TowerState,
+    mission: TowerMission,
+    runtime: TowerMissionRuntimeOptions = {},
+  ): Promise<TowerMissionGateResult> {
+    const [reviews, observations] = await Promise.all([
+      this.reviewsFor(mission.branch),
+      this.observeMissionGit(state, mission),
+    ]);
+    const activeAgentIds =
+      typeof runtime.activeAgentIds === 'function'
+        ? runtime.activeAgentIds()
+        : runtime.activeAgentIds;
+    const workers =
+      activeAgentIds === undefined
+        ? []
+        : state.roster.agents
+            .filter(
+              (agent) =>
+                agent.kind === 'worker' &&
+                (agent.missionId === mission.id ||
+                  agent.branch === mission.branch ||
+                  agent.worktree === mission.worktree),
+            )
+            .map((agent) => ({
+              agentId: agent.agentId,
+              name: agent.name,
+              status: activeAgentIds.has(agent.agentId)
+                ? ('busy' as const)
+                : ('idle' as const),
+            }));
+    return evaluateMissionGate({ state, mission, reviews, workers, observations });
+  }
+
+  private async observeMissionGit(
+    state: TowerState,
+    mission: TowerMission,
+  ): Promise<TowerMissionGitObservations> {
+    let checkedOutBranch: string | undefined;
+    try {
+      checkedOutBranch = await currentBranch(this.repoRoot);
+    } catch {
+      checkedOutBranch = undefined;
+    }
+    const [baseTip, headTip, hasBranch] = await Promise.all([
+      branchTip(this.repoRoot, state.base),
+      branchTip(this.repoRoot, 'HEAD'),
+      branchExists(this.repoRoot, mission.branch),
+    ]);
+    if (!hasBranch) return { baseTip, headTip, checkedOutBranch };
+    const tip = await branchTip(this.repoRoot, mission.branch);
+    const changedFiles = await diffNameOnly(this.repoRoot, baseTip, tip);
+    return { baseTip, headTip, checkedOutBranch, branch: { tip, changedFiles } };
   }
 
   async addWorktree(worktree: string, branch: string, base: string): Promise<string> {
