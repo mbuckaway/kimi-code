@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZodError } from 'zod';
 
 import { DisposableStore } from '#/_base/di/lifecycle';
@@ -13,10 +13,23 @@ import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import type { AnyAgentTool } from '#/agent/toolRegistry/toolContribution';
 import { ISessionManager } from '#/app/sessionManager/sessionManager';
+import type { Event2 } from '#/app/event/event2';
+import { ISessionEventBus } from '#/app/event/eventBus';
 import { TOWER_TOOL_CONTRIBUTIONS } from '#/features/tower/towerFeature';
 import { IAgentTowerService } from '#/features/tower/tower';
 import { ITowerRateLimitService } from '#/features/tower/towerRateLimit';
-import { TowerStore } from '#/features/tower/protocol/index';
+import {
+  TowerStore,
+  type TowerInboxItem,
+  type TowerSendResult,
+  type TowerState,
+} from '#/features/tower/protocol/index';
+import { TowerInboxSent } from '#/features/tower/towerOps';
+import { deliverTowerMessage } from '#/features/tower/tools/delivery';
+import {
+  ISessionMessagingService,
+  type AgentMessageDelivery,
+} from '#/features/messaging/messaging';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import type { ExecutableTool } from '#/tool/toolContract';
 
@@ -40,7 +53,11 @@ import { ITowerMissionTool } from '#/features/tower/tools/mission/mission';
 import { TowerMissionTool } from '#/features/tower/tools/mission/missionTool';
 import { ITowerStatusTool } from '#/features/tower/tools/status/status';
 import { TowerStatusTool } from '#/features/tower/tools/status/statusTool';
-import { TowerCompleteToolInputSchema } from '#/features/tower/tools/complete/complete';
+import {
+  ITowerCompleteTool,
+  TowerCompleteToolInputSchema,
+} from '#/features/tower/tools/complete/complete';
+import { TowerCompleteTool } from '#/features/tower/tools/complete/completeTool';
 import { TowerRebaseToolInputSchema } from '#/features/tower/tools/rebase/rebase';
 
 import { executeTool } from '../../../tools/fixtures/execute-tool';
@@ -75,6 +92,8 @@ let towerActive: boolean;
 let currentAgentId: string;
 let currentSessionId: string;
 let liveSessionIds: string[];
+let publishedEvents: Event2<unknown>[];
+let sendMessageStub: ReturnType<typeof vi.fn>;
 const agentContexts = new Map<string, AgentContext>();
 
 beforeEach(async () => {
@@ -89,6 +108,8 @@ beforeEach(async () => {
   liveSessionIds = [];
   currentSessionId = 'session-test';
   agentContexts.clear();
+  publishedEvents = [];
+  sendMessageStub = vi.fn();
 
   disposables = new DisposableStore();
   ix = createServices(disposables, {
@@ -135,6 +156,15 @@ beforeEach(async () => {
       reg.defineInstance(ISessionManager, {
         get: (id: string) => (liveSessionIds.includes(id) ? {} : undefined),
       } as unknown as ISessionManager);
+      reg.defineInstance(ISessionEventBus, {
+        publish: (event: Event2<unknown>) => {
+          publishedEvents.push(event);
+        },
+      } as unknown as ISessionEventBus);
+      reg.defineInstance(ISessionMessagingService, {
+        _serviceBrand: undefined,
+        sendMessage: sendMessageStub,
+      } as unknown as ISessionMessagingService);
       reg.definePartialInstance(ITowerRateLimitService, {
         snapshot: () => ({ budget: 2, inflight: 0, blockedUntil: null }),
       });
@@ -148,6 +178,7 @@ beforeEach(async () => {
       reg.define(ITowerReviewTool, TowerReviewTool);
       reg.define(ITowerMissionTool, TowerMissionTool);
       reg.define(ITowerStatusTool, TowerStatusTool);
+      reg.define(ITowerCompleteTool, TowerCompleteTool);
     },
   });
 });
@@ -540,6 +571,302 @@ describe('TowerRebaseToolInputSchema', () => {
     expect(() => TowerRebaseToolInputSchema.parse({})).toThrow(ZodError);
     expect(() => TowerRebaseToolInputSchema.parse({ mission: 'M3', force: true })).toThrow(
       ZodError,
+    );
+  });
+});
+
+function deliveryState(agentName: string, agentId: string): TowerState {
+  return {
+    version: 1,
+    base: 'main',
+    mode: 'branch',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    roster: {
+      agents: [
+        { name: agentName, agentId, kind: 'worker', spawnedAt: '2026-01-01T00:00:00.000Z' },
+      ],
+    },
+    missions: [],
+  };
+}
+
+function sentResult(to: string, overrides: Partial<TowerInboxItem> = {}): TowerSendResult {
+  return {
+    item: {
+      file: '.tower/comms/inbox/message.md',
+      from: 'tower',
+      to,
+      subject: 'get started',
+      sentAt: '2026-01-01T00:00:00.000Z',
+      body: 'please start',
+      ...overrides,
+    },
+  };
+}
+
+describe('deliverTowerMessage', () => {
+  it('publishes a TowerInboxSent event for a message addressed to the tower', async () => {
+    const published: Event2<unknown>[] = [];
+    const sessionBus = {
+      publish: (event: Event2<unknown>) => {
+        published.push(event);
+      },
+    } as unknown as ISessionEventBus;
+    const sendMessage = vi.fn();
+
+    const note = await deliverTowerMessage(
+      {
+        sessionBus,
+        messaging: { sendMessage } as unknown as ISessionMessagingService,
+        callerAgentId: 'agent-w1',
+        state: deliveryState('w1', 'agent-w1'),
+      },
+      sentResult('tower', { from: 'w1' }),
+    );
+
+    expect(note).toBe('');
+    expect(published).toHaveLength(1);
+    const event = published[0] as TowerInboxSent;
+    expect(event).toBeInstanceOf(TowerInboxSent);
+    expect(event.from).toBe('w1');
+    expect(event.to).toBe('tower');
+    expect(event.subject).toBe('get started');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('steers a message into a running roster agent through the messaging service', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      delivery: 'steered',
+      agentId: 'agent-w1',
+      label: 'w1',
+      truncated: false,
+    });
+
+    const note = await deliverTowerMessage(
+      {
+        sessionBus: undefined,
+        messaging: { sendMessage } as unknown as ISessionMessagingService,
+        callerAgentId: 'main',
+        state: deliveryState('w1', 'agent-w1'),
+      },
+      sentResult('w1'),
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      'main',
+      'agent-w1',
+      expect.stringContaining('[tower inbox] new message from tower: "get started"'),
+    );
+    expect(note).toContain('steered into its running turn');
+  });
+
+  it('truncates an over-long subject inside the steer directive', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      delivery: 'steered',
+      agentId: 'agent-w1',
+      label: 'w1',
+      truncated: false,
+    });
+    const subject = 's'.repeat(140);
+
+    await deliverTowerMessage(
+      {
+        sessionBus: undefined,
+        messaging: { sendMessage } as unknown as ISessionMessagingService,
+        callerAgentId: 'main',
+        state: deliveryState('w1', 'agent-w1'),
+      },
+      sentResult('w1', { subject }),
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      'main',
+      'agent-w1',
+      expect.stringContaining('…'),
+    );
+    expect(sendMessage).toHaveBeenCalledWith(
+      'main',
+      'agent-w1',
+      expect.not.stringContaining(subject),
+    );
+  });
+
+  it.each<readonly [AgentMessageDelivery, string]>([
+    ['newTurn', 'started a new turn'],
+    ['resumed', 'resumed in the background'],
+    ['duplicate', 'not delivered again'],
+  ])('maps a %s delivery onto a delivery note', async (delivery, expected) => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      delivery,
+      agentId: 'agent-w1',
+      label: 'w1',
+      truncated: false,
+    });
+
+    const note = await deliverTowerMessage(
+      {
+        sessionBus: undefined,
+        messaging: { sendMessage } as unknown as ISessionMessagingService,
+        callerAgentId: 'main',
+        state: deliveryState('w1', 'agent-w1'),
+      },
+      sentResult('w1'),
+    );
+
+    expect(note).toContain(expected);
+  });
+
+  it('falls back to the inbox when messaging is unavailable or steering fails', async () => {
+    const unavailable = await deliverTowerMessage(
+      {
+        sessionBus: undefined,
+        messaging: undefined,
+        callerAgentId: 'main',
+        state: deliveryState('w1', 'agent-w1'),
+      },
+      sentResult('w1'),
+    );
+
+    expect(unavailable).toContain('agent messaging is unavailable');
+    expect(unavailable).toContain('stays in the tower inbox');
+
+    const failing = {
+      sendMessage: vi.fn().mockRejectedValue(new Error('no live turn')),
+    } as unknown as ISessionMessagingService;
+    const failed = await deliverTowerMessage(
+      {
+        sessionBus: undefined,
+        messaging: failing,
+        callerAgentId: 'main',
+        state: deliveryState('w1', 'agent-w1'),
+      },
+      sentResult('w1'),
+    );
+
+    expect(failed).toContain('could not steer w1: no live turn');
+    expect(failed).toContain('stays in the tower inbox');
+
+    const failingWithText = {
+      sendMessage: vi.fn().mockRejectedValue('boom'),
+    } as unknown as ISessionMessagingService;
+    const failedWithText = await deliverTowerMessage(
+      {
+        sessionBus: undefined,
+        messaging: failingWithText,
+        callerAgentId: 'main',
+        state: deliveryState('w1', 'agent-w1'),
+      },
+      sentResult('w1'),
+    );
+
+    expect(failedWithText).toContain('could not steer w1: boom');
+  });
+
+  it('ignores unknown recipients and the tower addressing itself', async () => {
+    const published: Event2<unknown>[] = [];
+    const sessionBus = {
+      publish: (event: Event2<unknown>) => {
+        published.push(event);
+      },
+    } as unknown as ISessionEventBus;
+    const services = {
+      sessionBus,
+      messaging: undefined,
+      callerAgentId: 'main',
+      state: deliveryState('w1', 'agent-w1'),
+    };
+
+    expect(await deliverTowerMessage(services, sentResult('ghost'))).toBe('');
+    expect(await deliverTowerMessage(services, sentResult('tower', { from: 'tower' }))).toBe('');
+    expect(published).toEqual([]);
+  });
+});
+
+describe('TowerCompleteTool', () => {
+  async function setupWorkerMission(): Promise<{ store: TowerStore; missionId: string }> {
+    await initViaTool();
+    const store = new TowerStore(repo);
+    const [mission] = await store.plan([
+      { title: 'complete me', scope: ['src/complete/**'] },
+    ]);
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await commitFile(
+      join(repo, '.tower/worktrees', mission!.worktree),
+      'src/complete/a.ts',
+      'export const a = 1;\n',
+      'mission work',
+    );
+    await store.registerAgent({
+      name: 'w1',
+      agentId: 'agent-w1',
+      kind: 'worker',
+      missionId: mission!.id,
+      spawnedAt: new Date().toISOString(),
+    });
+    currentAgentId = 'agent-w1';
+    return { store, missionId: mission!.id };
+  }
+
+  it('completes the worker mission and queues the review-request through delivery', async () => {
+    const { store, missionId } = await setupWorkerMission();
+
+    const result = await run(ix.get(ITowerCompleteTool), {
+      report: 'implemented the mission',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain(`mission ${missionId} persisted as completed`);
+    expect(result.output).toContain('review-request notification:');
+    expect(result.output).toContain('notification: stored once');
+    expect((await store.load()).missions.find((m) => m.id === missionId)?.status).toBe(
+      'completed',
+    );
+    const inbox = await store.readInbox('tower', 20);
+    expect(inbox.map((item) => item.subject)).toContain('review-request');
+    expect(publishedEvents.some((event) => event instanceof TowerInboxSent)).toBe(true);
+    expect(sendMessageStub).not.toHaveBeenCalled();
+  });
+
+  it('rejects schema-invalid args before touching the store', async () => {
+    await initViaTool();
+    const store = new TowerStore(repo);
+
+    const result = await run(ix.get(ITowerCompleteTool), { report: '   ' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('report must not be empty');
+    expect((await store.recentLog(20)).join('\n')).not.toContain('inbox.send');
+  });
+
+  it('maps a protocol refusal to an error result', async () => {
+    const { store, missionId } = await setupWorkerMission();
+
+    const result = await run(ix.get(ITowerCompleteTool), {
+      report: 'done',
+      key_artifacts: ['src/complete/a.ts'],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('key_artifacts is only supported for artifact missions');
+    expect((await store.load()).missions.find((m) => m.id === missionId)?.status).toBe('planned');
+  });
+
+  it('reports a notification storage failure as an error result', async () => {
+    const { store, missionId } = await setupWorkerMission();
+    const inbox = join(repo, '.tower/comms/inbox');
+    await chmod(inbox, 0o500);
+    try {
+      const result = await run(ix.get(ITowerCompleteTool), { report: 'done' });
+
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain('notification error:');
+      expect(result.output).toContain('was persisted as completed');
+    } finally {
+      await chmod(inbox, 0o700);
+    }
+    expect((await store.load()).missions.find((m) => m.id === missionId)?.status).toBe(
+      'completed',
     );
   });
 });

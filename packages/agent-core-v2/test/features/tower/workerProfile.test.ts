@@ -11,7 +11,7 @@ function builtinProfile(name: string) {
 }
 
 describe('tower-worker profile', () => {
-  it('gives tower-worker the coder tools (minus AgentSwarm and supermoon mode) plus the six shared tower tools', () => {
+  it('gives tower-worker the coder tools (minus AgentSwarm and supermoon mode) plus the seven shared tower tools', () => {
     const coder = builtinProfile('coder');
     const tools = TOWER_WORKER_PROFILE_DEF.tools ?? [];
 
@@ -48,6 +48,7 @@ describe('tower-worker profile', () => {
     expect(tools).not.toContain('ListAgents');
     expect(TOWER_WORKER_PROFILE_DEF.subagents).toEqual(['explore', 'plan']);
     for (const name of [
+      'TowerComplete',
       'TowerSend',
       'TowerInbox',
       'TowerFinding',

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
+
+import picomatch from 'picomatch';
 
 import { parseFrontmatter, renderFrontmatter } from './frontmatter';
 import {
@@ -81,6 +83,20 @@ export interface TowerSendInput {
   readonly scope?: string;
   readonly action?: string;
   readonly consentRef?: string;
+}
+
+export interface TowerSendResult {
+  readonly item: TowerInboxItem;
+  readonly missionId?: string;
+  readonly activityLogError?: string;
+}
+
+export interface TowerCompleteResult {
+  readonly mission: TowerMission;
+  readonly message?: TowerSendResult;
+  readonly notificationCreated: boolean;
+  readonly notificationError?: string;
+  readonly activityLogError?: string;
 }
 
 export interface TowerFindingInput {
@@ -536,6 +552,14 @@ export class TowerStore {
 
   async send(callerName: string, input: TowerSendInput): Promise<string> {
     const state = await this.load();
+    return (await this.sendDetailed(callerName, input, state)).item.file;
+  }
+
+  private async sendDetailed(
+    callerName: string,
+    input: TowerSendInput,
+    state: TowerState,
+  ): Promise<TowerSendResult> {
     const to = input.to.trim();
     if (
       to !== TOWER_NAME &&
@@ -551,25 +575,273 @@ export class TowerStore {
       throw new TowerProtocolError('cannot send an inbox message to yourself');
     }
 
+    const messageId = randomUUID();
+    const sentAt = new Date().toISOString();
+    const body = input.body.trim();
     const frontmatter = renderFrontmatter({
       type: 'inbox',
-      message_id: randomUUID(),
+      message_id: messageId,
       from: callerName,
       to,
       subject: input.subject,
-      sent_at: new Date().toISOString(),
+      sent_at: sentAt,
       ...(input.scope !== undefined ? { scope: input.scope } : {}),
       ...(input.action !== undefined ? { action: input.action } : {}),
       ...(input.consentRef !== undefined ? { consent_ref: input.consentRef } : {}),
     });
-    const content = `${frontmatter}\n\n${input.body.trim()}\n`;
+    const content = `${frontmatter}\n\n${body}\n`;
     const baseName = inboxFileName({ from: callerName, to, subject: input.subject });
     const rel = await this.writeUnique(join(INBOX_DIR, baseName), content);
-    await this.appendLog(callerName, 'inbox.send', { to, subject: slugify(input.subject) }, rel);
-    return rel;
+    let activityLogError: string | undefined;
+    try {
+      await this.appendLog(callerName, 'inbox.send', { to, subject: slugify(input.subject) }, rel);
+    } catch (error) {
+      activityLogError = `inbox message ${rel} was stored, but appending its inbox.send activity log failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    const caller = this.findAgent(state, callerName);
+    const recipient =
+      to === TOWER_NAME || to === BROADCAST_NAME ? undefined : this.findAgent(state, to);
+    const missionId =
+      caller?.missionId ??
+      caller?.reviewMissionId ??
+      (callerName === TOWER_NAME
+        ? (recipient?.missionId ?? recipient?.reviewMissionId)
+        : undefined);
+    return {
+      item: {
+        messageId,
+        file: rel,
+        from: callerName,
+        to,
+        subject: input.subject,
+        sentAt,
+        scope: input.scope,
+        action: input.action,
+        consentRef: input.consentRef,
+        body,
+      },
+      missionId,
+      activityLogError,
+    };
+  }
+
+  async complete(
+    callerName: string,
+    report: string,
+    keyArtifacts: readonly string[] = [],
+  ): Promise<TowerCompleteResult> {
+    const trimmed = report.trim();
+    if (trimmed.length === 0) {
+      throw new TowerProtocolError('TowerComplete report must not be empty');
+    }
+    const normalizedKeyArtifacts = normalizeArtifactPaths(keyArtifacts);
+    const state = await this.load();
+    const caller = this.findAgent(state, callerName);
+    const mission =
+      caller?.kind === 'worker' && caller.missionId !== undefined
+        ? state.missions.find((candidate) => candidate.id === caller.missionId)
+        : undefined;
+    if (callerName === TOWER_NAME || caller?.kind !== 'worker' || mission === undefined) {
+      if (caller?.kind === 'worker' && caller.missionId !== undefined) {
+        throw new TowerProtocolError(`unknown mission "${caller.missionId}"`);
+      }
+      throw new TowerProtocolError(
+        `agent "${callerName}" cannot use TowerComplete — only the worker who owns a mission can complete it`,
+      );
+    }
+    if (mission.kind !== 'artifact' && normalizedKeyArtifacts.length > 0) {
+      throw new TowerProtocolError(
+        'TowerComplete key_artifacts is only supported for artifact missions',
+      );
+    }
+    if (mission.kind === 'artifact' && normalizedKeyArtifacts.length === 0) {
+      throw new TowerProtocolError(
+        `TowerComplete key_artifacts for artifact mission ${mission.id} must name at least one committed key deliverable`,
+      );
+    }
+
+    await this.assertCompletable(state, mission);
+
+    let completionTip: string | undefined;
+    let completionChanged: readonly string[] = [];
+    if (mission.kind === 'artifact') {
+      completionTip = await branchTip(this.repoRoot, mission.branch);
+      const completionBase = mission.spawnBase ?? state.base;
+      completionChanged = await diffNameOnly(this.repoRoot, completionBase, completionTip);
+      const changed = new Set(completionChanged);
+      const uncommitted = normalizedKeyArtifacts.filter((path) => !changed.has(path));
+      if (uncommitted.length > 0) {
+        throw new TowerProtocolError(
+          `TowerComplete key_artifacts for artifact mission ${mission.id} must name paths from the committed branch diff; not found: ${uncommitted.join(', ')}`,
+        );
+      }
+      const outOfScope = normalizedKeyArtifacts.filter(
+        (path) => !mission.scope.some((glob) => picomatch.isMatch(path, glob)),
+      );
+      if (outOfScope.length > 0) {
+        throw new TowerProtocolError(
+          `TowerComplete key_artifacts for artifact mission ${mission.id} must stay inside its scope (${mission.scope.join(', ')}): ${outOfScope.join(', ')}`,
+        );
+      }
+      const missingAtTip: string[] = [];
+      for (const path of normalizedKeyArtifacts) {
+        const type = await tryGit(this.repoRoot, ['cat-file', '-t', `${completionTip}:${path}`]);
+        if (type !== 'blob') missingAtTip.push(path);
+      }
+      if (missingAtTip.length > 0) {
+        throw new TowerProtocolError(
+          `TowerComplete key_artifacts for artifact mission ${mission.id} must name files present at completion tip ${completionTip.slice(0, 7)}; missing or not files: ${missingAtTip.join(', ')}`,
+        );
+      }
+    }
+
+    const subject =
+      mission.kind === 'survey'
+        ? 'survey-summary'
+        : mission.kind === 'artifact'
+          ? 'acceptance-request'
+          : 'review-request';
+    const completionReport =
+      mission.kind === 'artifact' && completionTip !== undefined
+        ? artifactAcceptanceReport(
+            trimmed,
+            normalizedKeyArtifacts,
+            completionChanged,
+            completionTip,
+          )
+        : trimmed;
+    const wasCompleted = mission.status === 'completed';
+    if (wasCompleted) {
+      const sameCompletion =
+        mission.kind !== 'artifact' ||
+        (mission.completionTip === completionTip &&
+          sameArtifactPaths(mission.keyArtifacts, normalizedKeyArtifacts));
+      if (sameCompletion) {
+        const existing = await this.findCompletionMessage(
+          callerName,
+          mission,
+          subject,
+          completionReport,
+        );
+        if (existing !== undefined) {
+          return {
+            mission,
+            message: { item: existing, missionId: mission.id },
+            notificationCreated: false,
+          };
+        }
+      }
+    }
+
+    mission.status = 'completed';
+    if (mission.kind === 'artifact') {
+      mission.completionTip = completionTip;
+      mission.keyArtifacts = [...normalizedKeyArtifacts];
+    }
+    await this.save(state);
+    await this.renderMissionsIndex(state);
+    await this.renderMissionFile(mission);
+    await this.appendLog(callerName, 'mission.update', { id: mission.id, status: 'completed' });
+    try {
+      const message = await this.sendDetailed(
+        callerName,
+        {
+          to: TOWER_NAME,
+          subject,
+          body: completionReport,
+          scope: mission.id,
+          action: 'complete',
+        },
+        state,
+      );
+      return {
+        mission,
+        message,
+        notificationCreated: true,
+        activityLogError: message.activityLogError,
+      };
+    } catch (error) {
+      const existing = await this.findCompletionMessage(
+        callerName,
+        mission,
+        subject,
+        completionReport,
+      );
+      return {
+        mission,
+        message:
+          existing === undefined ? undefined : { item: existing, missionId: mission.id },
+        notificationCreated: false,
+        notificationError: `mission ${mission.id} was persisted as completed, but storing its ${subject} notification failed: ${error instanceof Error ? error.message : String(error)} — retry with the same report to reuse an already stored notification instead of duplicating it`,
+      };
+    }
+  }
+
+  private async assertCompletable(state: TowerState, mission: TowerMission): Promise<void> {
+    const open = mission.tasks.filter((task) => !task.done && task.dropped !== true);
+    if (open.length > 0) {
+      throw new TowerProtocolError(
+        `mission ${mission.id} cannot transition to completed — ${String(open.length)} open task(s): ${open.map((task) => `"${task.text}"`).join(', ')}; tick finished tasks with TowerMission task_done, or drop legitimately descoped ones`,
+      );
+    }
+    if (mission.blockers.length > 0) {
+      throw new TowerProtocolError(
+        `mission ${mission.id} cannot transition to completed — ${String(mission.blockers.length)} blocker(s) remain: ${mission.blockers.join(' | ')}; clear or resolve them before completing`,
+      );
+    }
+    const base = mission.spawnBase ?? state.base;
+    if (mission.kind === 'survey') {
+      if (!(await branchExists(this.repoRoot, mission.branch))) return;
+      const changed = await diffNameOnly(this.repoRoot, base, mission.branch);
+      if (changed.length > 0) {
+        throw new TowerProtocolError(
+          `mission ${mission.id} cannot transition to completed — it is a read-only survey but branch "${mission.branch}" has ${String(changed.length)} changed file(s) vs "${base}": ${changed.slice(0, 5).join(', ')}; move any changes worth keeping to a build mission and leave the survey branch zero-diff`,
+        );
+      }
+      return;
+    }
+    if (!(await branchExists(this.repoRoot, mission.branch))) {
+      throw new TowerProtocolError(
+        mission.kind === 'artifact'
+          ? `mission ${mission.id} cannot transition to completed — its branch "${mission.branch}" does not exist, so there are no committed deliverables to accept`
+          : `mission ${mission.id} cannot transition to completed — its branch "${mission.branch}" does not exist, so no work has landed; a build mission must produce a diff on its branch`,
+      );
+    }
+    const changed = await diffNameOnly(this.repoRoot, base, mission.branch);
+    if (changed.length === 0) {
+      throw new TowerProtocolError(
+        mission.kind === 'artifact'
+          ? `mission ${mission.id} cannot transition to completed — branch "${mission.branch}" has no changes vs "${base}"; commit the deliverables there first`
+          : `mission ${mission.id} cannot transition to completed — branch "${mission.branch}" has no changes vs "${base}"; commit the work there first`,
+      );
+    }
+  }
+
+  private async findCompletionMessage(
+    callerName: string,
+    mission: TowerMission,
+    subject: string,
+    report: string,
+  ): Promise<TowerInboxItem | undefined> {
+    return (await this.listInboxItems()).find(
+      (item) =>
+        item.from === callerName &&
+        item.to === TOWER_NAME &&
+        item.subject === subject &&
+        item.scope === mission.id &&
+        item.action === 'complete' &&
+        item.body === report,
+    );
   }
 
   async readInbox(callerName: string, limit: number): Promise<readonly TowerInboxItem[]> {
+    const items = (await this.listInboxItems()).filter(
+      (item) => callerName === TOWER_NAME || item.to === callerName || item.to === BROADCAST_NAME,
+    );
+    return items.slice(0, Math.max(1, limit));
+  }
+
+  private async listInboxItems(): Promise<readonly TowerInboxItem[]> {
     let files: string[];
     try {
       files = await readdir(this.abs(INBOX_DIR));
@@ -587,12 +859,11 @@ export class TowerStore {
       }
       const { fields, body } = parseFrontmatter(text);
       if (fields['type'] !== 'inbox') continue;
-      const to = fields['to'] ?? '';
-      if (callerName !== TOWER_NAME && to !== callerName && to !== BROADCAST_NAME) continue;
       items.push({
+        messageId: fields['message_id'],
         file: rel,
         from: fields['from'] ?? 'unknown',
-        to,
+        to: fields['to'] ?? '',
         subject: fields['subject'] ?? '',
         sentAt: fields['sent_at'] ?? '',
         scope: fields['scope'],
@@ -602,7 +873,7 @@ export class TowerStore {
       });
     }
     items.sort((a, b) => b.sentAt.localeCompare(a.sentAt));
-    return items.slice(0, Math.max(1, limit));
+    return items;
   }
 
   async fileFinding(callerName: string, input: TowerFindingInput): Promise<string> {
@@ -1096,4 +1367,54 @@ async function readGitDir(cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function normalizeArtifactPaths(paths: readonly string[]): string[] {
+  const normalized = paths.map((path) => {
+    const trimmed = path.trim();
+    const candidate = posix.normalize(trimmed.replaceAll('\\', '/'));
+    if (
+      trimmed.length === 0 ||
+      /[\0\r\n]/.test(trimmed) ||
+      candidate === '.' ||
+      candidate === '..' ||
+      candidate.startsWith('../') ||
+      posix.isAbsolute(candidate)
+    ) {
+      throw new TowerProtocolError(
+        `TowerComplete key_artifacts entries must be non-empty relative file paths inside the repository; received "${path}"`,
+      );
+    }
+    return candidate;
+  });
+  return [...new Set(normalized)];
+}
+
+function sameArtifactPaths(left: readonly string[] | undefined, right: readonly string[]): boolean {
+  return (
+    left !== undefined &&
+    left.length === right.length &&
+    left.every((path, index) => path === right[index])
+  );
+}
+
+function artifactAcceptanceReport(
+  report: string,
+  keyArtifacts: readonly string[],
+  changed: readonly string[],
+  completionTip: string,
+): string {
+  const key = new Set(keyArtifacts);
+  const additional = changed.filter((path) => !key.has(path));
+  return [
+    'Key artifacts for human acceptance:',
+    ...keyArtifacts.map((path) => `- ${path}`),
+    '',
+    `Completion tip: ${completionTip}`,
+    'Approval authorizes the entire current mission tip presented for acceptance, not only these key artifacts.',
+    `Additional committed files included in this approval: ${String(additional.length)}.`,
+    'Optional full manifest: inspect the current mission branch diff on request; reading every path is not required.',
+    '',
+    report,
+  ].join('\n');
 }

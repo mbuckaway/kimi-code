@@ -103,6 +103,7 @@ describe('TowerFeature — experimental flag gating', () => {
     );
     expect(tools.toSorted()).toEqual(
       [
+        'TowerComplete',
         'TowerFinding',
         'TowerInbox',
         'TowerInit',

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1501,6 +1501,323 @@ describe('protocol git helpers', () => {
 
     expect(paths).toContain('file with space.txt');
     expect(paths).toContain(newlinePath);
+  });
+});
+
+describe('complete', () => {
+  beforeEach(async () => {
+    await store.init();
+  });
+
+  async function workerMission(input: {
+    readonly title: string;
+    readonly scope: string;
+    readonly file: string;
+    readonly content: string;
+    readonly tasks?: readonly string[];
+    readonly kind?: TowerMission['kind'];
+  }): Promise<TowerMission> {
+    const [mission] = await store.plan([
+      {
+        title: input.title,
+        scope: [input.scope],
+        tasks: input.tasks === undefined ? undefined : [...input.tasks],
+        kind: input.kind,
+      },
+    ]);
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await commitFile(worktreeOf(mission!), input.file, input.content, `work on ${mission!.id}`);
+    await store.registerAgent(
+      rosterEntry({ name: 'w1', kind: 'worker', missionId: mission!.id }),
+    );
+    return mission!;
+  }
+
+  it('persists a build completion and queues a review-request for the tower', async () => {
+    const mission = await workerMission({
+      title: 'build engine',
+      scope: 'src/engine/**',
+      file: 'src/engine/engine.ts',
+      content: 'export const engine = 1;\n',
+    });
+
+    const result = await store.complete('w1', 'implemented the engine');
+
+    expect(result.notificationCreated).toBe(true);
+    expect(result.activityLogError).toBeUndefined();
+    expect(result.mission.status).toBe('completed');
+    expect(result.message?.item).toMatchObject({
+      from: 'w1',
+      to: 'tower',
+      subject: 'review-request',
+      scope: mission.id,
+      action: 'complete',
+      body: 'implemented the engine',
+    });
+    const saved = (await store.load()).missions.find((m) => m.id === mission.id);
+    expect(saved?.status).toBe('completed');
+    const inbox = await store.readInbox('tower', 20);
+    expect(inbox.map((item) => item.subject)).toEqual(['review-request']);
+    const log = (await store.recentLog(10)).join('\n');
+    expect(log).toContain('inbox.send');
+    expect(log).toContain('mission.update');
+    expect(log).toContain('status=completed');
+    const missionFile = await readFile(
+      join(repo, '.tower/comms/missions/M1-build-engine.md'),
+      'utf8',
+    );
+    expect(missionFile).toContain('🟢');
+  });
+
+  it('uses survey-summary for a zero-diff survey mission', async () => {
+    const [mission] = await store.plan([
+      { title: 'scan layer', scope: ['src/layer/**'], kind: 'survey' },
+    ]);
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await store.registerAgent(
+      rosterEntry({ name: 'w1', kind: 'worker', missionId: mission!.id }),
+    );
+
+    const result = await store.complete('w1', 'surveyed the layer');
+
+    expect(result.mission.status).toBe('completed');
+    expect(result.message?.item.subject).toBe('survey-summary');
+    expect(result.message?.item.body).toBe('surveyed the layer');
+  });
+
+  it('refuses a survey mission whose branch carries changes', async () => {
+    const [mission] = await store.plan([
+      { title: 'scan layer', scope: ['src/layer/**'], kind: 'survey' },
+    ]);
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await commitFile(worktreeOf(mission!), 'src/layer/notes.ts', 'oops\n', 'stray edit');
+    await store.registerAgent(
+      rosterEntry({ name: 'w1', kind: 'worker', missionId: mission!.id }),
+    );
+
+    await expect(store.complete('w1', 'done')).rejects.toThrow(/read-only survey/);
+    expect((await store.load()).missions[0]?.status).toBe('planned');
+  });
+
+  it('only lets the worker that owns the mission complete it', async () => {
+    await store.plan([{ title: 'some mission', scope: ['src/a/**'] }]);
+    await store.registerAgent(rosterEntry({ name: 'rev', kind: 'reviewer' }));
+    await store.registerAgent(
+      rosterEntry({ name: 'ghost-worker', kind: 'worker', missionId: 'M9' }),
+    );
+
+    await expect(store.complete('tower', 'done')).rejects.toThrow(
+      /only the worker who owns a mission/,
+    );
+    await expect(store.complete('rev', 'done')).rejects.toThrow(
+      /only the worker who owns a mission/,
+    );
+    await expect(store.complete('ghost-worker', 'done')).rejects.toThrow(
+      /unknown mission "M9"/,
+    );
+  });
+
+  it('refuses a blank report before touching the store', async () => {
+    await workerMission({
+      title: 'build a',
+      scope: 'src/a/**',
+      file: 'src/a/a.ts',
+      content: 'a\n',
+    });
+
+    await expect(store.complete('w1', '   ')).rejects.toThrow(
+      /TowerComplete report must not be empty/,
+    );
+    expect((await store.load()).missions[0]?.status).toBe('planned');
+  });
+
+  it('refuses completion while tasks are open or blockers remain', async () => {
+    const mission = await workerMission({
+      title: 'build b',
+      scope: 'src/b/**',
+      file: 'src/b/b.ts',
+      content: 'b\n',
+      tasks: ['ship it'],
+    });
+
+    await expect(store.complete('w1', 'done')).rejects.toThrow(/1 open task\(s\): "ship it"/);
+
+    await store.updateMission('w1', mission.id, { taskDone: 'ship it' });
+    await store.updateMission('w1', mission.id, { blocker: 'waiting on api' });
+
+    await expect(store.complete('w1', 'done')).rejects.toThrow(/blocker\(s\) remain: waiting on api/);
+    expect((await store.load()).missions[0]?.status).toBe('blocked');
+  });
+
+  it('refuses a build mission with no committed work', async () => {
+    const [mission] = await store.plan([{ title: 'empty', scope: ['src/e/**'] }]);
+    await store.registerAgent(
+      rosterEntry({ name: 'w1', kind: 'worker', missionId: mission!.id }),
+    );
+
+    await expect(store.complete('w1', 'done')).rejects.toThrow(/does not exist/);
+
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await expect(store.complete('w1', 'done')).rejects.toThrow(/has no changes vs "main"/);
+  });
+
+  it('rejects key_artifacts on a non-artifact mission', async () => {
+    await workerMission({
+      title: 'build c',
+      scope: 'src/c/**',
+      file: 'src/c/c.ts',
+      content: 'c\n',
+    });
+
+    await expect(store.complete('w1', 'done', ['src/c/c.ts'])).rejects.toThrow(
+      /only supported for artifact missions/,
+    );
+  });
+
+  it('records an acceptance-request bound to the artifact completion tip', async () => {
+    const mission = await workerMission({
+      title: 'deliver report',
+      scope: 'src/art/**',
+      file: 'src/art/report.html',
+      content: '<html />\n',
+      kind: 'artifact',
+    });
+    const worktree = worktreeOf(mission);
+    await commitFile(worktree, 'src/art/appendix.md', 'more\n', 'appendix');
+
+    const result = await store.complete('w1', 'ready for acceptance', ['src/art/report.html']);
+
+    const tip = await git(repo, 'rev-parse', mission.branch);
+    expect(result.mission.status).toBe('completed');
+    expect(result.message?.item.subject).toBe('acceptance-request');
+    const body = result.message?.item.body ?? '';
+    expect(body).toContain('Key artifacts for human acceptance:');
+    expect(body).toContain('- src/art/report.html');
+    expect(body).toContain(`Completion tip: ${tip}`);
+    expect(body).toContain('Additional committed files included in this approval: 1.');
+    expect(body).toContain('ready for acceptance');
+    const saved = (await store.load()).missions.find((m) => m.id === mission.id);
+    expect(saved?.completionTip).toBe(tip);
+    expect(saved?.keyArtifacts).toEqual(['src/art/report.html']);
+  });
+
+  it('rejects artifact completion with missing, uncommitted, out-of-scope, or absent paths', async () => {
+    await commitFile(repo, 'src/art/legacy.ts', 'old\n', 'legacy base file');
+    const mission = await workerMission({
+      title: 'deliver report',
+      scope: 'src/art/**',
+      file: 'src/art/report.html',
+      content: '<html />\n',
+      kind: 'artifact',
+    });
+    const worktree = worktreeOf(mission);
+    await git(worktree, 'rm', 'src/art/legacy.ts');
+    await git(worktree, 'commit', '-m', 'drop legacy');
+
+    await expect(store.complete('w1', 'done')).rejects.toThrow(
+      /must name at least one committed key deliverable/,
+    );
+    await expect(store.complete('w1', 'done', ['src/art/ghost.html'])).rejects.toThrow(
+      /must name paths from the committed branch diff/,
+    );
+    await expect(store.complete('w1', 'done', ['../escape.html'])).rejects.toThrow(
+      /non-empty relative file paths inside the repository/,
+    );
+    await commitFile(worktree, 'src/other/thing.html', 'x\n', 'outside worktree file');
+    await expect(store.complete('w1', 'done', ['src/other/thing.html'])).rejects.toThrow(
+      /must stay inside its scope/,
+    );
+    await expect(store.complete('w1', 'done', ['src/art/legacy.ts'])).rejects.toThrow(
+      /must name files present at completion tip/,
+    );
+    expect((await store.load()).missions.find((m) => m.id === mission.id)?.status).not.toBe(
+      'completed',
+    );
+  });
+
+  it('reuses the stored notification on an identical retry', async () => {
+    const mission = await workerMission({
+      title: 'build retry',
+      scope: 'src/r/**',
+      file: 'src/r/r.ts',
+      content: 'r\n',
+    });
+
+    const first = await store.complete('w1', 'same report');
+    const second = await store.complete('w1', 'same report');
+
+    expect(first.notificationCreated).toBe(true);
+    expect(second.notificationCreated).toBe(false);
+    expect(second.message?.item.file).toBe(first.message?.item.file);
+    expect(second.mission.id).toBe(mission.id);
+    const inbox = await store.readInbox('tower', 20);
+    expect(inbox.filter((item) => item.subject === 'review-request')).toHaveLength(1);
+  });
+
+  it('reports a notification storage failure after persisting the mission', async () => {
+    const mission = await workerMission({
+      title: 'unwritable inbox',
+      scope: 'src/u/**',
+      file: 'src/u/u.ts',
+      content: 'u\n',
+    });
+    const inbox = join(repo, '.tower/comms/inbox');
+    await chmod(inbox, 0o500);
+    try {
+      const result = await store.complete('w1', 'done');
+
+      expect(result.mission.status).toBe('completed');
+      expect(result.notificationCreated).toBe(false);
+      expect(result.message).toBeUndefined();
+      expect(result.notificationError).toContain('was persisted as completed');
+      expect(result.notificationError).toContain('retry with the same report');
+    } finally {
+      await chmod(inbox, 0o700);
+    }
+    expect((await store.load()).missions.find((m) => m.id === mission.id)?.status).toBe(
+      'completed',
+    );
+  });
+
+  it('issues a fresh acceptance-request when the artifact tip moves', async () => {
+    const mission = await workerMission({
+      title: 'deliver report',
+      scope: 'src/art/**',
+      file: 'src/art/report.html',
+      content: '<html />\n',
+      kind: 'artifact',
+    });
+
+    const first = await store.complete('w1', 'ready', ['src/art/report.html']);
+    const firstTip = await git(repo, 'rev-parse', mission.branch);
+    await commitFile(worktreeOf(mission), 'src/art/appendix.md', 'more\n', 'appendix');
+    const second = await store.complete('w1', 'ready', ['src/art/report.html']);
+    const secondTip = await git(repo, 'rev-parse', mission.branch);
+
+    expect(firstTip).not.toBe(secondTip);
+    expect(second.notificationCreated).toBe(true);
+    expect(second.message?.item.file).not.toBe(first.message?.item.file);
+    expect(second.message?.item.body).toContain(`Completion tip: ${secondTip}`);
+    expect((await store.load()).missions.find((m) => m.id === mission.id)?.completionTip).toBe(
+      secondTip,
+    );
+  });
+
+  it.each([
+    ['an empty', ''],
+    ['a whitespace-only', '   '],
+    ['a current-directory', '.'],
+    ['a parent-directory', '..'],
+    ['an escaping', '../escape.html'],
+    ['an absolute', '/etc/passwd'],
+  ])('rejects %s key artifact path', async (_label, path) => {
+    await expect(store.complete('ghost', 'done', [path])).rejects.toThrow(
+      /non-empty relative file paths inside the repository/,
+    );
   });
 });
 

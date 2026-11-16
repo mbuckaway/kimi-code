@@ -12,6 +12,8 @@ import { registerFeature } from '#/features/featureRegistry';
 import { TOWER_FLAG_ID } from './tower';
 import { ITowerRateLimitService } from './towerRateLimit';
 import { TowerRateLimitService } from './towerRateLimitService';
+import { ITowerCompleteTool } from './tools/complete/complete';
+import { TowerCompleteTool } from './tools/complete/completeTool';
 import { ITowerFindingTool } from './tools/finding/finding';
 import { TowerFindingTool } from './tools/finding/findingTool';
 import { ITowerInboxTool } from './tools/inbox/inbox';
@@ -54,6 +56,7 @@ export const TOWER_TOOL_CONTRIBUTIONS: readonly TowerToolContribution[] = [
   { id: ITowerReviewTool, ctor: TowerReviewTool, name: 'TowerReview' },
   { id: ITowerMissionTool, ctor: TowerMissionTool, name: 'TowerMission' },
   { id: ITowerStatusTool, ctor: TowerStatusTool, name: 'TowerStatus' },
+  { id: ITowerCompleteTool, ctor: TowerCompleteTool, name: 'TowerComplete' },
 ];
 
 export class TowerFeature extends Feature {
