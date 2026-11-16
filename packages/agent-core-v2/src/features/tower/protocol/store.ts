@@ -1,16 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, posix } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 
 import picomatch from 'picomatch';
 
+import { listBaseDirtyEntries, snapshotBaseWip } from './baseWip';
 import { parseFrontmatter, renderFrontmatter } from './frontmatter';
 import {
   branchExists,
   branchTip,
   currentBranch,
   diffNameOnly,
+  git,
   hasAnyCommit,
+  isAncestor,
   isInsideRepo,
   isWorktreeDirty,
   mergeNoFf,
@@ -126,6 +129,19 @@ export interface TowerMissionPatch {
   readonly taskDone?: string;
   readonly owner?: string;
   readonly scope?: readonly string[];
+  readonly spawnBase?: string;
+}
+
+export interface TowerAddWorktreeResult {
+  readonly rel: string;
+  readonly spawnBase?: string;
+}
+
+export interface TowerRebaseMissionResult {
+  readonly status: 'up-to-date' | 'rebased' | 'conflict';
+  readonly fromCommit?: string;
+  readonly toCommit?: string;
+  readonly files?: readonly string[];
 }
 
 export interface TowerMissionRuntimeOptions {
@@ -479,9 +495,18 @@ export class TowerStore {
       patch.clearBlockers === undefined &&
       patch.taskDone === undefined &&
       patch.owner === undefined &&
-      patch.scope === undefined;
+      patch.scope === undefined &&
+      patch.spawnBase === undefined;
     if (isNoOp) return mission;
 
+    if (patch.spawnBase !== undefined) {
+      if (callerName !== TOWER_NAME) {
+        throw new TowerProtocolError(
+          `agent "${callerName}" cannot record a mission spawn base — only the tower does`,
+        );
+      }
+      mission.spawnBase = patch.spawnBase;
+    }
     if (patch.owner !== undefined) {
       if (callerName !== TOWER_NAME) {
         throw new TowerProtocolError(
@@ -536,7 +561,8 @@ export class TowerStore {
       patch.blocker === undefined &&
       patch.clearBlockers === undefined &&
       patch.owner === undefined &&
-      patch.scope === undefined;
+      patch.scope === undefined &&
+      patch.spawnBase === undefined;
     if (!taskTickOnly && options.silent !== true) {
       await this.appendLog(callerName, 'mission.update', {
         id,
@@ -545,6 +571,7 @@ export class TowerStore {
         blocker: patch.blocker !== undefined ? 'added' : undefined,
         owner: patch.owner,
         scope: patch.scope?.join(','),
+        spawn_base: patch.spawnBase,
       });
     }
     return mission;
@@ -1208,6 +1235,231 @@ export class TowerStore {
     return evaluateMissionGate({ state, mission, reviews, workers, observations });
   }
 
+  async rebaseMission(
+    callerName: string,
+    id: string,
+    runtime: TowerMissionRuntimeOptions = {},
+  ): Promise<TowerRebaseMissionResult> {
+    if (callerName !== TOWER_NAME) {
+      throw new TowerProtocolError(
+        `agent "${callerName}" cannot rebase a mission branch — only the tower runs TowerRebase; a worker rebases only when the tower asks it to`,
+      );
+    }
+    const state = await this.load();
+    const mission = state.missions.find((candidate) => candidate.id === id);
+    if (mission === undefined) {
+      throw new TowerProtocolError(`unknown mission "${id}"`);
+    }
+    if (!isOpenMission(mission)) {
+      throw new TowerProtocolError(
+        `mission ${id} is ${mission.status} — only open missions rebase; closed missions are historical records`,
+      );
+    }
+    if (mission.kind === 'survey') {
+      throw new TowerProtocolError(
+        `mission ${id} is a read-only survey — it has no work branch to rebase`,
+      );
+    }
+    const activeAgentIds =
+      typeof runtime.activeAgentIds === 'function'
+        ? runtime.activeAgentIds()
+        : runtime.activeAgentIds;
+    const workers = state.roster.agents.filter(
+      (agent) =>
+        agent.kind === 'worker' &&
+        (agent.missionId === mission.id ||
+          agent.branch === mission.branch ||
+          agent.worktree === mission.worktree),
+    );
+    const busyWorkers = workers.filter(
+      (worker) => activeAgentIds?.has(worker.agentId) === true,
+    );
+    if (busyWorkers.length > 0) {
+      throw new TowerProtocolError(
+        `worker(s) ${busyWorkers.map((worker) => worker.name).join(', ')} are mid-turn — rebasing under a running worker could race its edits; TowerSend a message asking for a worker-run rebase, or retry once every worker is idle`,
+      );
+    }
+    if (activeAgentIds === undefined && workers.length > 0) {
+      throw new TowerProtocolError(
+        `worker runtime for ${workers.map((worker) => worker.name).join(', ')} cannot be observed authoritatively — unknown is not idle; retry TowerRebase from the main tower agent`,
+      );
+    }
+    if (!(await branchExists(this.repoRoot, mission.branch))) {
+      throw new TowerProtocolError(
+        `mission ${id} has no branch "${mission.branch}" yet — spawn a worker to create it before rebasing`,
+      );
+    }
+    const rel = join(WORKTREES_DIR, mission.worktree);
+    const worktreeAbs = this.abs(rel);
+    const checkedOut = await tryGit(worktreeAbs, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (checkedOut === null) {
+      throw new TowerProtocolError(
+        `mission ${id} has no registered worktree at ${rel} — spawn a worker to create it before rebasing`,
+      );
+    }
+    if (await isWorktreeDirty(worktreeAbs)) {
+      throw new TowerProtocolError(
+        `worktree ${mission.worktree} has uncommitted changes — rebasing under uncommitted work could lose it; have the worker commit or stash first, then retry`,
+      );
+    }
+    if (await this.rebaseInProgress(worktreeAbs)) {
+      throw new TowerProtocolError(
+        `worktree ${mission.worktree} already has a rebase in progress — finish or abort it (git rebase --continue / --abort in the worktree) before the tower rebases the branch`,
+      );
+    }
+    const baseCommit = await branchTip(this.repoRoot, state.base);
+    const fromCommit = await branchTip(this.repoRoot, mission.branch);
+    if (checkedOut !== mission.branch) {
+      throw new TowerProtocolError(
+        `worktree ${mission.worktree} is on "${checkedOut}", not mission branch "${mission.branch}" — restore the registered checkout before rebasing; nothing was changed`,
+      );
+    }
+    const worktreeHead = await branchTip(worktreeAbs, 'HEAD');
+    if (worktreeHead !== fromCommit) {
+      throw new TowerProtocolError(
+        `worktree ${mission.worktree} HEAD ${worktreeHead} does not match mission branch "${mission.branch}" at ${fromCommit} — repair the diverged checkout before rebasing; nothing was changed`,
+      );
+    }
+    if (await isAncestor(this.repoRoot, baseCommit, fromCommit)) {
+      await this.appendLog(TOWER_NAME, 'rebase.mission', { id, result: 'up-to-date' });
+      return { status: 'up-to-date' };
+    }
+
+    let rebaseErrorMessage: string | undefined;
+    try {
+      await git(worktreeAbs, ['rebase', baseCommit]);
+    } catch (error) {
+      rebaseErrorMessage = error instanceof Error ? error.message : 'non-Error thrown value';
+    }
+    if (rebaseErrorMessage !== undefined) {
+      let conflicted: string;
+      let inProgress: boolean;
+      try {
+        conflicted = await git(worktreeAbs, ['diff', '--name-only', '--diff-filter=U']);
+        inProgress = await this.rebaseInProgress(worktreeAbs);
+      } catch (error) {
+        throw new TowerProtocolError(
+          `recovery-required: rebase of mission ${id} failed and its state could not be inspected: ${error instanceof Error ? error.message : String(error)} — no waiver was recorded and the mission was not marked blocked`,
+        );
+      }
+      const files = conflicted.split('\n').filter((file) => file.trim().length > 0);
+      if (inProgress) {
+        try {
+          await git(worktreeAbs, ['rebase', '--abort']);
+        } catch (error) {
+          throw new TowerProtocolError(
+            `recovery-required: rebase of mission ${id} failed and git rebase --abort also failed: ${error instanceof Error ? error.message : String(error)} — no recovery is claimed, no waiver was recorded, and the mission was not marked blocked`,
+          );
+        }
+      }
+      await this.assertRebaseRecovered(worktreeAbs, mission, fromCommit);
+      if (inProgress && files.length > 0) {
+        mission.blockers.push(
+          mission.kind === 'artifact'
+            ? `tower rebase onto ${state.base} conflicted in: ${files.join(', ')} — the rebase was aborted and your worktree is back to the pre-rebase state. Resolve it yourself: run \`git rebase ${state.base}\` in your worktree, fix the listed conflicts, \`git add\` the resolved files, then continue with \`GIT_EDITOR=true git rebase --continue\` (a plain \`git rebase --continue\` opens an editor and hangs a non-interactive shell). Re-run your checks, clear this blocker (TowerMission clear_blockers), then run TowerComplete with the current report and key_artifacts so the tower can present the new acceptance-request for fresh explicit human acceptance of the entire tip — the moved tip cannot reuse the old acceptance`
+            : `tower rebase onto ${state.base} conflicted in: ${files.join(', ')} — the rebase was aborted and your worktree is back to the pre-rebase state. Resolve it yourself: run \`git rebase ${state.base}\` in your worktree, fix the listed conflicts, \`git add\` the resolved files, then continue with \`GIT_EDITOR=true git rebase --continue\` (a plain \`git rebase --continue\` opens an editor and hangs a non-interactive shell). Re-run your tests, then clear this blocker (TowerMission clear_blockers) and TowerSend the tower asking for a fresh review — a worker-run rebase is not covered by the clean-rebase waiver, so the moved tip needs a new clean review before the merge can land`,
+        );
+        mission.status = 'blocked';
+        await this.save(state);
+        await this.renderMissionsIndex(state);
+        await this.renderMissionFile(mission);
+        await this.appendLog(TOWER_NAME, 'rebase.mission', {
+          id,
+          result: 'conflict',
+          files: files.join(','),
+        });
+        return { status: 'conflict', fromCommit, files };
+      }
+      throw new TowerProtocolError(
+        `rebase of mission ${id} failed: ${rebaseErrorMessage} — no rebase conflict with unmerged paths was observed, so the mission was not marked blocked and no review waiver was recorded`,
+      );
+    }
+
+    let toCommit: string;
+    const problems: string[] = [];
+    try {
+      toCommit = await branchTip(this.repoRoot, mission.branch);
+      if (await this.rebaseInProgress(worktreeAbs)) problems.push('a rebase is still in progress');
+      if ((await tryGit(worktreeAbs, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== mission.branch) {
+        problems.push('the worktree no longer has the mission branch checked out');
+      }
+      if ((await branchTip(worktreeAbs, 'HEAD')) !== toCommit) {
+        problems.push('worktree HEAD and the mission branch tip differ');
+      }
+      if (await isWorktreeDirty(worktreeAbs)) problems.push('the worktree is dirty');
+      if (!(await isAncestor(this.repoRoot, baseCommit, toCommit))) {
+        problems.push('the rebased branch does not contain the evaluated base commit');
+      }
+    } catch (error) {
+      throw new TowerProtocolError(
+        `recovery-required: rebase of mission ${id} returned success but its postconditions could not be inspected: ${error instanceof Error ? error.message : String(error)} — no review waiver was recorded`,
+      );
+    }
+    if (problems.length > 0) {
+      throw new TowerProtocolError(
+        `recovery-required: rebase of mission ${id} returned success but its postconditions failed (${problems.join('; ')}) — no review waiver was recorded; inspect the worktree and branch before retrying`,
+      );
+    }
+    mission.lastRebase = { fromCommit, toCommit };
+    await this.save(state);
+    await this.renderMissionsIndex(state);
+    await this.renderMissionFile(mission);
+    await this.appendLog(TOWER_NAME, 'rebase.mission', {
+      id,
+      result: 'clean',
+      from: fromCommit.slice(0, 7),
+      to: toCommit.slice(0, 7),
+    });
+    return { status: 'rebased', fromCommit, toCommit };
+  }
+
+  private async rebaseInProgress(worktreeAbs: string): Promise<boolean> {
+    const gitDir = (await git(worktreeAbs, ['rev-parse', '--git-dir'])).trim();
+    const dir = resolve(worktreeAbs, gitDir);
+    return (
+      (await this.directoryExists(join(dir, 'rebase-merge'))) ||
+      (await this.directoryExists(join(dir, 'rebase-apply')))
+    );
+  }
+
+  private async directoryExists(path: string): Promise<boolean> {
+    try {
+      return (await stat(path)).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  private async assertRebaseRecovered(
+    worktreeAbs: string,
+    mission: TowerMission,
+    fromCommit: string,
+  ): Promise<void> {
+    const problems: string[] = [];
+    try {
+      if (await this.rebaseInProgress(worktreeAbs)) problems.push('a rebase is still in progress');
+      if ((await tryGit(worktreeAbs, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== mission.branch) {
+        problems.push('the mission branch is not checked out');
+      }
+      if ((await tryGit(worktreeAbs, ['rev-parse', 'HEAD'])) !== fromCommit) {
+        problems.push('worktree HEAD was not restored to the pre-rebase commit');
+      }
+      if ((await branchTip(this.repoRoot, mission.branch)) !== fromCommit) {
+        problems.push('the mission branch tip was not restored');
+      }
+      if (await isWorktreeDirty(worktreeAbs)) problems.push('the worktree is not clean');
+    } catch (error) {
+      problems.push(
+        `recovery inspection failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (problems.length > 0) {
+      throw new TowerProtocolError(
+        `recovery-required: rebase recovery for mission ${mission.id} failed its postconditions (${problems.join('; ')}) — no recovery is claimed, no waiver was recorded, and the mission was not marked blocked`,
+      );
+    }
+  }
+
   private async observeMissionGit(
     state: TowerState,
     mission: TowerMission,
@@ -1218,22 +1470,84 @@ export class TowerStore {
     } catch {
       checkedOutBranch = undefined;
     }
-    const [baseTip, headTip, hasBranch] = await Promise.all([
+    const [baseTip, headTip, dirtyEntries, hasBranch] = await Promise.all([
       branchTip(this.repoRoot, state.base),
       branchTip(this.repoRoot, 'HEAD'),
+      listBaseDirtyEntries(this.repoRoot),
       branchExists(this.repoRoot, mission.branch),
     ]);
-    if (!hasBranch) return { baseTip, headTip, checkedOutBranch };
+    const baseDirtyFiles = dirtyEntries.map((entry) => entry.path);
+    if (!hasBranch) return { baseTip, headTip, checkedOutBranch, baseDirtyFiles };
     const tip = await branchTip(this.repoRoot, mission.branch);
-    const changedFiles = await diffNameOnly(this.repoRoot, baseTip, tip);
-    return { baseTip, headTip, checkedOutBranch, branch: { tip, changedFiles } };
+    const [baseIsAncestor, spawnBaseIsAncestor] = await Promise.all([
+      isAncestor(this.repoRoot, baseTip, tip),
+      mission.spawnBase === undefined
+        ? Promise.resolve(false)
+        : isAncestor(this.repoRoot, mission.spawnBase, tip),
+    ]);
+    const diffBase =
+      mission.spawnBase !== undefined && spawnBaseIsAncestor ? mission.spawnBase : baseTip;
+    const [changedFiles, mergeTouchedFiles] = await Promise.all([
+      diffNameOnly(this.repoRoot, diffBase, tip),
+      diffNameOnly(this.repoRoot, headTip, tip),
+    ]);
+    return {
+      baseTip,
+      headTip,
+      checkedOutBranch,
+      baseDirtyFiles,
+      branch: { tip, baseIsAncestor, diffBase, changedFiles, mergeTouchedFiles },
+    };
   }
 
-  async addWorktree(worktree: string, branch: string, base: string): Promise<string> {
+  async addWorktree(
+    worktree: string,
+    branch: string,
+    base: string,
+  ): Promise<TowerAddWorktreeResult> {
     const rel = join(WORKTREES_DIR, worktree);
-    await worktreeAdd(this.repoRoot, this.abs(rel), branch, base);
-    await this.appendLog(TOWER_NAME, 'worktree.add', { worktree, branch, base });
-    return rel;
+    let spawnBase: string | undefined;
+    if (await branchExists(this.repoRoot, branch)) {
+      await worktreeAdd(this.repoRoot, this.abs(rel), branch, base);
+      await this.appendLog(TOWER_NAME, 'worktree.add', { worktree, branch, base });
+      return { rel, spawnBase };
+    }
+    const dirty = await listBaseDirtyEntries(this.repoRoot);
+    if (dirty.some((entry) => entry.unmerged)) {
+      throw new TowerProtocolError(
+        'the base checkout has unmerged paths (an in-progress merge, rebase, or cherry-pick) — finish or abort it before spawning workers',
+      );
+    }
+    if (dirty.length > 0) {
+      let checkout: string;
+      try {
+        checkout = await currentBranch(this.repoRoot);
+      } catch {
+        throw new TowerProtocolError(
+          `the main checkout is in a detached HEAD state with uncommitted changes, and the recorded base is "${base}" — a WIP snapshot would carry detached-HEAD content into the mission branch; check out "${base}" (\`git checkout ${base}\`) or commit/stash the changes before spawning workers`,
+        );
+      }
+      if (checkout !== base) {
+        throw new TowerProtocolError(
+          `the main checkout is on "${checkout}" with uncommitted changes, not the recorded base "${base}" — a WIP snapshot would carry "${checkout}" content into the mission branch; switch back to "${base}" (\`git checkout ${base}\`) or commit/stash the changes before spawning workers`,
+        );
+      }
+    }
+    spawnBase =
+      (await snapshotBaseWip(
+        this.repoRoot,
+        base,
+        dirty.map((entry) => entry.path),
+        `tower: snapshot of uncommitted base checkout changes (worktree ${worktree})`,
+      )) ?? undefined;
+    await worktreeAdd(this.repoRoot, this.abs(rel), branch, spawnBase ?? base);
+    await this.appendLog(TOWER_NAME, 'worktree.add', {
+      worktree,
+      branch,
+      base,
+      spawn_base: spawnBase,
+    });
+    return { rel, spawnBase };
   }
 
   async teardown(options: { readonly force?: boolean } = {}): Promise<readonly string[]> {

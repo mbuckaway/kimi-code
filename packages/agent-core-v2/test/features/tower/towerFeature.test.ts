@@ -110,6 +110,7 @@ describe('TowerFeature — experimental flag gating', () => {
         'TowerMerge',
         'TowerMission',
         'TowerPlan',
+        'TowerRebase',
         'TowerReview',
         'TowerSend',
         'TowerSpawn',

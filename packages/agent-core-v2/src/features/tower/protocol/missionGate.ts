@@ -12,13 +12,17 @@ export interface TowerMissionWorkerRuntime {
 
 export interface TowerMissionBranchObservation {
   readonly tip: string;
+  readonly baseIsAncestor: boolean;
+  readonly diffBase: string;
   readonly changedFiles: readonly string[];
+  readonly mergeTouchedFiles: readonly string[];
 }
 
 export interface TowerMissionGitObservations {
   readonly baseTip: string;
   readonly headTip: string;
   readonly checkedOutBranch?: string;
+  readonly baseDirtyFiles: readonly string[];
   readonly branch?: TowerMissionBranchObservation;
 }
 
@@ -32,6 +36,7 @@ export type TowerMissionGateReason =
   | 'deps-unmerged'
   | 'branch-missing'
   | 'read-only-survey'
+  | 'stale-base'
   | 'no-review'
   | 'review-hold'
   | 'not-clean'
@@ -40,7 +45,8 @@ export type TowerMissionGateReason =
   | 'completion-tip-mismatch'
   | 'review-mission-mismatch'
   | 'out-of-scope'
-  | 'base-mismatch';
+  | 'base-mismatch'
+  | 'base-dirty';
 
 export interface TowerMissionGateBlock {
   readonly reason: TowerMissionGateReason;
@@ -162,6 +168,15 @@ export function evaluateMissionGate(input: TowerMissionGateInput): TowerMissionG
     return result([]);
   }
 
+  if (!branch.baseIsAncestor) {
+    return block(
+      'stale-base',
+      mission.kind === 'artifact'
+        ? `${mission.branch} is behind base "${state.base}" — the base moved after this branch spawned, so merging now could land artifacts that were never produced or accepted against the current base; run TowerRebase(mission="${mission.id}") first (it rebases in the mission worktree and refuses while the worker is mid-turn or the worktree is dirty), then have the worker run TowerComplete with the current report and key_artifacts at the rebased tip, present that new request for fresh explicit human acceptance of the entire tip, and retry the merge`
+        : `${mission.branch} is behind base "${state.base}" — the base moved after this branch spawned, so merging now could land code that was never built or reviewed against the current base; run TowerRebase(mission="${mission.id}") first (it rebases in the mission worktree, refuses while the worker is mid-turn or the worktree is dirty, and a conflict-free rebase waives the re-review), then retry the merge`,
+    );
+  }
+
   if (selectedReview === undefined) {
     return block(
       'no-review',
@@ -250,6 +265,14 @@ export function evaluateMissionGate(input: TowerMissionGateInput): TowerMissionG
       observations.checkedOutBranch === undefined
         ? `the main checkout is in a detached HEAD state — check out the recorded base branch "${state.base}" before merging; nothing was merged`
         : `the main checkout is on "${observations.checkedOutBranch}", not the recorded base "${state.base}" — switch it back (\`git checkout ${state.base}\`) and retry; nothing was merged`,
+    );
+  }
+  const dirty = new Set(observations.baseDirtyFiles);
+  const blockedDirty = branch.mergeTouchedFiles.filter((file) => dirty.has(file));
+  if (blockedDirty.length > 0) {
+    return block(
+      'base-dirty',
+      `the main checkout has uncommitted changes in file(s) this merge would overwrite: ${blockedDirty.slice(0, 5).join(', ')} — commit or stash them first, then retry; nothing was merged`,
     );
   }
   return result([]);

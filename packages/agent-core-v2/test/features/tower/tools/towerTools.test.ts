@@ -11,6 +11,7 @@ import { DisposableStore } from '#/_base/di/lifecycle';
 import type { ServiceIdentifier } from '#/_base/di/instantiation';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentTaskService } from '#/agent/task/task';
 import type { AnyAgentTool } from '#/agent/toolRegistry/toolContribution';
 import { ISessionManager } from '#/app/sessionManager/sessionManager';
 import type { Event2 } from '#/app/event/event2';
@@ -20,6 +21,7 @@ import { IAgentTowerService } from '#/features/tower/tower';
 import { ITowerRateLimitService } from '#/features/tower/towerRateLimit';
 import {
   TowerStore,
+  isAncestor,
   type TowerInboxItem,
   type TowerSendResult,
   type TowerState,
@@ -58,7 +60,8 @@ import {
   TowerCompleteToolInputSchema,
 } from '#/features/tower/tools/complete/complete';
 import { TowerCompleteTool } from '#/features/tower/tools/complete/completeTool';
-import { TowerRebaseToolInputSchema } from '#/features/tower/tools/rebase/rebase';
+import { ITowerRebaseTool, TowerRebaseToolInputSchema } from '#/features/tower/tools/rebase/rebase';
+import { TowerRebaseTool } from '#/features/tower/tools/rebase/rebaseTool';
 
 import { executeTool } from '../../../tools/fixtures/execute-tool';
 import { stubAgentContext } from '../../../agent/agentContext/stubs';
@@ -168,6 +171,7 @@ beforeEach(async () => {
       reg.definePartialInstance(ITowerRateLimitService, {
         snapshot: () => ({ budget: 2, inflight: 0, blockedUntil: null }),
       });
+      reg.definePartialInstance(IAgentTaskService, { list: () => [] });
       reg.define(ITowerInitTool, TowerInitTool);
       reg.define(ITowerPlanTool, TowerPlanTool);
       reg.define(ITowerMergeTool, TowerMergeTool);
@@ -179,6 +183,7 @@ beforeEach(async () => {
       reg.define(ITowerMissionTool, TowerMissionTool);
       reg.define(ITowerStatusTool, TowerStatusTool);
       reg.define(ITowerCompleteTool, TowerCompleteTool);
+      reg.define(ITowerRebaseTool, TowerRebaseTool);
     },
   });
 });
@@ -416,6 +421,72 @@ describe('TowerMergeTool', () => {
   });
 });
 
+describe('TowerRebaseTool', () => {
+  async function setupRebaseMission(file = 'src/r/a.ts', content = 'mission\n') {
+    await initViaTool();
+    const store = new TowerStore(repo);
+    const [mission] = await store.plan([{ title: 'rebase me', scope: ['src/r/**'] }]);
+    const state = await store.load();
+    await store.addWorktree(mission!.worktree, mission!.branch, state.base);
+    await commitFile(
+      join(repo, '.tower/worktrees', mission!.worktree),
+      file,
+      content,
+      'mission work',
+    );
+    return { store, mission: mission! };
+  }
+
+  it('rebases a stale mission branch onto the current base', async () => {
+    const { mission } = await setupRebaseMission();
+    await commitFile(repo, 'base.txt', 'base\n', 'base moves');
+    const baseTip = await git(repo, 'rev-parse', 'HEAD');
+
+    const result = await run(ix.get(ITowerRebaseTool), { mission: mission.id });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain(`rebased mission ${mission.id} (${mission.branch})`);
+    expect(result.output).toContain('→');
+    const branchTip = await git(repo, 'rev-parse', mission.branch);
+    expect(await isAncestor(repo, baseTip, branchTip)).toBe(true);
+  });
+
+  it('reports an already up-to-date mission', async () => {
+    const { mission } = await setupRebaseMission();
+
+    const result = await run(ix.get(ITowerRebaseTool), { mission: mission.id });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain(
+      `mission ${mission.id} (${mission.branch}) is already up to date with base "main"`,
+    );
+  });
+
+  it('reports a conflict, aborts the rebase, and marks the mission blocked', async () => {
+    const { store, mission } = await setupRebaseMission();
+    await commitFile(repo, 'src/r/a.ts', 'base\n', 'base changes the same file');
+
+    const result = await run(ix.get(ITowerRebaseTool), { mission: mission.id });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('conflicted and was aborted');
+    expect(result.output).toContain('src/r/a.ts');
+    expect((await store.load()).missions.find((m) => m.id === mission.id)?.status).toBe(
+      'blocked',
+    );
+  });
+
+  it('reports an unknown mission with the known mission ids', async () => {
+    await setupRebaseMission();
+
+    const result = await run(ix.get(ITowerRebaseTool), { mission: 'M9' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('unknown mission "M9"');
+    expect(result.output).toContain('known: M1');
+  });
+});
+
 describe('TowerTeardownTool', () => {
   it('tears down the workspace and exits tower mode', async () => {
     await initViaTool();
@@ -522,6 +593,7 @@ describe('tool registration', () => {
       [ITowerInitTool, {}],
       [ITowerPlanTool, { missions: [] }],
       [ITowerMergeTool, { branch: 'tower/x' }],
+      [ITowerRebaseTool, { mission: 'M1' }],
       [ITowerTeardownTool, {}],
     ];
     for (const [id, args] of cases) {

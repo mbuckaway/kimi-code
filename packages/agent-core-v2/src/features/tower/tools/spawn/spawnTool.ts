@@ -132,8 +132,21 @@ export class TowerSpawnTool implements ITowerSpawnTool {
           };
         }
         try {
-          await store.addWorktree(mission.worktree, mission.branch, state.base);
+          const added = await store.addWorktree(mission.worktree, mission.branch, state.base);
+          if (added.spawnBase !== undefined) {
+            await store.updateMission(
+              TOWER_NAME,
+              mission.id,
+              { spawnBase: added.spawnBase },
+              { silent: true },
+            );
+            mission = { ...mission, spawnBase: added.spawnBase };
+            notes.push(
+              `base snapshot: ${added.spawnBase.slice(0, 7)} — the base checkout had uncommitted changes; they are committed as the branch's first commit (the checkout itself was left untouched)`,
+            );
+          }
         } catch (error) {
+          if (error instanceof TowerProtocolError) throw error;
           notes.push(
             `worktree setup warning (continuing): ${error instanceof Error ? error.message : String(error)}`,
           );
