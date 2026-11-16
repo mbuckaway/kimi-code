@@ -13,6 +13,7 @@ import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
 import { denyToolExecution } from '#/agent/toolExecutor/beforeToolExecuteEvent';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
+import { IBashParserService } from '#/app/bashParser/bashParser';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { IFeatureManager } from '#/app/feature/featureManager';
@@ -26,9 +27,11 @@ import { ISessionActivityView } from '#/session/sessionActivity/sessionActivity'
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { isUntitled } from '#/session/sessionMetadata/promptMetadata';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { SubagentStarted } from '#/session/subagent/mirrorAgentRun';
 import { TowerModeInjection } from './injection/towerModeInjection';
 import {
+  STATE_FILE,
   TowerProtocolError,
   TowerStore,
   WORKTREES_DIR,
@@ -38,6 +41,12 @@ import {
   listBaseDirtyEntries,
   resolveTowerRepoRoot,
 } from './protocol/index';
+import {
+  analyzeTowerBashCommand,
+  commandNeedsTowerGuard,
+  TOWER_BASH_GUARD_PARSE_OPTIONS,
+  towerWorkspaceOwned,
+} from './bashGuard';
 import {
   IAgentTowerService,
   TOWER_FLAG_ID,
@@ -50,6 +59,12 @@ import { isTowerFeatureAssembled } from './towerFeature';
 import { TowerModeEnter, TowerModeExit, towerKey, towerOwnerKey } from './towerOps';
 
 export const TOWER_MODE_TOOLS: readonly string[] = ['TowerInit', ...TOWER_TOOL_NAMES];
+
+function stringArg(args: unknown, key: string): string | undefined {
+  if (typeof args !== 'object' || args === null) return undefined;
+  const value = (args as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
 
 export class AgentTowerService extends Disposable implements IAgentTowerService {
   declare readonly _serviceBrand: undefined;
@@ -69,6 +84,8 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     @IAgentLifecycleService agentLifecycle: IAgentLifecycleService,
     @IAgentContextMemoryService context: IAgentContextMemoryService,
     @IEventBus eventBus: IEventBus,
+    @IBashParserService private readonly bashParser: IBashParserService,
+    @ISessionWorkspaceContext private readonly workspaceCtx: ISessionWorkspaceContext,
   ) {
     super();
     this.agentState.contributeState(towerKey);
@@ -195,6 +212,27 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
         );
       }),
     );
+    this._register(
+      toolExecutor.onBeforeExecuteTool(async (event) => {
+        if (event.toolCall.name !== 'Bash') return;
+        const command = stringArg(event.args, 'command');
+        if (command === undefined || !commandNeedsTowerGuard(command)) return;
+        const mainCheckout = resolveTowerRepoRoot(this.sessionCtx.cwd);
+        if (!(await towerWorkspaceOwned(join(mainCheckout, STATE_FILE)))) return;
+        const cwdArg = stringArg(event.args, 'cwd');
+        const cwd =
+          cwdArg === undefined ? this.workspaceCtx.workDir : this.resolveBashGuardCwd(cwdArg);
+        const reason = analyzeTowerBashCommand({ command, cwd, mainCheckout }, (source) =>
+          this.bashParser.parse(source, TOWER_BASH_GUARD_PARSE_OPTIONS),
+        );
+        if (reason === undefined) return;
+        event.veto(denyToolExecution(this.toolApproval.formatDenyMessage(reason)));
+      }),
+    );
+  }
+
+  private resolveBashGuardCwd(cwdArg: string): string {
+    return this.workspaceCtx.resolve(cwdArg);
   }
 
   async enter(base?: string): Promise<TowerEnterResult> {

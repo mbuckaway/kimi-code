@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
+import { IBashParserService } from '#/app/bashParser/bashParser';
 import { BashParserService } from '#/app/bashParser/bashParserService';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
@@ -68,6 +69,7 @@ import { InMemoryStorageService } from '#/persistence/backends/memory/inMemorySt
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { ToolAccesses } from '#/tool/toolContract';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 
@@ -201,6 +203,30 @@ function writeHookContext(toolName: string, paths: readonly string[]): ResolvedT
   };
 }
 
+function bashHookContext(command: string, cwd?: string): ResolvedToolExecutionHookContext {
+  const call = toolCall('Bash', 'call_bash');
+  return {
+    turnId: 0,
+    signal,
+    toolCall: call,
+    toolCalls: [call],
+    args: cwd === undefined ? { command } : { command, cwd },
+    execution: { approvalRule: 'Bash', execute: async () => ({ output: '' }) },
+  };
+}
+
+function workspaceContextStub(workDir: string): ISessionWorkspaceContext {
+  const root = resolve(workDir);
+  return {
+    _serviceBrand: undefined,
+    workDir: root,
+    additionalDirs: [],
+    resolve: (path: string) => (isAbsolute(path) ? resolve(path) : resolve(root, path)),
+    isWithin: (absPath: string) => absPath.startsWith(root),
+    assertAllowed: (absPath: string) => absPath,
+  };
+}
+
 describe('AgentTowerService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -260,6 +286,8 @@ describe('AgentTowerService', () => {
       get: () => [],
     } as unknown as IAgentContextMemoryService);
     ix.stub(ISessionContext, { cwd: '/nonexistent-tower-repo' } as unknown as ISessionContext);
+    ix.stub(ISessionWorkspaceContext, workspaceContextStub('/nonexistent-tower-repo'));
+    ix.stub(IBashParserService, new BashParserService());
     registerTestAgentWire(ix, testWireScope('wire', 'tower-test'), {
       log: ix.get(IAppendLogStore),
       eventBus: ix.get(IEventBus),
@@ -1527,6 +1555,178 @@ describe('AgentTowerService', () => {
       expect(decision).toBeUndefined();
       expect(permissionGateRan).toBe(true);
       expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('tower bash guard wiring', () => {
+    let repo: string;
+    let parser: BashParserService;
+    let stateFile: string;
+
+    async function git(cwd: string, ...args: string[]): Promise<void> {
+      await execFileAsync('git', args, { cwd });
+    }
+
+    async function ownTowerWorkspace(): Promise<void> {
+      await mkdir(dirname(stateFile), { recursive: true });
+      await writeFile(stateFile, JSON.stringify({ sessionId: 'session-tower-owner' }));
+    }
+
+    beforeEach(async () => {
+      repo = await mkdtemp(join(tmpdir(), 'tower-bash-guard-'));
+      await git(repo, 'init', '-b', 'main');
+      await git(repo, 'config', 'user.email', 'tower-test@example.com');
+      await git(repo, 'config', 'user.name', 'Tower Test');
+      await writeFile(join(repo, 'README.md'), '# fixture\n');
+      await git(repo, 'add', 'README.md');
+      await git(repo, 'commit', '-m', 'initial');
+      stateFile = join(repo, '.tower/comms/state.json');
+      parser = new BashParserService();
+      ix.stub(IBashParserService, parser);
+      ix.stub(ISessionContext, { cwd: repo } as unknown as ISessionContext);
+      ix.stub(ISessionWorkspaceContext, workspaceContextStub(repo));
+    });
+
+    afterEach(async () => {
+      await rm(repo, { recursive: true, force: true });
+    });
+
+    it('denies a destructive Bash command in a tower-owned workspace', async () => {
+      expect.assertions(5);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('rm -rf .tower/comms'));
+
+      expect(decision?.veto?.isError).toBe(true);
+      expect(decision?.veto?.output).toContain('`rm` is not allowed on tower protocol paths');
+      expect(permissionGateRan).toBe(false);
+      expect(formatDenyMessage).toHaveBeenCalledWith(
+        expect.stringContaining('`rm` is not allowed on tower protocol paths'),
+      );
+      expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('denies git reset --hard at the main checkout root', async () => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git reset --hard HEAD'));
+
+      expect(decision?.veto?.isError).toBe(true);
+      expect(decision?.veto?.output).toContain(
+        '`git reset --hard` is not allowed in the tower main checkout',
+      );
+    });
+
+    it('allows a non-destructive Bash command and never parses it', async () => {
+      expect.assertions(4);
+      await ownTowerWorkspace();
+      const parse = vi.spyOn(parser, 'parse');
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git status'));
+
+      expect(decision).toBeUndefined();
+      expect(permissionGateRan).toBe(true);
+      expect(parse).not.toHaveBeenCalled();
+      expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps the guard inert when the workspace is not tower-owned', async () => {
+      expect.assertions(3);
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('rm -rf .tower'));
+
+      expect(decision).toBeUndefined();
+      expect(permissionGateRan).toBe(true);
+      expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps the guard inert when the state file carries no session id', async () => {
+      expect.assertions(1);
+      await mkdir(dirname(stateFile), { recursive: true });
+      await writeFile(stateFile, JSON.stringify({ sessionId: '' }));
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git reset --hard HEAD'));
+
+      expect(decision).toBeUndefined();
+    });
+
+    it('resolves a relative cwd argument through the session workspace', async () => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const insideWorktree = await fire(
+        bashHookContext('git reset --hard HEAD', join('.tower', 'worktrees', 'M1')),
+      );
+      expect(insideWorktree).toBeUndefined();
+
+      const insideMainCheckout = await fire(bashHookContext('git reset --hard HEAD', 'src'));
+      expect(insideMainCheckout?.veto?.output).toContain('`git reset --hard` is not allowed');
+    });
+
+    it('resolves an absolute cwd argument as-is', async () => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const insideWorktree = await fire(
+        bashHookContext('git reset --hard HEAD', join(repo, '.tower/worktrees/M1')),
+      );
+      expect(insideWorktree).toBeUndefined();
+
+      const atMainCheckout = await fire(bashHookContext('git reset --hard HEAD', repo));
+      expect(atMainCheckout?.veto?.output).toContain('`git reset --hard` is not allowed');
+    });
+
+    it('defaults the analysis cwd to the workspace working directory, not the session cwd', async () => {
+      expect.assertions(1);
+      await ownTowerWorkspace();
+      ix.stub(
+        ISessionWorkspaceContext,
+        workspaceContextStub(join(repo, '.tower/worktrees/M1')),
+      );
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git reset --hard HEAD'));
+
+      expect(decision).toBeUndefined();
+    });
+
+    it.each<[string, () => ResolvedToolExecutionHookContext]>([
+      ['a non-Bash tool', () => hookContext([toolCall('Read', 'call_read')])],
+      ['a Bash call with no command', () => ({ ...bashHookContext('noop'), args: {} })],
+      ['a Bash call with non-object args', () => ({ ...bashHookContext('noop'), args: 'nope' })],
+      ['a Bash call with null args', () => ({ ...bashHookContext('noop'), args: null })],
+      [
+        'a Bash call with a non-string command',
+        () => ({ ...bashHookContext('noop'), args: { command: 42 } }),
+      ],
+    ])('abstains for %s', async (_label, build) => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(build());
+
+      expect(decision).toBeUndefined();
+      expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('still guards a tower-owned workspace when the tower flag is off', async () => {
+      expect.assertions(1);
+      towerFlagOn = false;
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('rm -rf .tower/comms'));
+
+      expect(decision?.veto?.output).toContain('`rm` is not allowed on tower protocol paths');
     });
   });
 
