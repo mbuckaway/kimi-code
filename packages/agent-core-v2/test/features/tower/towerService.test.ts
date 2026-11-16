@@ -2025,7 +2025,7 @@ describe('TowerModeInjection', () => {
 
     const text = lastTowerReminder(context);
     expect(text).toContain('Tower mode still active');
-    expect(text).toContain('see full instructions earlier');
+    expect(text).toContain('never create or edit protocol artifacts under `.tower/comms/` by hand');
   });
 
   it('refreshes the full reminder after the long assistant-turn threshold', async () => {
