@@ -2276,7 +2276,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
         );
       }
     } else {
-      tower.exit();
+      await tower.exit();
     }
     await agent.accessor.get(IAgentLifecycleService).resolve(agentContextOf(agent), AgentReminder).reconcileWhenIdle('tower_mode');
   }

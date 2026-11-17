@@ -750,6 +750,7 @@ describe('server-v2 /api/v1/sessions', () => {
   });
 
   it('rejects tower_mode agent_config when the tower feature is unavailable', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_TOWER', '0');
     const cwd = home as string;
     const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
     const id = created.body.data.id;
