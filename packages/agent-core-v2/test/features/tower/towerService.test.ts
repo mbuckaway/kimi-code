@@ -1,15 +1,23 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
+import { IBashParserService } from '#/app/bashParser/bashParser';
+import { BashParserService } from '#/app/bashParser/bashParserService';
+
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
+import type { ISessionScopeHandle } from '#/_base/di/scope';
 import { TestInstantiationService } from '#/_base/di/test';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { TaskTerminatedNotice } from '#/agent/task/taskOps';
+import { SubagentStarted } from '#/session/subagent/mirrorAgentRun';
+import { ISessionActivityView } from '#/session/sessionActivity/sessionActivity';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { createReminderStub, lifecycleWithReminder } from '../reminder/stubs';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
@@ -23,11 +31,29 @@ import type {
   BeforeExecuteDecision,
   ResolvedToolExecutionHookContext,
 } from '#/agent/toolExecutor/toolHooks';
-import { TowerStore } from '#/features/tower/protocol/index';
-import { IAgentTowerService, TOWER_FLAG_ID } from '#/features/tower/tower';
+import {
+  TowerProtocolError,
+  TowerStore,
+  type TowerRosterEntry,
+} from '#/features/tower/protocol/index';
+import {
+  IAgentTowerService,
+  TOWER_FLAG_ID,
+  TOWER_TOOL_NAMES,
+  TOWER_WORKER_PROFILE,
+  hasPinnedPermissionMode,
+  towerEnterFailureMessage,
+  type TowerExitReason,
+} from '#/features/tower/tower';
+import {
+  TOWER_BASH_GUARD_PARSE_OPTIONS,
+  analyzeTowerBashCommand,
+  commandNeedsTowerGuard,
+  towerWorkspaceOwned,
+} from '#/features/tower/bashGuard';
 import { _setTowerFeatureAssembledForTests } from '#/features/tower/towerFeature';
 import { AgentTowerService, TOWER_MODE_TOOLS } from '#/features/tower/towerService';
-import { towerKey } from '#/features/tower/towerOps';
+import { TowerInboxSent, towerKey } from '#/features/tower/towerOps';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
 import { makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -43,6 +69,7 @@ import { InMemoryStorageService } from '#/persistence/backends/memory/inMemorySt
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { ToolAccesses } from '#/tool/toolContract';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 
@@ -66,6 +93,61 @@ async function initGitRepo(repo: string): Promise<void> {
   await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.email', 'tower-test@example.com'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.name', 'Tower Test'], { cwd: repo });
+}
+
+async function makeTowerRepo(): Promise<string> {
+  const repo = await mkdtemp(join(tmpdir(), 'tower-enter-'));
+  await initGitRepo(repo);
+  await writeFile(join(repo, 'README.md'), '# fixture\n');
+  await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+  await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
+  return repo;
+}
+
+function ownerSessionHandle(input: {
+  readonly busy: boolean;
+  readonly title?: string;
+  readonly onExit?: (reason: string) => void;
+}): ISessionScopeHandle {
+  const activity = {
+    _serviceBrand: undefined,
+    state: () => ({ busy: input.busy, mainTurnActive: input.busy, pendingInteraction: 'none' }),
+    onDidChange: () => ({ dispose: () => {} }),
+  };
+  const metadata = {
+    read: async () => ({
+      id: 'session-original',
+      title: input.title,
+      createdAt: 0,
+      updatedAt: 0,
+      archived: false,
+    }),
+  };
+  const ownerTower = {
+    exit: async (reason?: TowerExitReason) => {
+      input.onExit?.(reason ?? 'user');
+    },
+  };
+  const mainHandle = {
+    accessor: { get: (id: unknown) => (id === IAgentTowerService ? ownerTower : undefined) },
+  };
+  const lifecycle = {
+    handleOf: (agentId: string) => (agentId === 'main' ? mainHandle : undefined),
+  };
+  const accessor = {
+    get: (id: unknown) => {
+      if (id === ISessionActivityView) return activity;
+      if (id === ISessionMetadata) return metadata;
+      if (id === IAgentLifecycleService) return lifecycle;
+      return undefined;
+    },
+  };
+  return {
+    id: 'session-original',
+    kind: 'session',
+    accessor,
+    dispose: () => {},
+  } as unknown as ISessionScopeHandle;
 }
 
 _setTowerFeatureAssembledForTests(true);
@@ -118,6 +200,30 @@ function writeHookContext(toolName: string, paths: readonly string[]): ResolvedT
       accesses: paths.flatMap((path) => ToolAccesses.writeFile(path)),
       execute: async () => ({ output: '' }),
     },
+  };
+}
+
+function bashHookContext(command: string, cwd?: string): ResolvedToolExecutionHookContext {
+  const call = toolCall('Bash', 'call_bash');
+  return {
+    turnId: 0,
+    signal,
+    toolCall: call,
+    toolCalls: [call],
+    args: cwd === undefined ? { command } : { command, cwd },
+    execution: { approvalRule: 'Bash', execute: async () => ({ output: '' }) },
+  };
+}
+
+function workspaceContextStub(workDir: string): ISessionWorkspaceContext {
+  const root = resolve(workDir);
+  return {
+    _serviceBrand: undefined,
+    workDir: root,
+    additionalDirs: [],
+    resolve: (path: string) => (isAbsolute(path) ? resolve(path) : resolve(root, path)),
+    isWithin: (absPath: string) => absPath.startsWith(root),
+    assertAllowed: (absPath: string) => absPath,
   };
 }
 
@@ -180,6 +286,8 @@ describe('AgentTowerService', () => {
       get: () => [],
     } as unknown as IAgentContextMemoryService);
     ix.stub(ISessionContext, { cwd: '/nonexistent-tower-repo' } as unknown as ISessionContext);
+    ix.stub(ISessionWorkspaceContext, workspaceContextStub('/nonexistent-tower-repo'));
+    ix.stub(IBashParserService, new BashParserService());
     registerTestAgentWire(ix, testWireScope('wire', 'tower-test'), {
       log: ix.get(IAppendLogStore),
       eventBus: ix.get(IEventBus),
@@ -213,9 +321,9 @@ describe('AgentTowerService', () => {
     );
 
     expect(tower.isActive).toBe(false);
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: true });
     expect(tower.isActive).toBe(true);
-    tower.exit();
+    await tower.exit();
     expect(tower.isActive).toBe(false);
 
     expect(events).toEqual([
@@ -235,10 +343,10 @@ describe('AgentTowerService', () => {
       }),
     );
 
-    tower.exit();
+    await tower.exit();
     expect(tower.isActive).toBe(false);
-    await tower.enter();
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: true });
+    await expect(tower.enter()).resolves.toEqual({ entered: true });
     expect(tower.isActive).toBe(true);
 
     expect(events).toEqual([{ type: 'agent.status.updated', towerMode: true }]);
@@ -378,7 +486,7 @@ describe('AgentTowerService', () => {
     expect(formatDenyMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('enter() is a no-op while the tower flag is off', async () => {
+  it('enter() returns experiment-off while the tower flag is off', async () => {
     towerFlagOn = false;
     const tower = ix.get(IAgentTowerService);
     const events: { readonly type: string }[] = [];
@@ -388,18 +496,21 @@ describe('AgentTowerService', () => {
       }),
     );
 
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: false, reason: 'experiment-off' });
 
     expect(tower.isActive).toBe(false);
     expect(events).toEqual([]);
   });
 
-  it('enter() is a no-op until the feature is assembled — a live flag flip needs a restart', async () => {
+  it('enter() returns feature-not-assembled until the feature is assembled — a live flag flip needs a restart', async () => {
     _setTowerFeatureAssembledForTests(false);
     try {
       const tower = ix.get(IAgentTowerService);
 
-      await tower.enter();
+      await expect(tower.enter()).resolves.toEqual({
+        entered: false,
+        reason: 'feature-not-assembled',
+      });
 
       expect(tower.isActive).toBe(false);
       expect(addedTools).toEqual([]);
@@ -465,44 +576,149 @@ describe('AgentTowerService', () => {
     expect(events).toContainEqual({ type: 'agent.status.updated', towerMode: true });
   });
 
-  it('enter() is a no-op while a foreign session owns the tower in this process', async () => {
-    const repo = await mkdtemp(join(tmpdir(), 'tower-enter-foreign-'));
+  it('enter() reports the live owner while a foreign session is busy with the tower', async () => {
+    const repo = await makeTowerRepo();
     try {
-      await initGitRepo(repo);
-      await writeFile(join(repo, 'README.md'), '# fixture\n');
-      await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
       await new TowerStore(repo).init('session-original');
 
+      let ownerExited = false;
       liveSessionIds = ['session-original'];
+      ix.stub(ISessionManager, {
+        get: (id: string) =>
+          id === 'session-original'
+            ? ownerSessionHandle({
+                busy: true,
+                title: 'Main session',
+                onExit: () => {
+                  ownerExited = true;
+                },
+              })
+            : undefined,
+      } as unknown as ISessionManager);
       ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
       const tower = ix.get(IAgentTowerService);
 
-      await tower.enter();
+      await expect(tower.enter()).resolves.toEqual({
+        entered: false,
+        reason: 'owned-by-live-session',
+        owner: 'session-original',
+        ownerTitle: 'Main session',
+      });
 
       expect(tower.isActive).toBe(false);
       expect(addedTools).toEqual([]);
+      expect(ownerExited).toBe(false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('enter() takes the tower over from an idle live session', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await new TowerStore(repo).init('session-original');
+
+      const exitReasons: string[] = [];
+      liveSessionIds = ['session-original'];
+      ix.stub(ISessionManager, {
+        get: (id: string) =>
+          id === 'session-original'
+            ? ownerSessionHandle({
+                busy: false,
+                onExit: (reason) => {
+                  exitReasons.push(reason);
+                },
+              })
+            : undefined,
+      } as unknown as ISessionManager);
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter()).resolves.toEqual({ entered: true });
+
+      expect(exitReasons).toEqual(['takeover']);
+      expect(tower.isActive).toBe(true);
+      expect((await new TowerStore(repo).load()).sessionId).toBe('session-fork');
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
   });
 
   it('enter() adopts the tower once the owning session is gone — TowerInit stays reachable', async () => {
-    const repo = await mkdtemp(join(tmpdir(), 'tower-enter-stale-'));
+    const repo = await makeTowerRepo();
     try {
-      await initGitRepo(repo);
-      await writeFile(join(repo, 'README.md'), '# fixture\n');
-      await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
-      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
       await new TowerStore(repo).init('session-original');
 
       ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
       const tower = ix.get(IAgentTowerService);
 
-      await tower.enter();
+      await expect(tower.enter()).resolves.toEqual({ entered: true });
 
       expect(tower.isActive).toBe(true);
       expect(addedTools).toEqual([...TOWER_MODE_TOOLS]);
+      expect((await new TowerStore(repo).load()).sessionId).toBe('session-fork');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('enter(base) initializes the tower on an existing local base branch', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await execFileAsync('git', ['branch', 'release'], { cwd: repo });
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter('release')).resolves.toEqual({ entered: true });
+
+      const state = await new TowerStore(repo).load();
+      expect(state.base).toBe('release');
+      expect(state.sessionId).toBe('session-fork');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('enter(base) creates the base branch and snapshots a dirty checkout onto it', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await new TowerStore(repo).init('session-original');
+      await writeFile(join(repo, 'dirty.txt'), 'wip\n');
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter('release')).resolves.toEqual({ entered: true });
+
+      const { stdout: branch } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: repo,
+      });
+      const { stdout: head } = await execFileAsync(
+        'git',
+        ['show', '--name-only', '--pretty=%s', 'HEAD'],
+        { cwd: repo },
+      );
+      expect(branch.trim()).toBe('release');
+      expect(head).toContain('tower: snapshot of uncommitted base checkout changes');
+      expect(head).toContain('dirty.txt');
+      expect((await new TowerStore(repo).load()).base).toBe('release');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('exit releases tower ownership so a later session can adopt it', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await new TowerStore(repo).init('session-fork');
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.enter()).resolves.toEqual({ entered: true });
+      expect((await new TowerStore(repo).load()).sessionId).toBe('session-fork');
+
+      await tower.exit('user');
+
+      expect((await new TowerStore(repo).load()).sessionId).toBeUndefined();
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
@@ -529,7 +745,7 @@ describe('AgentTowerService', () => {
     expect(addedTools).toEqual([...TOWER_MODE_TOOLS]);
     expect(removedTools).toEqual([]);
 
-    tower.exit();
+    await tower.exit();
     expect(removedTools).toEqual([]);
   });
 
@@ -540,12 +756,12 @@ describe('AgentTowerService', () => {
     );
     const tower = ix.get(IAgentTowerService);
 
-    await tower.enter();
+    await expect(tower.enter()).resolves.toEqual({ entered: false, reason: 'not-main-agent' });
 
     expect(tower.isActive).toBe(false);
     expect(addedTools).toEqual([]);
 
-    tower.exit();
+    await tower.exit();
     expect(removedTools).toEqual([]);
   });
 
@@ -624,7 +840,7 @@ describe('AgentTowerService', () => {
     towerFlagOn = false;
     expect(tower.isActive).toBe(false);
 
-    tower.exit();
+    await tower.exit();
 
     towerFlagOn = true;
     expect(tower.isActive).toBe(false);
@@ -1341,6 +1557,348 @@ describe('AgentTowerService', () => {
       expect(formatDenyMessage).not.toHaveBeenCalled();
     });
   });
+
+  describe('tower bash guard wiring', () => {
+    let repo: string;
+    let parser: BashParserService;
+    let stateFile: string;
+
+    async function git(cwd: string, ...args: string[]): Promise<void> {
+      await execFileAsync('git', args, { cwd });
+    }
+
+    async function ownTowerWorkspace(): Promise<void> {
+      await mkdir(dirname(stateFile), { recursive: true });
+      await writeFile(stateFile, JSON.stringify({ sessionId: 'session-tower-owner' }));
+    }
+
+    beforeEach(async () => {
+      repo = await mkdtemp(join(tmpdir(), 'tower-bash-guard-'));
+      await git(repo, 'init', '-b', 'main');
+      await git(repo, 'config', 'user.email', 'tower-test@example.com');
+      await git(repo, 'config', 'user.name', 'Tower Test');
+      await writeFile(join(repo, 'README.md'), '# fixture\n');
+      await git(repo, 'add', 'README.md');
+      await git(repo, 'commit', '-m', 'initial');
+      stateFile = join(repo, '.tower/comms/state.json');
+      parser = new BashParserService();
+      ix.stub(IBashParserService, parser);
+      ix.stub(ISessionContext, { cwd: repo } as unknown as ISessionContext);
+      ix.stub(ISessionWorkspaceContext, workspaceContextStub(repo));
+    });
+
+    afterEach(async () => {
+      await rm(repo, { recursive: true, force: true });
+    });
+
+    it('denies a destructive Bash command in a tower-owned workspace', async () => {
+      expect.assertions(5);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('rm -rf .tower/comms'));
+
+      expect(decision?.veto?.isError).toBe(true);
+      expect(decision?.veto?.output).toContain('`rm` is not allowed on tower protocol paths');
+      expect(permissionGateRan).toBe(false);
+      expect(formatDenyMessage).toHaveBeenCalledWith(
+        expect.stringContaining('`rm` is not allowed on tower protocol paths'),
+      );
+      expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('denies git reset --hard at the main checkout root', async () => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git reset --hard HEAD'));
+
+      expect(decision?.veto?.isError).toBe(true);
+      expect(decision?.veto?.output).toContain(
+        '`git reset --hard` is not allowed in the tower main checkout',
+      );
+    });
+
+    it('allows a non-destructive Bash command and never parses it', async () => {
+      expect.assertions(4);
+      await ownTowerWorkspace();
+      const parse = vi.spyOn(parser, 'parse');
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git status'));
+
+      expect(decision).toBeUndefined();
+      expect(permissionGateRan).toBe(true);
+      expect(parse).not.toHaveBeenCalled();
+      expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps the guard inert when the workspace is not tower-owned', async () => {
+      expect.assertions(3);
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('rm -rf .tower'));
+
+      expect(decision).toBeUndefined();
+      expect(permissionGateRan).toBe(true);
+      expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps the guard inert when the state file carries no session id', async () => {
+      expect.assertions(1);
+      await mkdir(dirname(stateFile), { recursive: true });
+      await writeFile(stateFile, JSON.stringify({ sessionId: '' }));
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git reset --hard HEAD'));
+
+      expect(decision).toBeUndefined();
+    });
+
+    it('resolves a relative cwd argument through the session workspace', async () => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const insideWorktree = await fire(
+        bashHookContext('git reset --hard HEAD', join('.tower', 'worktrees', 'M1')),
+      );
+      expect(insideWorktree).toBeUndefined();
+
+      const insideMainCheckout = await fire(bashHookContext('git reset --hard HEAD', 'src'));
+      expect(insideMainCheckout?.veto?.output).toContain('`git reset --hard` is not allowed');
+    });
+
+    it('resolves an absolute cwd argument as-is', async () => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const insideWorktree = await fire(
+        bashHookContext('git reset --hard HEAD', join(repo, '.tower/worktrees/M1')),
+      );
+      expect(insideWorktree).toBeUndefined();
+
+      const atMainCheckout = await fire(bashHookContext('git reset --hard HEAD', repo));
+      expect(atMainCheckout?.veto?.output).toContain('`git reset --hard` is not allowed');
+    });
+
+    it('defaults the analysis cwd to the workspace working directory, not the session cwd', async () => {
+      expect.assertions(1);
+      await ownTowerWorkspace();
+      ix.stub(
+        ISessionWorkspaceContext,
+        workspaceContextStub(join(repo, '.tower/worktrees/M1')),
+      );
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('git reset --hard HEAD'));
+
+      expect(decision).toBeUndefined();
+    });
+
+    it.each<[string, () => ResolvedToolExecutionHookContext]>([
+      ['a non-Bash tool', () => hookContext([toolCall('Read', 'call_read')])],
+      ['a Bash call with no command', () => ({ ...bashHookContext('noop'), args: {} })],
+      ['a Bash call with non-object args', () => ({ ...bashHookContext('noop'), args: 'nope' })],
+      ['a Bash call with null args', () => ({ ...bashHookContext('noop'), args: null })],
+      [
+        'a Bash call with a non-string command',
+        () => ({ ...bashHookContext('noop'), args: { command: 42 } }),
+      ],
+    ])('abstains for %s', async (_label, build) => {
+      expect.assertions(2);
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(build());
+
+      expect(decision).toBeUndefined();
+      expect(formatDenyMessage).not.toHaveBeenCalled();
+    });
+
+    it('still guards a tower-owned workspace when the tower flag is off', async () => {
+      expect.assertions(1);
+      towerFlagOn = false;
+      await ownTowerWorkspace();
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(bashHookContext('rm -rf .tower/comms'));
+
+      expect(decision?.veto?.output).toContain('`rm` is not allowed on tower protocol paths');
+    });
+  });
+
+  describe('branch leases', () => {
+    it('holds the lease while the guarded operation runs and frees it afterwards', async () => {
+      const tower = ix.get(IAgentTowerService);
+      let observed: boolean | undefined;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const run = tower.withBranchLease('tower/M1', async () => {
+        observed = tower.isBranchLeased('tower/M1');
+        await gate;
+        return 'done';
+      });
+
+      expect(tower.isBranchLeased('tower/M1')).toBe(true);
+      expect(tower.isBranchLeased('tower/M2')).toBe(false);
+      await expect(tower.withBranchLease('tower/M1', async () => 'second')).rejects.toThrow(
+        TowerProtocolError,
+      );
+      await expect(tower.withBranchLease('tower/M1', async () => 'second')).rejects.toThrow(
+        /leased by another tower merge\/rebase/,
+      );
+
+      release();
+      await expect(run).resolves.toBe('done');
+      expect(observed).toBe(true);
+      expect(tower.isBranchLeased('tower/M1')).toBe(false);
+    });
+
+    it('frees the lease when the guarded operation throws', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(
+        tower.withBranchLease('tower/M1', async () => {
+          throw new Error('boom');
+        }),
+      ).rejects.toThrow('boom');
+
+      expect(tower.isBranchLeased('tower/M1')).toBe(false);
+    });
+
+    it('does not serialize different mission branches', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      const results = await Promise.all([
+        tower.withBranchLease('tower/M1', async () => 'one'),
+        tower.withBranchLease('tower/M2', async () => 'two'),
+      ]);
+
+      expect(results).toEqual(['one', 'two']);
+    });
+  });
+
+  describe('worker death tracking', () => {
+    let repo: string;
+
+    beforeEach(async () => {
+      repo = await makeTowerRepo();
+      const store = new TowerStore(repo);
+      await store.init('session-test');
+      await store.registerAgent({
+        name: 'w1',
+        agentId: 'agent-w1',
+        sessionId: 'session-test',
+        kind: 'worker',
+        missionId: 'M1',
+        branch: 'tower/M1',
+        worktree: 'M1',
+        spawnedAt: new Date().toISOString(),
+      });
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-test' } as unknown as ISessionContext);
+      await ix.get(IAgentTowerService).enter();
+    });
+
+    afterEach(async () => {
+      await rm(repo, { recursive: true, force: true });
+    });
+
+    async function rosterEntry(): Promise<TowerRosterEntry | undefined> {
+      const state = await new TowerStore(repo).load();
+      return state.roster.agents.find((agent) => agent.agentId === 'agent-w1');
+    }
+
+    it('markAgentDied writes the roster fields surfaced by status', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.markAgentDied('agent-w1', 'failed', 'boom')).resolves.toBe(true);
+
+      const entry = await rosterEntry();
+      expect(entry?.deathStatus).toBe('failed');
+      expect(entry?.deathReason).toBe('boom');
+      expect(entry?.diedAt).toBeDefined();
+    });
+
+    it('markAgentDied ignores an agent outside the roster', async () => {
+      const tower = ix.get(IAgentTowerService);
+
+      await expect(tower.markAgentDied('agent-ghost', 'failed', 'boom')).resolves.toBe(false);
+    });
+
+    it('clearAgentDied revives the roster entry', async () => {
+      const tower = ix.get(IAgentTowerService);
+      await tower.markAgentDied('agent-w1', 'failed', 'boom');
+
+      await expect(tower.clearAgentDied('agent-w1')).resolves.toBe(true);
+
+      const entry = await rosterEntry();
+      expect(entry?.diedAt).toBeUndefined();
+      expect(entry?.deathStatus).toBeUndefined();
+    });
+
+    it('marks the roster agent died when its background task terminates abnormally', async () => {
+      publishAsMain(
+        ix,
+        new TaskTerminatedNotice({
+          agentId: 'main',
+          info: {
+            kind: 'agent',
+            taskId: 'task-1',
+            agentId: 'agent-w1',
+            description: 'worker',
+            status: 'failed',
+            startedAt: 0,
+            endedAt: 1,
+            stopReason: 'kaput',
+          },
+        }),
+      );
+
+      await vi.waitFor(async () => {
+        const entry = await rosterEntry();
+        expect(entry?.deathStatus).toBe('failed');
+        expect(entry?.deathReason).toBe('kaput');
+      });
+    });
+
+    it('ignores a completed task termination', async () => {
+      publishAsMain(
+        ix,
+        new TaskTerminatedNotice({
+          agentId: 'main',
+          info: {
+            kind: 'agent',
+            taskId: 'task-1',
+            agentId: 'agent-w1',
+            description: 'worker',
+            status: 'completed',
+            startedAt: 0,
+            endedAt: 1,
+          },
+        }),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect((await rosterEntry())?.diedAt).toBeUndefined();
+    });
+
+    it('clears the death mark when the subagent starts again', async () => {
+      const tower = ix.get(IAgentTowerService);
+      await tower.markAgentDied('agent-w1', 'failed', 'boom');
+
+      publishAsMain(ix, new SubagentStarted({ subagentId: 'agent-w1' }));
+
+      await vi.waitFor(async () => {
+        expect((await rosterEntry())?.diedAt).toBeUndefined();
+      });
+    });
+  });
 });
 
 async function injectDynamic(ctx: TestAgentContext): Promise<void> {
@@ -1413,7 +1971,7 @@ describe('TowerModeInjection', () => {
     await tower.enter();
 
     await injectDynamic(ctx);
-    tower.exit();
+    await tower.exit();
     await injectDynamic(ctx);
 
     expect(towerReminderMessages(context)).toHaveLength(2);
@@ -1467,7 +2025,7 @@ describe('TowerModeInjection', () => {
 
     const text = lastTowerReminder(context);
     expect(text).toContain('Tower mode still active');
-    expect(text).toContain('see full instructions earlier');
+    expect(text).toContain('never create or edit protocol artifacts under `.tower/comms/` by hand');
   });
 
   it('refreshes the full reminder after the long assistant-turn threshold', async () => {
@@ -1511,7 +2069,7 @@ describe('TowerModeInjection', () => {
     await tower.enter();
 
     await injectDynamic(ctx);
-    tower.exit();
+    await tower.exit();
     await injectDynamic(ctx);
     await injectDynamic(ctx);
 
@@ -1522,5 +2080,141 @@ describe('TowerModeInjection', () => {
 
     expect(towerReminderMessages(context)).toHaveLength(3);
     expect(lastTowerReminder(context)).toContain('Tower mode is active');
+  });
+});
+
+describe('tower mode API helpers', () => {
+  it('lists TowerRebase among the tower tool names', () => {
+    expect(TOWER_TOOL_NAMES).toContain('TowerRebase');
+  });
+
+  it('pins the permission mode only for the tower-worker profile', () => {
+    expect(hasPinnedPermissionMode(TOWER_WORKER_PROFILE)).toBe(true);
+    expect(hasPinnedPermissionMode('coder')).toBe(false);
+    expect(hasPinnedPermissionMode(undefined)).toBe(false);
+  });
+
+  it('describes every enter failure', () => {
+    expect(towerEnterFailureMessage({ entered: false, reason: 'not-main-agent' })).toBe(
+      'tower mode is only supported by the main agent',
+    );
+    expect(towerEnterFailureMessage({ entered: false, reason: 'experiment-off' })).toContain(
+      'KIMI_CODE_EXPERIMENTAL_TOWER=1',
+    );
+    expect(towerEnterFailureMessage({ entered: false, reason: 'feature-not-assembled' })).toContain(
+      'restart is required',
+    );
+    expect(
+      towerEnterFailureMessage({ entered: false, reason: 'owned-by-live-session', owner: 'sess-1' }),
+    ).toBe('another live session owns the workspace tower (session sess-1)');
+    expect(
+      towerEnterFailureMessage({
+        entered: false,
+        reason: 'owned-by-live-session',
+        owner: 'sess-1',
+        ownerTitle: 'Main session',
+      }),
+    ).toBe('another live session owns the workspace tower (session Main session (sess-1))');
+  });
+});
+
+describe('TowerInboxSent', () => {
+  it('declares an observable event carrying the inbox message metadata', () => {
+    const event = new TowerInboxSent({
+      from: 'tower',
+      to: 'w1',
+      subject: 'review done',
+      messageId: 'msg-1',
+      file: '.tower/comms/inbox/msg-1.md',
+      sentAt: '2026-01-01T00:00:00.000Z',
+      missionId: 'M1',
+    });
+
+    expect(event.type).toBe('tower.inbox.sent');
+    expect(TowerInboxSent.observable).toBe(true);
+    expect(TowerInboxSent.durable).toBe(false);
+    expect(event.messageId).toBe('msg-1');
+    expect(event.missionId).toBe('M1');
+    expect(event.serialize()).toMatchObject({
+      type: 'tower.inbox.sent',
+      from: 'tower',
+      to: 'w1',
+      subject: 'review done',
+    });
+  });
+});
+
+describe('tower bash guard', () => {
+  const parser = new BashParserService();
+  const parse = (source: string) => parser.parse(source, TOWER_BASH_GUARD_PARSE_OPTIONS);
+  let mainCheckout: string;
+
+  beforeEach(async () => {
+    mainCheckout = await mkdtemp(join(tmpdir(), 'tower-guard-test-'));
+  });
+
+  afterEach(async () => {
+    await rm(mainCheckout, { recursive: true, force: true });
+  });
+
+  const analyze = (command: string, cwd = mainCheckout): string | undefined =>
+    analyzeTowerBashCommand({ command, cwd, mainCheckout }, parse);
+
+  it.each([
+    ['ls -la', false],
+    ['git status', false],
+    ['git clean -fdx', true],
+    ['git reset --hard HEAD', true],
+    ['rm -rf build', true],
+  ])('commandNeedsTowerGuard(%s) is %s', (command, expected) => {
+    expect(commandNeedsTowerGuard(command)).toBe(expected);
+  });
+
+  it('vetoes git reset --hard in the main checkout but allows it in a mission worktree', () => {
+    expect(analyze('git reset --hard HEAD')).toContain('git reset --hard');
+
+    expect(analyze('git reset --hard HEAD', join(mainCheckout, '.tower/worktrees/M1'))).toBe(
+      undefined,
+    );
+  });
+
+  it('vetoes forced ignored-file clean at the main checkout but not in a worktree or without -x', () => {
+    expect(analyze('git clean -fdx')).toContain('git clean');
+    expect(analyze('git clean -fd')).toBeUndefined();
+    expect(analyze('git clean -fdx', join(mainCheckout, '.tower/worktrees/M1'))).toBeUndefined();
+  });
+
+  it('vetoes recursive removal of the tower root and any removal inside comms', () => {
+    expect(analyze('rm -rf .tower')).toContain('`rm` is not allowed');
+    expect(analyze('rm -f .tower/comms/state.json')).toContain('`rm` is not allowed');
+    expect(analyze('rm -rf .tower/worktrees/M1/build')).toBeUndefined();
+    expect(analyze('rm -f notes.txt')).toBeUndefined();
+  });
+
+  it('looks through privilege wrappers, launch wrappers, and nested shells', () => {
+    expect(analyze('sudo git reset --hard')).toContain('git reset --hard');
+    expect(analyze('env FOO=1 git reset --hard')).toContain('git reset --hard');
+    expect(analyze("bash -c 'git reset --hard'")).toContain('git reset --hard');
+  });
+
+  it('blocks conservatively when the command cannot be analyzed', () => {
+    expect(
+      analyzeTowerBashCommand(
+        { command: 'git reset --hard', cwd: mainCheckout, mainCheckout },
+        () => ({ ok: false, reason: 'aborted' }),
+      ),
+    ).toContain('could not parse');
+  });
+
+  it('treats a state file with a session id as a tower-owned workspace', async () => {
+    const stateFile = join(mainCheckout, '.tower/comms/state.json');
+    await expect(towerWorkspaceOwned(stateFile)).resolves.toBe(false);
+
+    await mkdir(dirname(stateFile), { recursive: true });
+    await writeFile(stateFile, JSON.stringify({ sessionId: 'sess-1' }));
+    await expect(towerWorkspaceOwned(stateFile)).resolves.toBe(true);
+
+    await writeFile(stateFile, JSON.stringify({ sessionId: '' }));
+    await expect(towerWorkspaceOwned(stateFile)).resolves.toBe(false);
   });
 });

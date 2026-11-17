@@ -658,7 +658,7 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 19_813,
+        tokens_before: 24_177,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -1125,7 +1125,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 19_813,
+        tokens_before: 24_177,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1350,7 +1350,7 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 19_813,
+        tokens_before: 24_177,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -1547,7 +1547,7 @@ describe('FullCompaction', () => {
   });
 
   it('auto-compacts very large context in one full-history round when the summarizer accepts it', async () => {
-    const maxContextTokens = 24_000;
+    const maxContextTokens = 32_000;
     const ctx = testAgent();
     ctx.configure({
       provider: CATALOGUED_PROVIDER,

@@ -10,7 +10,7 @@ export const towerFlag: FlagDefinitionInput = {
   description:
     'Enable tower mode: coordinate multiple agents on a shared objective, toggled with the /tower command.',
   env: TOWER_FLAG_ENV,
-  default: false,
+  default: true,
   surface: 'both',
 };
 

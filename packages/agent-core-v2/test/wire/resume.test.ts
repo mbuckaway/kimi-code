@@ -449,7 +449,7 @@ describe('Agent resume', () => {
     expect(ctx.llmInputs()).toMatchInlineSnapshot(`
       call 1:
         system: <system-prompt>
-        tools: Agent, AgentSwarm, AskUserQuestion, Bash, CreateGoal, CronCreate, CronDelete, CronList, Edit, EnterPlanMode, EnterSupermoonMode, ExitPlanMode, ExitSupermoonMode, FetchURL, GetGoal, Glob, Grep, modellist, modelquery, modelset, Read, SetGoalBudget, Skill, TaskList, TaskOutput, TaskStop, TodoList, UpdateGoal, WaitFor, Write
+        tools: Agent, AgentSwarm, AskUserQuestion, Bash, CreateGoal, CronCreate, CronDelete, CronList, Edit, EnterPlanMode, EnterSupermoonMode, ExitPlanMode, ExitSupermoonMode, FetchURL, GetGoal, Glob, Grep, modellist, modelquery, modelset, Read, SetGoalBudget, Skill, TaskList, TaskOutput, TaskStop, TodoList, TowerComplete, TowerFinding, TowerInbox, TowerInit, TowerMerge, TowerMission, TowerPlan, TowerRebase, TowerReview, TowerSend, TowerSpawn, TowerStatus, TowerTeardown, UpdateGoal, WaitFor, Write
         messages:
           user: text "Historical prompt before skill"
           assistant: []  calls call_resume_write:Write { "path": "result.txt" }, call_resume_skill:Skill { "skill": "review" }
