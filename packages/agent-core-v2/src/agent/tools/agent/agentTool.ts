@@ -43,7 +43,13 @@ import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import { AGENT_FLEET_CONTROL_FLAG_ID, AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
-import { isSubagentMeta, subagentLabels, subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
+import {
+  isSubagentMeta,
+  subagentAncestorIds,
+  subagentChildrenIndex,
+  subagentDescendantsChildFirst,
+  subagentLabels,
+} from '#/session/agentLifecycle/subagentMetadata';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
 import { emitAgentRunSpawned, mirrorAgentRun, SubagentStarted } from '#/session/subagent/mirrorAgentRun';
@@ -73,7 +79,6 @@ import {
   ISubagentTool,
   NAME_EXPERIMENTAL_UNAVAILABLE,
   PERSONA_WITH_RESUME_UNAVAILABLE,
-  RESUME_WITH_TYPE_UNAVAILABLE,
   RESUMED_LABEL,
   SUBAGENT_STOPPED_MESSAGE,
   SubagentToolInputSchema,
@@ -309,10 +314,8 @@ export class SubagentTool implements ISubagentTool {
   }
 
   private personaLaunchError(args: SubagentToolInput): string | undefined {
-    const requestedProfileName = args.subagent_type?.length ? args.subagent_type : undefined;
     const resumeAgentId = args.resume?.trim();
     const hasResume = resumeAgentId !== undefined && resumeAgentId.length > 0;
-    if (hasResume && requestedProfileName !== undefined) return RESUME_WITH_TYPE_UNAVAILABLE;
 
     const persona = normalizePersona(args.persona);
     if (persona !== undefined && !this.flags.enabled(AGENT_PERSONA_FLAG_ID)) {
@@ -412,13 +415,19 @@ export class SubagentTool implements ISubagentTool {
     agentId: string,
     target: IAgentScopeHandle,
   ): Promise<void> {
-    const meta = (await this.sessionMetadata.read()).agents?.[agentId];
+    const agents = (await this.sessionMetadata.read()).agents ?? {};
+    const meta = agents[agentId];
     if (!isSubagentMeta(meta)) {
       throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent instance "${agentId}" is not a subagent`, {
         details: { agentId },
       });
     }
-    if (subagentParentAgentId(meta) !== this.callerAgentId) {
+    const reachable =
+      subagentDescendantsChildFirst(this.callerAgentId, subagentChildrenIndex(agents)).includes(
+        agentId,
+      ) ||
+      subagentAncestorIds(this.callerAgentId, agents).includes(agentId);
+    if (!reachable) {
       throw new Error2(
         ErrorCodes.AGENT_NOT_OWNED,
         `Agent instance "${agentId}" does not belong to this parent agent`,
@@ -477,7 +486,10 @@ export class SubagentTool implements ISubagentTool {
           toolCallId,
           runInBackground,
           operation: isResume ? 'resume' : 'spawn',
-          subagentType: requestedProfileName ?? DEFAULT_PROFILE_NAME,
+          subagentType:
+            isResume && resumeAgentId !== undefined
+              ? (this.resumeProfileName(resumeAgentId) ?? RESUMED_LABEL)
+              : (requestedProfileName ?? DEFAULT_PROFILE_NAME),
           resumeAgentId: isResume ? resumeAgentId : undefined,
           error,
         });

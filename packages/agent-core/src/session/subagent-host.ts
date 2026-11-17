@@ -88,9 +88,9 @@ const SUBAGENT_TIMEOUT_ENV = 'KIMI_SUBAGENT_TIMEOUT_MS';
  */
 const MESSAGING_INSTRUCTIONS = [
   'Agent messaging is available.',
-  'Use SendMessage to reach `main`, your parent, or a sibling agent by name or id.',
+  'Use SendMessage to reach `main`, your ancestors, or an agent in your own subtree, by name or id.',
   'Use ListMessages to see the messages you received, newest first, with the id for ReplyMessage.',
-  'Use ReplyMessage to answer the original sender of an inbox message id.',
+  'Use ReplyMessage to answer the original sender of an inbox message id; a reply reaches that origin even outside your subtree.',
   'Use BroadcastMessage to send one message to every agent you can address.',
   'ListAgents lists the addressable agents.',
   'A message from another agent arrives inside an <agent-message> envelope.',
@@ -167,6 +167,36 @@ function appendInboxEntry(
 function subagentParentAgentId(metadata: AgentMeta | undefined): string | undefined {
   const parentAgentId = metadata?.parentAgentId ?? undefined;
   return parentAgentId === 'main' ? undefined : parentAgentId;
+}
+
+/**
+ * Every transitive descendant of an agent, deepest branch first, so a caller
+ * can dismiss or cancel a whole subtree children-before-parents.
+ */
+function descendantAgentIds(
+  agentId: string,
+  children: ReadonlyMap<string, readonly string[]>,
+): readonly string[] {
+  const descendants: string[] = [];
+  const seen = new Set<string>([agentId]);
+  const visit = (id: string): void => {
+    for (const childId of children.get(id) ?? []) {
+      if (seen.has(childId)) continue;
+      seen.add(childId);
+      visit(childId);
+      descendants.push(childId);
+    }
+  };
+  visit(agentId);
+  return descendants;
+}
+
+/** The single unknown-recipient error, listing every name or id the caller can address. */
+function unknownRecipientError(roster: readonly AddressableAgent[], address: string): Error {
+  const known = roster.map((entry) => entry.metadata?.name ?? entry.agentId);
+  return new Error(
+    `Unknown recipient "${address}" — address main, a named child agent, or a known agent id (known: ${known.join(', ')}).`,
+  );
 }
 
 /**
@@ -574,6 +604,14 @@ interface AddressableAgent {
   readonly role: 'main' | 'sub';
 }
 
+/**
+ * How far a recipient lookup may reach. `addressable` restricts raw ids and
+ * live handles to the caller's ancestor chain plus its own subtree; `any`
+ * still resolves any agent the session knows, which the reply path needs so an
+ * inbox origin stays answerable after the tree moves.
+ */
+type RecipientReach = 'addressable' | 'any';
+
 /** A subagent target resolved for a fleet-control operation. */
 interface OwnedAgentTarget {
   readonly agentId: string;
@@ -811,7 +849,10 @@ export class SessionSubagentHost {
     if (metadata?.type !== 'sub') {
       throw new Error(`Agent instance "${agentId}" is not a subagent`);
     }
-    if (metadata.parentAgentId !== this.ownerAgentId) {
+    const reachable =
+      descendantAgentIds(this.ownerAgentId, this.childAgentIndex()).includes(agentId) ||
+      this.ancestorAgentIds(this.ownerAgentId).includes(agentId);
+    if (!reachable) {
       throw new Error(`Agent instance "${agentId}" does not belong to this parent agent`);
     }
     const child = await this.session.ensureAgentResumed(agentId);
@@ -916,11 +957,21 @@ export class SessionSubagentHost {
     signal?: AbortSignal,
     options?: { readonly inReplyTo?: string },
   ): Promise<SendMessageResult> {
+    return this.sendMessageTo(to, message, signal, options?.inReplyTo, 'addressable');
+  }
+
+  private async sendMessageTo(
+    to: string,
+    message: string,
+    signal: AbortSignal | undefined,
+    inReplyTo: string | undefined,
+    reach: RecipientReach,
+  ): Promise<SendMessageResult> {
     signal?.throwIfAborted();
     if (message.trim().length === 0) {
       throw new Error('Cannot send an empty message.');
     }
-    const recipient = this.resolveRecipient(to);
+    const recipient = this.resolveRecipient(to, reach);
     if (recipient.agentId === this.ownerAgentId) {
       throw new Error(`Cannot send a message to yourself ("${recipient.agentId}").`);
     }
@@ -943,7 +994,11 @@ export class SessionSubagentHost {
 
     try {
       const origin = this.agentMessageOrigin();
-      const prompt = wrapAgentMessage(origin, text, options);
+      const prompt = wrapAgentMessage(
+        origin,
+        text,
+        inReplyTo === undefined ? undefined : { inReplyTo },
+      );
       const target = await this.session.ensureAgentResumed(recipient.agentId);
       signal?.throwIfAborted();
 
@@ -1057,9 +1112,7 @@ export class SessionSubagentHost {
     if (original === undefined) {
       throw new Error(`Unknown inbox message "${id}".`);
     }
-    const result = await this.sendMessage(original.from, message, signal, {
-      inReplyTo: original.id,
-    });
+    const result = await this.sendMessageTo(original.from, message, signal, original.id, 'any');
     return { ...result, inReplyTo: original.id };
   }
 
@@ -1115,7 +1168,7 @@ export class SessionSubagentHost {
   }
 
   /**
-   * The root agent, the sender's parent, siblings, and children it can address.
+   * The root agent, the sender's ancestor chain, and every agent in its subtree.
    * The root agent never lists itself.
    */
   listAgents(): readonly AgentRosterEntry[] {
@@ -1146,7 +1199,7 @@ export class SessionSubagentHost {
    */
   async stopAgent(to: string, reason?: string, signal?: AbortSignal): Promise<StopAgentResult> {
     signal?.throwIfAborted();
-    const recipient = this.resolveRecipient(to);
+    const recipient = this.resolveRecipient(to, 'any');
     this.assertStoppable(recipient);
     this.resolveOwnedTarget(recipient.agentId);
     const stopped = this.isAgentRunning(recipient.agentId);
@@ -1169,7 +1222,7 @@ export class SessionSubagentHost {
    */
   async interruptAgent(to: string, signal?: AbortSignal): Promise<InterruptAgentResult> {
     signal?.throwIfAborted();
-    const recipient = this.resolveRecipient(to);
+    const recipient = this.resolveRecipient(to, 'any');
     this.assertStoppable(recipient);
     this.resolveOwnedTarget(recipient.agentId);
     const interrupted =
@@ -1305,11 +1358,14 @@ export class SessionSubagentHost {
   }
 
   /**
-   * Resolve a target the caller owns: one of its own subagents, addressed by id
-   * or by name. `main`, the caller itself, siblings, and other agents' children
-   * are refused.
+   * Resolve a target the caller owns: any agent in its own subtree, addressed by
+   * id or by name. `main`, the caller itself, siblings, cousins, and other
+   * agents' children are refused.
    */
-  private resolveOwnedTarget(target: string): OwnedAgentTarget {
+  private resolveOwnedTarget(
+    target: string,
+    children: ReadonlyMap<string, readonly string[]> = this.childAgentIndex(),
+  ): OwnedAgentTarget {
     const address = target.trim();
     if (address === MAIN_AGENT_ID) {
       throw new Error(`The root agent "${MAIN_AGENT_ID}" is not a subagent.`);
@@ -1317,12 +1373,13 @@ export class SessionSubagentHost {
     if (address === this.ownerAgentId) {
       throw new Error('An agent cannot target itself.');
     }
+    const subtree = new Set(descendantAgentIds(this.ownerAgentId, children));
     const direct = this.agentMetadata(address);
     if (direct !== undefined) {
       if (direct.type === 'main') {
         throw new Error(`Agent "${address}" is not a subagent.`);
       }
-      if (direct.parentAgentId !== this.ownerAgentId) {
+      if (!subtree.has(address)) {
         throw new Error(`Agent "${address}" is not owned by "${this.ownerAgentId}".`);
       }
       return { agentId: address, metadata: direct };
@@ -1330,7 +1387,7 @@ export class SessionSubagentHost {
     const transientParent =
       agentRegistry(this.session).transientSubagents.get(address) ?? undefined;
     if (transientParent !== undefined) {
-      if (transientParent !== this.ownerAgentId) {
+      if (transientParent !== this.ownerAgentId && !subtree.has(transientParent)) {
         throw new Error(`Agent "${address}" is not owned by "${this.ownerAgentId}".`);
       }
       return { agentId: address, metadata: undefined };
@@ -1353,31 +1410,33 @@ export class SessionSubagentHost {
     return { agentId: target.agentId, metadata: target.metadata };
   }
 
-  /** Owned subagents from session metadata, newest id last. */
+  /** Every agent in the owner's subtree, ordered by id. */
   private ownedAgentEntries(): readonly OwnedAgentTarget[] {
-    return Object.entries(this.session.metadata.agents)
-      .filter(
-        ([, metadata]) =>
-          metadata.type === 'sub' && metadata.parentAgentId === this.ownerAgentId,
-      )
-      .toSorted((left, right) => left[0].localeCompare(right[0]))
-      .map(([agentId, metadata]) => ({ agentId, metadata }));
+    return descendantAgentIds(this.ownerAgentId, this.childAgentIndex())
+      .map((agentId) => ({ agentId, metadata: this.agentMetadata(agentId) }))
+      .toSorted((left, right) => left.agentId.localeCompare(right.agentId));
   }
 
   private resolveDismissTargets(targets: DismissAgentsTargets): readonly OwnedAgentTarget[] {
+    const children = this.childAgentIndex();
     const resolved: OwnedAgentTarget[] = [];
     const seen = new Set<string>();
+    const pushSubtree = (target: OwnedAgentTarget): void => {
+      for (const descendantId of descendantAgentIds(target.agentId, children)) {
+        if (seen.has(descendantId)) continue;
+        seen.add(descendantId);
+        resolved.push({ agentId: descendantId, metadata: this.agentMetadata(descendantId) });
+      }
+      if (seen.has(target.agentId)) return;
+      seen.add(target.agentId);
+      resolved.push(target);
+    };
     for (const target of [...(targets.ids ?? []), ...(targets.names ?? [])]) {
-      const entry = this.resolveOwnedTarget(target);
-      if (seen.has(entry.agentId)) continue;
-      seen.add(entry.agentId);
-      resolved.push(entry);
+      pushSubtree(this.resolveOwnedTarget(target, children));
     }
     if (targets.all === true) {
-      for (const entry of this.ownedAgentEntries()) {
-        if (seen.has(entry.agentId)) continue;
-        seen.add(entry.agentId);
-        resolved.push(entry);
+      for (const agentId of children.get(this.ownerAgentId) ?? []) {
+        pushSubtree({ agentId, metadata: this.agentMetadata(agentId) });
       }
     }
     return resolved;
@@ -1404,10 +1463,10 @@ export class SessionSubagentHost {
   }
 
   /**
-   * Everyone the owning agent can address: `main`, its own parent, the root
-   * agent's children, and its own children. The sender is excluded. Name
-   * resolution, the ListAgents tool, and the spawn roster block all read this
-   * list, so the three can never drift.
+   * Everyone the owning agent can address: `main`, its ancestor chain, and every
+   * descendant of the caller (transient side-question children included). The
+   * sender is excluded. Name resolution, the ListAgents tool, and the spawn
+   * roster block all read this list, so the three can never drift.
    */
   private addressableAgents(
     callerAgentId: string = this.ownerAgentId,
@@ -1416,26 +1475,20 @@ export class SessionSubagentHost {
       ['main', { agentId: 'main', metadata: this.agentMetadata('main'), role: 'main' }],
     ]);
 
-    const parentAgentId = this.agentMetadata(callerAgentId)?.parentAgentId ?? null;
-    if (parentAgentId !== null && parentAgentId !== 'main') {
-      byId.set(parentAgentId, {
-        agentId: parentAgentId,
-        metadata: this.agentMetadata(parentAgentId),
+    for (const ancestorId of this.ancestorAgentIds(callerAgentId)) {
+      if (byId.has(ancestorId)) continue;
+      byId.set(ancestorId, {
+        agentId: ancestorId,
+        metadata: this.agentMetadata(ancestorId),
         role: 'sub',
       });
     }
-    for (const [agentId, metadata] of Object.entries(this.session.metadata.agents)) {
-      if (metadata.type !== 'sub') continue;
-      if (metadata.parentAgentId !== 'main' && metadata.parentAgentId !== callerAgentId) {
-        continue;
-      }
-      byId.set(agentId, { agentId, metadata, role: 'sub' });
-    }
-    // Transient side-question children (not persisted to metadata) are still
-    // addressable while they live, so the roster change they cause is visible.
-    for (const [agentId, parentAgentId] of agentRegistry(this.session).transientSubagents) {
-      if (parentAgentId !== 'main' && parentAgentId !== callerAgentId) continue;
-      byId.set(agentId, { agentId, metadata: undefined, role: 'sub' });
+    for (const descendantId of descendantAgentIds(callerAgentId, this.childAgentIndex())) {
+      byId.set(descendantId, {
+        agentId: descendantId,
+        metadata: this.agentMetadata(descendantId),
+        role: 'sub',
+      });
     }
     // The root agent is always addressable; a subagent never lists itself.
     if (callerAgentId !== 'main') byId.delete(callerAgentId);
@@ -1447,13 +1500,66 @@ export class SessionSubagentHost {
     });
   }
 
-  private resolveRecipient(to: string): AgentMessageRecipient {
+  /**
+   * Parent-to-children edges for the whole session tree, from persisted
+   * metadata plus the live transient side-question children.
+   */
+  private childAgentIndex(): ReadonlyMap<string, readonly string[]> {
+    const index = new Map<string, string[]>();
+    const addEdge = (parentAgentId: string | null | undefined, agentId: string): void => {
+      if (parentAgentId === null || parentAgentId === undefined) return;
+      if (parentAgentId === agentId) return;
+      const children = index.get(parentAgentId);
+      if (children === undefined) index.set(parentAgentId, [agentId]);
+      else children.push(agentId);
+    };
+    for (const agentId of Object.keys(this.session.metadata.agents)) {
+      const metadata = this.agentMetadata(agentId);
+      if (metadata?.type !== 'sub') continue;
+      addEdge(metadata.parentAgentId, agentId);
+    }
+    for (const [agentId, parentAgentId] of agentRegistry(this.session).transientSubagents) {
+      addEdge(parentAgentId, agentId);
+    }
+    for (const children of index.values()) {
+      children.sort((left, right) => left.localeCompare(right));
+    }
+    return index;
+  }
+
+  private ancestorAgentIds(callerAgentId: string): readonly string[] {
+    const ancestors: string[] = [];
+    const seen = new Set<string>([callerAgentId]);
+    let current = this.parentAgentIdOf(callerAgentId);
+    while (current !== undefined && !seen.has(current)) {
+      seen.add(current);
+      ancestors.push(current);
+      current = this.parentAgentIdOf(current);
+    }
+    return ancestors;
+  }
+
+  private parentAgentIdOf(agentId: string): string | undefined {
+    const metadataParent = this.agentMetadata(agentId)?.parentAgentId ?? undefined;
+    if (metadataParent !== undefined) return metadataParent;
+    return agentRegistry(this.session).transientSubagents.get(agentId);
+  }
+
+  private resolveRecipient(to: string, reach: RecipientReach): AgentMessageRecipient {
     const address = to.trim();
     if (address === 'main') return { agentId: 'main', label: 'main', role: 'main' };
+
+    const roster = reach === 'addressable' ? this.addressableAgents() : undefined;
+    const assertReachable = (agentId: string): void => {
+      if (roster === undefined || agentId === this.ownerAgentId) return;
+      if (roster.some((entry) => entry.agentId === agentId)) return;
+      throw unknownRecipientError(roster, agentId);
+    };
 
     // Raw agent ids win over names, so a name can never shadow a real id.
     const rawMetadata = this.agentMetadata(address);
     if (rawMetadata !== undefined) {
+      assertReachable(address);
       return {
         agentId: address,
         label: rawMetadata.name ?? address,
@@ -1461,10 +1567,12 @@ export class SessionSubagentHost {
       };
     }
     if (this.session.getReadyAgent?.(address) !== undefined) {
+      assertReachable(address);
       return { agentId: address, label: address, role: 'sub' };
     }
 
-    const named = this.addressableAgents().filter(
+    const known = roster ?? this.addressableAgents();
+    const named = known.filter(
       (entry) => entry.role === 'sub' && entry.metadata?.name === address,
     );
     if (named.length > 1) {
@@ -1477,12 +1585,7 @@ export class SessionSubagentHost {
       return { agentId: onlyMatch.agentId, label: address, role: 'sub' };
     }
 
-    const known = this.addressableAgents().map(
-      (entry) => entry.metadata?.name ?? entry.agentId,
-    );
-    throw new Error(
-      `Unknown recipient "${address}" — address main, a named child agent, or a known agent id (known: ${known.join(', ')}).`,
-    );
+    throw unknownRecipientError(known, address);
   }
 
   /** Own-property metadata lookup; prototype keys are never agents. */
@@ -1647,20 +1750,13 @@ export class SessionSubagentHost {
   }
 
   private emptyRosterText(callerAgentId: string): string {
-    const lines: string[] = [];
-    if (callerAgentId !== 'main') {
-      lines.push(this.rosterLineOf({ agentId: 'main', metadata: undefined, role: 'main' }));
-    }
-    const parentAgentId = this.agentMetadata(callerAgentId)?.parentAgentId ?? null;
-    if (parentAgentId !== null && parentAgentId !== 'main') {
-      lines.push(
-        this.rosterLineOf({
-          agentId: parentAgentId,
-          metadata: this.agentMetadata(parentAgentId),
-          role: 'sub',
-        }),
-      );
-    }
+    // The baseline is the roster with no subagents: main and the caller's full
+    // ancestor chain, matching the non-empty rosterInstructions ordering.
+    const ancestors = new Set(this.ancestorAgentIds(callerAgentId));
+    const lines = this.addressableAgents(callerAgentId)
+      .filter((entry) => entry.agentId !== callerAgentId)
+      .filter((entry) => entry.role === 'main' || ancestors.has(entry.agentId))
+      .map((entry) => this.rosterLineOf(entry));
     return [
       MESSAGING_INSTRUCTIONS,
       '',
@@ -1959,7 +2055,19 @@ export class SessionSubagentHost {
    */
   delegatableSubagents(callerProfileName?: string): Record<string, ResolvedAgentProfile> {
     const owner = this.getOwnerAgent?.() ?? this.session.getReadyAgent(this.ownerAgentId);
-    return this.resolveDelegatableSubagents(callerProfileName, owner?.config.subagentNames);
+    return this.resolveDelegatableSubagents(
+      callerProfileName ?? owner?.config.profileName,
+      owner?.config.subagentNames,
+    );
+  }
+
+  /**
+   * Whether the session has an agent type with this name, ignoring the caller's
+   * delegation allowlist. Lets a tool tell "unknown type" from "not delegatable
+   * for me" so the model does not retry the same value.
+   */
+  subagentTypeExists(profileName: string): boolean {
+    return this.session.agentCatalog.get(profileName) !== undefined;
   }
 
   private resolveDelegatableSubagents(

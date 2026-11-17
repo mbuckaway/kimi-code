@@ -32,6 +32,10 @@ import { IEventDispatcher } from '#/state/eventDispatcher';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import {
   labelsFromAgentMeta,
+  ownMeta,
+  subagentAncestorIds,
+  subagentChildrenIndex,
+  subagentDescendantsChildFirst,
   subagentParentAgentId,
   tagsOf,
 } from '#/session/agentLifecycle/subagentMetadata';
@@ -97,6 +101,8 @@ interface AddressableAgent {
   readonly meta: AgentMeta | undefined;
   readonly role: 'main' | 'sub';
 }
+
+type RecipientReach = 'addressable' | 'any';
 
 export class SessionMessagingService extends Service implements ISessionMessagingService {
   declare readonly _serviceBrand: undefined;
@@ -198,18 +204,14 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     signal?: AbortSignal,
     options?: SendMessageOptions,
   ): Promise<SendMessageResult> {
-    signal?.throwIfAborted();
-    if (message.trim().length === 0) {
-      throw new Error2(ErrorCodes.MESSAGE_EMPTY, 'Cannot send an empty message.');
-    }
-    const recipient = await this.resolveRecipient(callerAgentId, to);
-    if (recipient.agentId === callerAgentId) {
-      throw new Error2(
-        ErrorCodes.MESSAGE_SELF_SEND,
-        `Cannot send a message to yourself ("${recipient.agentId}").`,
-      );
-    }
-    return this.deliverResolved(callerAgentId, recipient, message, signal, options?.inReplyTo);
+    return this.sendMessageTo(
+      callerAgentId,
+      to,
+      message,
+      signal,
+      options?.inReplyTo,
+      'addressable',
+    );
   }
 
   async listMessages(
@@ -252,9 +254,14 @@ export class SessionMessagingService extends Service implements ISessionMessagin
         { details: { messageId: id } },
       );
     }
-    const result = await this.sendMessage(callerAgentId, original.from, message, signal, {
-      inReplyTo: original.id,
-    });
+    const result = await this.sendMessageTo(
+      callerAgentId,
+      original.from,
+      message,
+      signal,
+      original.id,
+      'any',
+    );
     return { ...result, inReplyTo: original.id };
   }
 
@@ -298,7 +305,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     signal?: AbortSignal,
   ): Promise<StopAgentResult> {
     signal?.throwIfAborted();
-    const recipient = await this.resolveRecipient(callerAgentId, to);
+    const recipient = await this.resolveRecipient(callerAgentId, to, 'any');
     this.assertStoppable(callerAgentId, recipient);
     await this.subagents.assertOwned(callerAgentId, recipient.agentId);
     const cancelReason = abortError(stopReasonFor(callerAgentId, reason));
@@ -336,7 +343,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     signal?: AbortSignal,
   ): Promise<InterruptAgentResult> {
     signal?.throwIfAborted();
-    const recipient = await this.resolveRecipient(callerAgentId, to);
+    const recipient = await this.resolveRecipient(callerAgentId, to, 'any');
     this.assertStoppable(callerAgentId, recipient);
     await this.subagents.assertOwned(callerAgentId, recipient.agentId);
     const handle = this.agentLifecycle.handleOf(recipient.agentId);
@@ -746,17 +753,48 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     };
   }
 
+  private async sendMessageTo(
+    callerAgentId: string,
+    to: string,
+    message: string,
+    signal: AbortSignal | undefined,
+    inReplyTo: string | undefined,
+    reach: RecipientReach,
+  ): Promise<SendMessageResult> {
+    signal?.throwIfAborted();
+    if (message.trim().length === 0) {
+      throw new Error2(ErrorCodes.MESSAGE_EMPTY, 'Cannot send an empty message.');
+    }
+    const recipient = await this.resolveRecipient(callerAgentId, to, reach);
+    if (recipient.agentId === callerAgentId) {
+      throw new Error2(
+        ErrorCodes.MESSAGE_SELF_SEND,
+        `Cannot send a message to yourself ("${recipient.agentId}").`,
+      );
+    }
+    return this.deliverResolved(callerAgentId, recipient, message, signal, inReplyTo);
+  }
+
   private async resolveRecipient(
     callerAgentId: string,
     to: string,
+    reach: RecipientReach,
   ): Promise<AgentMessageRecipient> {
     const address = to.trim();
     if (address === MAIN_AGENT_ID) {
       return { agentId: MAIN_AGENT_ID, label: MAIN_AGENT_ID, role: 'main' };
     }
     const agents = await this.agentMetadata();
-    const raw = ownEntry(agents, address);
+    const roster =
+      reach === 'addressable' ? await this.addressableAgents(callerAgentId, agents) : undefined;
+    const assertReachable = (agentId: string): void => {
+      if (roster === undefined || agentId === callerAgentId) return;
+      if (roster.some((entry) => entry.agentId === agentId)) return;
+      throw unknownRecipientError(roster, agentId);
+    };
+    const raw = ownMeta(agents, address);
     if (raw !== undefined) {
+      assertReachable(address);
       return {
         agentId: address,
         label: agentNameOf(raw) ?? address,
@@ -764,13 +802,14 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       };
     }
     if (this.agentLifecycle.handleOf(address) !== undefined) {
+      assertReachable(address);
       return { agentId: address, label: address, role: 'sub' };
     }
-    if (address === agentNameOf(ownEntry(agents, callerAgentId))) {
+    if (address === agentNameOf(ownMeta(agents, callerAgentId))) {
       return { agentId: callerAgentId, label: address, role: 'sub' };
     }
-    const roster = await this.addressableAgents(callerAgentId, agents);
-    const named = roster.filter(
+    const known = roster ?? (await this.addressableAgents(callerAgentId, agents));
+    const named = known.filter(
       (entry) => entry.role === 'sub' && agentNameOf(entry.meta) === address,
     );
     if (named.length > 1) {
@@ -783,11 +822,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     if (onlyMatch !== undefined) {
       return { agentId: onlyMatch.agentId, label: address, role: 'sub' };
     }
-    const known = roster.map((entry) => agentNameOf(entry.meta) ?? entry.agentId);
-    throw new Error2(
-      ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN,
-      `Unknown recipient "${address}" — address main, a named child agent, or a known agent id (known: ${known.join(', ')}).`,
-    );
+    throw unknownRecipientError(known, address);
   }
 
   private async addressableAgents(
@@ -798,22 +833,24 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     const byId = new Map<string, AddressableAgent>([
       [
         MAIN_AGENT_ID,
-        { agentId: MAIN_AGENT_ID, meta: ownEntry(agents, MAIN_AGENT_ID), role: 'main' },
+        { agentId: MAIN_AGENT_ID, meta: ownMeta(agents, MAIN_AGENT_ID), role: 'main' },
       ],
     ]);
-    const parentAgentId = subagentParentAgentId(ownEntry(agents, callerAgentId));
-    if (parentAgentId !== undefined && parentAgentId !== MAIN_AGENT_ID) {
-      byId.set(parentAgentId, {
-        agentId: parentAgentId,
-        meta: ownEntry(agents, parentAgentId),
+    for (const ancestorId of subagentAncestorIds(callerAgentId, agents)) {
+      if (ancestorId === MAIN_AGENT_ID || byId.has(ancestorId)) continue;
+      byId.set(ancestorId, {
+        agentId: ancestorId,
+        meta: ownMeta(agents, ancestorId),
         role: 'sub',
       });
     }
-    for (const [agentId, meta] of Object.entries(agents)) {
-      if (meta.type !== 'sub') continue;
-      const parent = subagentParentAgentId(meta);
-      if (parent !== MAIN_AGENT_ID && parent !== callerAgentId) continue;
-      byId.set(agentId, { agentId, meta, role: 'sub' });
+    const children = subagentChildrenIndex(agents);
+    for (const descendantId of subagentDescendantsChildFirst(callerAgentId, children)) {
+      byId.set(descendantId, {
+        agentId: descendantId,
+        meta: ownMeta(agents, descendantId),
+        role: 'sub',
+      });
     }
     if (callerAgentId !== MAIN_AGENT_ID) byId.delete(callerAgentId);
     return [...byId.values()].toSorted((left, right) => {
@@ -827,7 +864,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     agentId: string,
     signal: AbortSignal | undefined,
   ): Promise<IAgentScopeHandle | undefined> {
-    const meta = ownEntry(await this.agentMetadata(), agentId);
+    const meta = ownMeta(await this.agentMetadata(), agentId);
     if (meta === undefined) return this.agentLifecycle.handleOf(agentId);
     await this.awaitDeliveryWindow(
       this.agentLifecycle.create({
@@ -842,7 +879,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   }
 
   private async agentMessageOrigin(callerAgentId: string): Promise<AgentMessageOrigin> {
-    const meta = ownEntry(await this.agentMetadata(), callerAgentId);
+    const meta = ownMeta(await this.agentMetadata(), callerAgentId);
     return { kind: 'agent_message', from: callerAgentId, replyTo: agentNameOf(meta) };
   }
 
@@ -1024,11 +1061,12 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   }
 }
 
-function ownEntry(
-  agents: Readonly<Record<string, AgentMeta>>,
-  agentId: string,
-): AgentMeta | undefined {
-  return Object.hasOwn(agents, agentId) ? agents[agentId] : undefined;
+function unknownRecipientError(roster: readonly AddressableAgent[], address: string): Error2 {
+  const known = roster.map((entry) => agentNameOf(entry.meta) ?? entry.agentId);
+  return new Error2(
+    ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN,
+    `Unknown recipient "${address}" — address main, a named child agent, or a known agent id (known: ${known.join(', ')}).`,
+  );
 }
 
 function broadcastFailureReason(error: unknown): string {

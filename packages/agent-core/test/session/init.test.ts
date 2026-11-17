@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, AgentOptions } from '../../src/agent';
 import { trimTrailingOpenToolExchange } from '../../src/agent/context/projector';
 import type { KimiConfig } from '../../src/config';
+import { ErrorCodes, KimiError } from '../../src/errors';
 import { FlagResolver } from '../../src/flags';
 import { McpOAuthService, type McpOAuthEvent } from '../../src/mcp';
 import { ProviderManager } from '../../src/session/provider-manager';
@@ -67,6 +68,42 @@ describe('Session.init', () => {
     await session.close();
     await mcpOAuth.invalidate('remote', 'https://mcp.example.test/service', 'tokens');
     expect(handle).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the actionable profile-mismatch error naming the bound profile', async () => {
+    const session = new Session({
+      id: 'test-main-profile-selection',
+      kaos: testKaos.withCwd(await makeTempDir()),
+      homedir: await makeTempDir(),
+      rpc: createSessionRpc([]),
+      providerManager: testProviderManager(),
+    });
+    await session.createAgent(
+      { type: 'main', generate: createScriptedGenerate().generate },
+      {
+        profile: {
+          name: 'reviewer',
+          systemPrompt: () => '<system-prompt>',
+          tools: [],
+        },
+      },
+    );
+
+    const rejection = await session.assertMainProfileSelection('agent').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(rejection).toBeInstanceOf(KimiError);
+    expect(rejection).toMatchObject({ code: ErrorCodes.REQUEST_INVALID });
+    expect((rejection as Error).message).toContain(
+      'agent is already bound to profile "reviewer"; cannot switch to "agent" in this session',
+    );
+    expect((rejection as Error).message).toMatch(/spawn a new agent/i);
+    await expect(session.assertMainProfileSelection('reviewer')).resolves.toBeUndefined();
+    await expect(session.assertMainProfileSelection(undefined)).resolves.toBeUndefined();
+
+    await session.close();
   });
 
   it('runs an isolated system-trigger turn and records the latest AGENTS as a system reminder', async () => {

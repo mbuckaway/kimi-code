@@ -29,7 +29,13 @@ import {
 } from '#/_base/errors/unexpectedError';
 import { MAX_STOP_REASON_CHARS } from '#/agent/task/types';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
-import { labelsFromAgentMeta, tagsOf } from '#/session/agentLifecycle/subagentMetadata';
+import {
+  labelsFromAgentMeta,
+  subagentAncestorIds,
+  subagentChildrenIndex,
+  subagentDescendantsChildFirst,
+  tagsOf,
+} from '#/session/agentLifecycle/subagentMetadata';
 import {
   ISessionMetadata,
   type AgentMeta,
@@ -761,35 +767,77 @@ describe('SessionMessagingService roster', () => {
     harness.metadata['agent-5'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
   }
 
-  it('lists main plus its children for the root agent, never main itself', async () => {
+  it('listAgents_main_seesEveryDescendant', async () => {
+    expect.assertions(2);
     seedRoster();
     harness.metadata['agent-4'] = { type: 'sub', labels: { parentAgentId: 'main' } };
     harness.metadata['agent-5'] = { type: 'sub', labels: { parentAgentId: 'agent-3' } };
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-5' } };
 
     const roster = await harness.service.listAgents(MAIN_AGENT_ID);
 
-    expect(roster.map((entry) => entry.agentId)).toEqual(['agent-2', 'agent-3', 'agent-4']);
-    expect(roster.map((entry) => entry.name)).toEqual(['scout', 'builder', undefined]);
+    expect(roster.map((entry) => entry.agentId)).toEqual([
+      'agent-2',
+      'agent-3',
+      'agent-4',
+      'agent-5',
+      'agent-6',
+    ]);
+    expect(roster.map((entry) => entry.name)).toEqual([
+      'scout',
+      'builder',
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 
-  it('lists main, the sender parent, siblings, and the sender children for a subagent', async () => {
+  it('listAgents_subagent_seesAncestorsAndItsOwnSubtreeOnly', async () => {
+    expect.assertions(3);
     seedRoster();
 
     const roster = await harness.service.listAgents('agent-2');
 
     expect(roster.map((entry) => entry.agentId)).toEqual([
       MAIN_AGENT_ID,
-      'agent-3',
       'agent-4',
       'agent-5',
     ]);
     expect(roster[0]?.role).toBe('main');
-    expect(roster.map((entry) => entry.role)).toEqual(['main', 'sub', 'sub', 'sub']);
+    expect(roster.map((entry) => entry.role)).toEqual(['main', 'sub', 'sub']);
+  });
+
+  it('listAgents_subagent_seesEveryGenerationOfItsOwnSubtree', async () => {
+    expect.assertions(1);
+    seedRoster();
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-4' } };
+    harness.metadata['agent-7'] = { type: 'sub', labels: { parentAgentId: 'agent-6' } };
+
+    const roster = await harness.service.listAgents('agent-2');
+
+    expect(roster.map((entry) => entry.agentId)).toEqual([
+      MAIN_AGENT_ID,
+      'agent-4',
+      'agent-5',
+      'agent-6',
+      'agent-7',
+    ]);
+  });
+
+  it('listAgents_subagent_hidesCousinsAndUnrelatedBranches', async () => {
+    expect.assertions(1);
+    seedRoster();
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-3' } };
+    harness.metadata['agent-7'] = { type: 'sub', labels: { parentAgentId: 'agent-8' } };
+
+    const roster = await harness.service.listAgents('agent-4');
+
+    expect(roster.map((entry) => entry.agentId)).toEqual([MAIN_AGENT_ID, 'agent-2']);
   });
 
   it('reports running state from the in-flight launch and the loop', async () => {
     seedRoster();
-    harness.agents.get('agent-3')!.loop.status.mockReturnValue({
+    harness.agents.get('agent-4')!.loop.status.mockReturnValue({
       state: 'running',
       pendingTurnIds: [],
       hasPendingRequests: false,
@@ -797,8 +845,8 @@ describe('SessionMessagingService roster', () => {
 
     const roster = await harness.service.listAgents('agent-2');
 
-    expect(roster.find((entry) => entry.agentId === 'agent-3')?.running).toBe(true);
-    expect(roster.find((entry) => entry.agentId === 'agent-4')?.running).toBe(false);
+    expect(roster.find((entry) => entry.agentId === 'agent-4')?.running).toBe(true);
+    expect(roster.find((entry) => entry.agentId === 'agent-5')?.running).toBe(false);
   });
 
   it('builds roster instructions only while the flag is on', async () => {
@@ -813,21 +861,90 @@ describe('SessionMessagingService roster', () => {
 
     expect(instructions).toContain(MESSAGING_INSTRUCTIONS);
     expect(instructions).toContain('- main (id: main)');
-    expect(instructions).toContain('- builder (id: agent-3)');
     expect(instructions).toContain('- worker (id: agent-4)');
     expect(instructions).toContain('- coder (profile) (id: agent-5)');
     expect(instructions).not.toContain('(id: agent-2)');
+    expect(instructions).not.toContain('(id: agent-3)');
 
     const disabled = createHarness({ flagEnabled: false });
     expect(await disabled.service.rosterInstructions('agent-2')).toBeUndefined();
   });
 
+  it('rosterInstructions_main_includesGrandchildren', async () => {
+    expect.assertions(1);
+    seedRoster();
+    harness.metadata['agent-6'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'agent-4', name: 'deep-worker' },
+    };
+
+    const instructions = await harness.service.rosterInstructions(MAIN_AGENT_ID);
+
+    expect(instructions).toContain('- deep-worker (id: agent-6)');
+  });
+
+  it('listAgents_deepSubagent_keepsEveryAncestorAndHidesUncles', async () => {
+    expect.assertions(1);
+    seedRoster();
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-4' } };
+
+    const roster = await harness.service.listAgents('agent-6');
+
+    expect(roster.map((entry) => entry.agentId)).toEqual([MAIN_AGENT_ID, 'agent-2', 'agent-4']);
+  });
+
   it('includes the sender parent when it is not the root agent', async () => {
+    expect.assertions(1);
     seedRoster();
 
     const roster = await harness.service.listAgents('agent-4');
 
-    expect(roster.map((entry) => entry.agentId)).toEqual([MAIN_AGENT_ID, 'agent-2', 'agent-3']);
+    expect(roster.map((entry) => entry.agentId)).toEqual([MAIN_AGENT_ID, 'agent-2']);
+  });
+
+  it('sendMessage_main_reachesAGrandchildByName', async () => {
+    expect.assertions(2);
+    seedRoster();
+    const deep = harness.addAgent('agent-6', { running: true });
+    harness.metadata['agent-6'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'agent-4', name: 'deep-worker' },
+    };
+
+    const result = await harness.service.sendMessage(MAIN_AGENT_ID, 'deep-worker', 'hello', signal);
+
+    expect(result).toMatchObject({ agentId: 'agent-6', label: 'deep-worker', delivery: 'steered' });
+    expect(deep.loop.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('sendMessage_subagent_reachesItsOwnGrandchildByName', async () => {
+    expect.assertions(1);
+    seedRoster();
+    harness.addAgent('agent-6', { running: true });
+    harness.metadata['agent-6'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'agent-4', name: 'deep-worker' },
+    };
+
+    const result = await harness.service.sendMessage('agent-2', 'deep-worker', 'hello', signal);
+
+    expect(result.agentId).toBe('agent-6');
+  });
+
+  it('sendMessage_subagent_cannotResolveACousinName', async () => {
+    expect.assertions(2);
+    seedRoster();
+    harness.metadata['agent-6'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'agent-3', name: 'cousin' },
+    };
+
+    const error = await harness.service
+      .sendMessage('agent-4', 'cousin', 'hello', signal)
+      .catch((error: unknown) => error);
+
+    expect(isMessagingError(error, ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN)).toBe(true);
+    expect((error as Error).message).toContain('known: main, scout');
   });
 
   it('falls back to the agent id for an addressable agent without a handle or name', async () => {
@@ -839,7 +956,7 @@ describe('SessionMessagingService roster', () => {
   });
 
   it('marks a profile-named agent so it reads differently from an explicit name', async () => {
-    expect.assertions(4);
+    expect.assertions(3);
     seedRoster();
     harness.metadata['agent-4'] = {
       type: 'sub',
@@ -849,7 +966,6 @@ describe('SessionMessagingService roster', () => {
 
     const instructions = await harness.service.rosterInstructions('agent-2');
 
-    expect(instructions).toContain('- builder (id: agent-3)');
     expect(instructions).toContain('- worker (id: agent-4)');
     expect(instructions).toContain('- coder (profile) (id: agent-5)');
     expect(instructions).toContain('- agent-6 (id: agent-6)');
@@ -985,6 +1101,163 @@ describe('SessionMessagingService roster', () => {
     const roster = await harness.service.listAgents(MAIN_AGENT_ID);
 
     expect(roster.find((entry) => entry.agentId === 'agent-2')?.state).toBe('completed');
+  });
+});
+
+describe('SessionMessagingService addressability', () => {
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = createHarness();
+    harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
+    harness.addAgent('agent-2', { profileName: 'coder', running: true });
+    harness.addAgent('agent-3', { profileName: 'explore', running: true });
+    harness.addAgent('agent-4', { profileName: 'coder', running: true });
+    harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'lead' } };
+    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'other' } };
+    harness.metadata['agent-4'] = { type: 'sub', labels: { parentAgentId: 'agent-3', name: 'cousin' } };
+  });
+
+  it('sendMessage_subagent_reachesAnAncestorByRawId', async () => {
+    expect.assertions(2);
+
+    const result = await harness.service.sendMessage('agent-4', 'agent-3', 'hello', signal);
+
+    expect(result).toMatchObject({ agentId: 'agent-3', label: 'other', delivery: 'steered' });
+    expect(harness.agents.get('agent-3')!.loop.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('sendMessage_subagent_rejectsASiblingRawId', async () => {
+    expect.assertions(2);
+
+    const error = await harness.service
+      .sendMessage('agent-3', 'agent-2', 'hello', signal)
+      .catch((error: unknown) => error);
+
+    expect(isMessagingError(error, ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN)).toBe(true);
+    expect((error as Error).message).toBe(
+      'Unknown recipient "agent-2" — address main, a named child agent, or a known agent id (known: main, cousin).',
+    );
+  });
+
+  it('sendMessage_subagent_rejectsACousinRawId', async () => {
+    expect.assertions(2);
+
+    const error = await harness.service
+      .sendMessage('agent-4', 'agent-2', 'hello', signal)
+      .catch((error: unknown) => error);
+
+    expect(isMessagingError(error, ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN)).toBe(true);
+    expect((error as Error).message).toContain('known: main, other');
+  });
+
+  it('sendMessage_subagent_rejectsALiveAgentOutsideItsSubtree', async () => {
+    expect.assertions(2);
+    harness.addAgent('agent-9', { running: true });
+
+    const error = await harness.service
+      .sendMessage('agent-4', 'agent-9', 'hello', signal)
+      .catch((error: unknown) => error);
+
+    expect(isMessagingError(error, ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN)).toBe(true);
+    expect(harness.agents.get('agent-9')!.loop.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('sendMessage_main_reachesADeepDescendantByRawId', async () => {
+    expect.assertions(1);
+
+    const result = await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-4', 'hello', signal);
+
+    expect(result).toMatchObject({ agentId: 'agent-4', delivery: 'steered' });
+  });
+
+  it('broadcastMessage_subagent_reachesOnlyAncestorsAndItsOwnSubtree', async () => {
+    expect.assertions(2);
+
+    const result = await harness.service.broadcastMessage('agent-4', 'hello', signal);
+
+    expect(result.delivered.map((entry) => entry.agentId)).toEqual(['main', 'agent-3']);
+    expect(result.failed).toEqual([]);
+  });
+
+  it('replyMessage_subagent_reachesAnInboxOriginOutsideItsCurrentSubtree', async () => {
+    expect.assertions(2);
+    harness.addAgent('agent-6', { profileName: 'coder', running: true });
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-3' } };
+    await harness.service.sendMessage('agent-3', 'agent-6', 'status?', signal);
+    harness.agents.get('agent-3')!.loop.enqueue.mockClear();
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
+
+    const result = await harness.service.replyMessage('agent-6', 'message-1', 'done', signal);
+
+    expect(result).toMatchObject({
+      agentId: 'agent-3',
+      delivery: 'steered',
+      inReplyTo: 'message-1',
+    });
+    expect(harness.agents.get('agent-3')!.loop.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('sendMessage_subagent_rejectsTheFormerParentAfterAReparent', async () => {
+    expect.assertions(2);
+    harness.addAgent('agent-6', { running: true });
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-3' } };
+    await harness.service.sendMessage('agent-3', 'agent-6', 'status?', signal);
+    harness.metadata['agent-6'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
+
+    const error = await harness.service
+      .sendMessage('agent-6', 'agent-3', 'hello', signal)
+      .catch((error: unknown) => error);
+
+    expect(isMessagingError(error, ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN)).toBe(true);
+    expect((error as Error).message).toContain('known: main, lead');
+  });
+});
+
+describe('agent tree helpers', () => {
+  it('subagentChildrenIndex_groupsByParent_droppingMissingAndSelfParents', () => {
+    const index = subagentChildrenIndex({
+      main: { type: 'main' },
+      'agent-2': { type: 'sub', labels: { parentAgentId: 'main' } },
+      'agent-1': { type: 'sub', labels: { parentAgentId: 'main' } },
+      'agent-3': { type: 'sub', labels: { parentAgentId: 'agent-2' } },
+      'agent-4': { type: 'sub' },
+      'agent-5': { type: 'sub', labels: { parentAgentId: 'agent-5' } },
+    });
+
+    expect([...index.keys()]).toEqual(['main', 'agent-2']);
+    expect(index.get('main')).toEqual(['agent-1', 'agent-2']);
+    expect(index.get('agent-2')).toEqual(['agent-3']);
+  });
+
+  it('subagentDescendantsChildFirst_returnsChildrenBeforeParents_andSkipsCycles', () => {
+    const children = new Map<string, readonly string[]>([
+      ['main', ['agent-2', 'agent-3']],
+      ['agent-2', ['agent-4']],
+      ['agent-4', ['agent-2']],
+    ]);
+
+    expect(subagentDescendantsChildFirst('main', children)).toEqual([
+      'agent-4',
+      'agent-2',
+      'agent-3',
+    ]);
+    expect(subagentDescendantsChildFirst('agent-2', children)).toEqual(['agent-4']);
+  });
+
+  it('subagentAncestorIds_walksToTheRoot_andStopsOnACycle', () => {
+    const tree: Readonly<Record<string, AgentMeta>> = {
+      main: { type: 'main' },
+      'agent-2': { type: 'sub', labels: { parentAgentId: 'main' } },
+      'agent-3': { type: 'sub', labels: { parentAgentId: 'agent-2' } },
+    };
+    const cycle: Readonly<Record<string, AgentMeta>> = {
+      'agent-2': { type: 'sub', labels: { parentAgentId: 'agent-3' } },
+      'agent-3': { type: 'sub', labels: { parentAgentId: 'agent-2' } },
+    };
+
+    expect(subagentAncestorIds('agent-3', tree)).toEqual(['agent-2', 'main']);
+    expect(subagentAncestorIds('agent-2', cycle)).toEqual(['agent-3']);
   });
 });
 
@@ -1371,6 +1644,7 @@ describe('SessionMessagingService delivery', () => {
   it('delivers the same text sent to one target by two different senders', async () => {
     const sub = harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
+    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
     setRunning('agent-2', true);
 
     const fromMain = await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'done', signal);
@@ -1384,6 +1658,7 @@ describe('SessionMessagingService delivery', () => {
   it('collapses only the same sender sending the same text twice', async () => {
     const sub = harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
+    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
     setRunning('agent-2', true);
 
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'done', signal);
@@ -1397,6 +1672,7 @@ describe('SessionMessagingService delivery', () => {
   it('keeps the dedupe cache per sender when two senders race the same text', async () => {
     const sub = harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
+    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
     setRunning('agent-2', true);
 
     const [fromMain, fromOther] = await Promise.all([
@@ -1453,6 +1729,7 @@ describe('SessionMessagingService delivery', () => {
   it('steers, rather than failing, when two senders race for one idle target', async () => {
     const sub = harness.addAgent('agent-2', { profileName: 'coder' });
     harness.metadata['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main' } };
+    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
 
     const first = harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'first', signal);
     await vi.waitFor(() => expect(sub.loop.enqueue).toHaveBeenCalledTimes(1));
@@ -1749,6 +2026,7 @@ describe('SessionMessagingService delivery edge cases', () => {
 
   it('fails the send when the sender no longer exists after the run starts', async () => {
     const sub = addIdleTarget();
+    harness.metadata['ghost-caller'] = { type: 'sub', labels: { parentAgentId: 'agent-2' } };
 
     const sending = harness.service.sendMessage('ghost-caller', 'agent-2', 'go', signal);
     await vi.waitFor(() => expect(sub.loop.enqueue).toHaveBeenCalledTimes(1));
@@ -1781,8 +2059,9 @@ describe('SessionMessagingService delivery edge cases', () => {
     ).rejects.toThrow('Unknown recipient "main".');
   });
 
-  it('resolves a live agent by raw id even without session metadata', async () => {
+  it('resolves a live agent by raw id when it is in the caller subtree', async () => {
     const sub = harness.addAgent('agent-9', { profileName: 'coder', running: true });
+    harness.metadata['agent-9'] = { type: 'sub', labels: { parentAgentId: 'main' } };
 
     const result = await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-9', 'hi', signal);
 
@@ -2788,7 +3067,7 @@ describe('SessionMessagingService inbox', () => {
     expect.assertions(3);
     addTarget({ running: true });
     harness.addAgent('agent-3', { profileName: 'explore', running: true });
-    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'builder' } };
+    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'agent-2', name: 'builder' } };
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'from main', signal);
     await harness.service.sendMessage('agent-3', 'agent-2', 'from builder', signal);
 
@@ -2807,7 +3086,7 @@ describe('SessionMessagingService inbox', () => {
     expect.assertions(1);
     addTarget({ running: true });
     harness.addAgent('agent-3', { profileName: 'explore', running: true });
-    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'builder' } };
+    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'agent-2', name: 'builder' } };
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'from main', signal);
     await harness.service.sendMessage('agent-3', 'agent-2', 'from builder', signal);
 
@@ -2933,34 +3212,44 @@ describe('SessionMessagingService broadcastMessage', () => {
     harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'builder' } };
   }
 
-  it('fans out to main and the addressable siblings with per-recipient delivery', async () => {
+  it('fans out to main and the caller subtree with per-recipient delivery', async () => {
     expect.assertions(4);
     seedBroadcast();
+    harness.addAgent('agent-5', { profileName: 'coder', running: true });
+    harness.metadata['agent-5'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'agent-2', name: 'worker' },
+    };
 
     const result = await harness.service.broadcastMessage('agent-2', 'all hands', signal);
 
     expect(result).toEqual({
       delivered: [
         { agentId: MAIN_AGENT_ID, label: 'main', delivery: 'newTurn' },
-        { agentId: 'agent-3', label: 'builder', delivery: 'steered' },
+        { agentId: 'agent-5', label: 'worker', delivery: 'steered' },
       ],
       failed: [],
     });
     expect(harness.agents.get(MAIN_AGENT_ID)!.loop.enqueue).toHaveBeenCalledTimes(1);
-    expect(harness.agents.get('agent-3')!.loop.enqueue).toHaveBeenCalledTimes(1);
+    expect(harness.agents.get('agent-5')!.loop.enqueue).toHaveBeenCalledTimes(1);
     expect(harness.agents.get('agent-2')!.loop.enqueue).not.toHaveBeenCalled();
   });
 
   it('records each successful delivery in the recipient inbox', async () => {
     expect.assertions(2);
     seedBroadcast();
+    harness.addAgent('agent-5', { profileName: 'coder', running: true });
+    harness.metadata['agent-5'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'agent-2', name: 'worker' },
+    };
 
     await harness.service.broadcastMessage('agent-2', 'all hands', signal);
     const mainInbox = await harness.service.listMessages(MAIN_AGENT_ID);
-    const builderInbox = await harness.service.listMessages('agent-3');
+    const workerInbox = await harness.service.listMessages('agent-5');
 
     expect(mainInbox.messages.map((message) => message.message)).toEqual(['all hands']);
-    expect(builderInbox.messages.map((message) => message.message)).toEqual(['all hands']);
+    expect(workerInbox.messages.map((message) => message.message)).toEqual(['all hands']);
   });
 
   it('returns a per-recipient failure while the others still deliver', async () => {
@@ -3102,13 +3391,16 @@ describe('SessionMessagingService roster sync', () => {
     expect(harness.reminderNotify).not.toHaveBeenCalled();
   });
 
-  it('notifies existing live agents when a new agent appears', async () => {
+  it('notifies existing live agents when a new descendant appears', async () => {
     expect.assertions(2);
     const harness = seedRoster();
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
     harness.reminderNotify.mockClear();
     harness.addAgent('agent-3', { profileName: 'explore' });
-    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'builder' } };
+    harness.metadata['agent-3'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'agent-2', name: 'builder' },
+    };
 
     await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2', 'agent-3']);
 
@@ -4412,7 +4704,9 @@ describe('DismissAgents tool', () => {
   it('dismissAgentsTool_metadata_targetsTheJoinedIds', () => {
     const execution = toolWith(vi.fn()).resolveExecution({ ids: ['agent-2'] });
 
-    expect('execute' in execution && execution.description).toBe('Dismissing agents: agent-2');
+    expect('execute' in execution && execution.description).toBe(
+      'Dismissing agent subtrees: agent-2',
+    );
     expect('execute' in execution && execution.approvalRule).toBe('DismissAgents');
     expect('execute' in execution && execution.accesses).toEqual([]);
     expect('execute' in execution && execution.matchesRule?.('agent-2')).toBe(true);
@@ -4429,14 +4723,18 @@ describe('DismissAgents tool', () => {
   it('dismissAgentsTool_metadata_targetsTheJoinedNames', () => {
     const execution = toolWith(vi.fn()).resolveExecution({ names: ['scout'] });
 
-    expect('execute' in execution && execution.description).toBe('Dismissing agents: scout');
+    expect('execute' in execution && execution.description).toBe(
+      'Dismissing agent subtrees: scout',
+    );
     expect('execute' in execution && execution.matchesRule?.('scout')).toBe(true);
   });
 
-  it('dismissAgentsTool_metadata_targetsAllOwnedAgents', () => {
+  it('dismissAgentsTool_metadata_targetsTheEntireOwnedSubtree', () => {
     const execution = toolWith(vi.fn()).resolveExecution({ all: true });
 
-    expect('execute' in execution && execution.description).toBe('Dismissing all owned agents');
+    expect('execute' in execution && execution.description).toBe(
+      'Dismissing the entire owned agent subtree',
+    );
     expect('execute' in execution && execution.matchesRule?.('all')).toBe(true);
     expect('execute' in execution && execution.matchesRule?.('agent-2')).toBe(false);
   });

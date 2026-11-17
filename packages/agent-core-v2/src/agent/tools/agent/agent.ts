@@ -35,7 +35,7 @@ export const SubagentToolInputSchema = z.preprocess(
       .string()
       .optional()
       .describe(
-        'One of the available agent types (see "Available agent types" in this tool description). Defaults to "coder" when omitted.',
+        'One of the available agent types (see "Available agent types" in this tool description) for a newly spawned agent. Defaults to "coder" when omitted. Ignored when resume is set: a resumed agent keeps its bound type.',
       ),
     persona: z
       .string()
@@ -49,7 +49,7 @@ export const SubagentToolInputSchema = z.preprocess(
       .string()
       .optional()
       .describe(
-        'Optional agent ID to resume instead of creating a new instance. When set, do not also pass subagent_type — the resumed agent keeps its own type, and supplying both is rejected.',
+        'Optional agent ID to resume instead of creating a new instance. The resumed agent keeps its bound profile, model, and type; subagent_type is ignored.',
       ),
     run_in_background: z
       .boolean()
@@ -99,8 +99,6 @@ export type SubagentToolOutput = z.infer<typeof SubagentToolOutputSchema>;
 
 export const BACKGROUND_AGENT_UNAVAILABLE =
   'Background agent execution is not available for this agent because TaskList, TaskOutput, and TaskStop are not enabled.';
-export const RESUME_WITH_TYPE_UNAVAILABLE =
-  'Cannot set subagent_type when resuming an existing agent. Resume by agent id only.';
 export const USER_INTERRUPTED_SUBAGENT_MESSAGE =
   'The subagent was stopped before it finished by user.';
 export const SUBAGENT_STOPPED_MESSAGE = 'The subagent was stopped before it finished.';

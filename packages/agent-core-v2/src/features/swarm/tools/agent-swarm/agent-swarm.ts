@@ -21,6 +21,13 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Subagent type used for every new subagent spawned from items; defaults to coder when omitted. Resumed subagents always keep their original type, so passing subagent_type together with resume_agent_ids is allowed — it only affects the item-based spawns.',
       ),
+    subagent_types: z
+      .array(z.string().trim().min(1))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'One subagent type per new subagent, positionally aligned with items or prompts: pass exactly one type per item or prompt, in the same order. Every entry must be an existing agent type this agent may delegate to; all entries are validated before any subagent starts. Cannot be combined with subagent_type. Resumed subagents keep their existing type.',
+      ),
     prompt_template: z
       .string()
       .trim()

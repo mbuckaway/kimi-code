@@ -131,6 +131,7 @@ function mockSubagentHost<T extends Partial<SessionSubagentHost>>(
     runQueued: vi.fn(),
     getSwarmItem: vi.fn(),
     delegatableSubagents: vi.fn(() => ({})),
+    subagentTypeExists: vi.fn(() => true),
     ...host,
   } as unknown as T & SessionSubagentHost;
 }
@@ -483,6 +484,62 @@ describe('current builtin collaboration tools', () => {
       '</agent_swarm_result>',
     ].join('\n'));
     expect(result.isError).toBeUndefined();
+  });
+
+  it('AgentSwarm keeps resumed agents on their bound profile when subagent_type is set', async () => {
+    const runQueued = vi.fn().mockResolvedValue([
+      {
+        task: {
+          kind: 'resume',
+          data: { kind: 'resume', index: 1, agentId: 'agent-old-1', prompt: 'Continue review' },
+          profileName: 'subagent',
+          parentToolCallId: 'call_swarm',
+          prompt: 'Continue review',
+          description: 'Finish review #1 (resume)',
+          runInBackground: false,
+        },
+        agentId: 'agent-old-1',
+        status: 'completed',
+        result: 'resumed result',
+      },
+      {
+        task: {
+          kind: 'spawn',
+          data: { kind: 'spawn', index: 2, prompt: 'Review src/new.ts' },
+          profileName: 'explore',
+          parentToolCallId: 'call_swarm',
+          prompt: 'Review src/new.ts',
+          description: 'Finish review #2 (explore)',
+          runInBackground: false,
+        },
+        agentId: 'agent-new-2',
+        status: 'completed',
+        result: 'spawned result',
+      },
+    ]);
+    const host = mockSubagentHost({ runQueued });
+    const tool = new AgentSwarmTool(host, mockSwarmMode());
+    const input = {
+      description: 'Finish review',
+      subagent_type: 'explore',
+      resume_agent_ids: { 'agent-old-1': 'Continue review' },
+      prompts: ['Review src/new.ts'],
+    };
+
+    const result = await executeTool(tool, context(input, 'call_swarm'));
+
+    const tasks = runQueued.mock.calls[0]?.[0] as readonly Record<string, unknown>[];
+    expect(tasks[0]).toMatchObject({
+      kind: 'resume',
+      resumeAgentId: 'agent-old-1',
+      profileName: 'subagent',
+    });
+    expect(tasks[0]).not.toHaveProperty('plan');
+    expect(tasks[1]).toMatchObject({ kind: 'spawn', profileName: 'explore' });
+    expect(result.isError).toBeUndefined();
+    expect(result.output).toContain('mode="resume"');
+    expect(result.output).toContain('resumed result');
+    expect(result.output).toContain('spawned result');
   });
 
   it('AgentSwarm does not expose permission rule argument matching', () => {
@@ -1425,6 +1482,269 @@ describe('current builtin collaboration tools', () => {
     );
 
     expect(result.output).toBe(NAMES_EXPERIMENTAL_UNAVAILABLE);
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  const WRITER_TYPES = ['tdd-typescript-writer', 'tdd-python-writer', 'shell-code-writer'] as const;
+
+  function writerSwarmTool(host: SessionSubagentHost): AgentSwarmTool {
+    return new AgentSwarmTool(
+      host,
+      mockSwarmMode(),
+      undefined,
+      undefined,
+      undefined,
+      true,
+      WRITER_TYPES,
+    );
+  }
+
+  it('AgentSwarm dispatches one subagent type per member in a mixed swarm', async () => {
+    const runQueued = vi.fn(
+      async <T>(
+        tasks: readonly QueuedSubagentTask<T>[],
+      ): Promise<Array<QueuedSubagentRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: `agent-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSubagentHost({
+      runQueued: runQueued as unknown as SessionSubagentHost['runQueued'],
+    });
+    const tool = writerSwarmTool(host);
+    const input = {
+      description: 'Implement three clients',
+      prompts: [
+        'Implement the TypeScript client.',
+        'Implement the Python client.',
+        'Write the install script.',
+      ],
+      subagent_types: [...WRITER_TYPES],
+    };
+
+    expect(AgentSwarmToolInputSchema.safeParse(input).success).toBe(true);
+    expect(AgentSwarmToolInputSchema.safeParse({
+      ...input,
+      subagent_types: ['', ...WRITER_TYPES.slice(1)],
+    }).success).toBe(false);
+    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
+    expect(properties).toHaveProperty('subagent_types');
+    expect(Object.keys(properties).at(-1)).toBe('names');
+
+    const result = await executeTool(tool, context(input, 'call_swarm'));
+
+    expect(result.isError).toBeUndefined();
+    const tasks = runQueued.mock.calls[0]?.[0] as readonly QueuedSubagentTask[];
+    expect(tasks.map((task) => task.profileName)).toEqual([...WRITER_TYPES]);
+    expect(tasks.map((task) => task.description)).toEqual([
+      'Implement three clients #1 (tdd-typescript-writer)',
+      'Implement three clients #2 (tdd-python-writer)',
+      'Implement three clients #3 (shell-code-writer)',
+    ]);
+    expect(tasks.map((task) => (task.data as { readonly profileName?: string }).profileName)).toEqual([
+      ...WRITER_TYPES,
+    ]);
+  });
+
+  it.each([
+    {
+      case: 'items',
+      input: {
+        description: 'Implement two clients',
+        prompt_template: 'Implement {{item}}.',
+        items: ['the TypeScript client', 'the Python client'],
+        subagent_types: ['tdd-typescript-writer'],
+      },
+      output:
+        'AgentSwarm subagent_types must match the number of items/prompts (expected 2, got 1).',
+    },
+    {
+      case: 'prompts',
+      input: {
+        description: 'Implement two clients',
+        prompts: ['Implement the TypeScript client.', 'Implement the Python client.'],
+        subagent_types: ['tdd-typescript-writer', 'tdd-python-writer', 'shell-code-writer'],
+      },
+      output:
+        'AgentSwarm subagent_types must match the number of items/prompts (expected 2, got 3).',
+    },
+  ])('AgentSwarm rejects a subagent_types length mismatch for $case', async ({ input, output }) => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const tool = writerSwarmTool(host);
+
+    const result = await executeTool(tool, context(input));
+
+    expect(result.output).toBe(output);
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm rejects subagent_types combined with subagent_type', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const tool = writerSwarmTool(host);
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Implement two clients',
+        prompts: ['Implement the TypeScript client.', 'Implement the Python client.'],
+        subagent_type: 'tdd-typescript-writer',
+        subagent_types: ['tdd-typescript-writer', 'tdd-python-writer'],
+      }),
+    );
+
+    expect(result.output).toBe(
+      'subagent_type and subagent_types cannot be combined; use subagent_type for one shared type or subagent_types per item/prompt.',
+    );
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm rejects an unknown subagent_types entry before any subagent starts', async () => {
+    const host = mockSubagentHost({
+      runQueued: vi.fn(),
+      subagentTypeExists: vi.fn((name: string) => name !== 'missing-writer'),
+    });
+    const tool = writerSwarmTool(host);
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Implement two clients',
+        prompts: ['Implement the TypeScript client.', 'Implement the Python client.'],
+        subagent_types: ['tdd-typescript-writer', 'missing-writer'],
+      }),
+    );
+
+    expect(result.output).toBe('Unknown agent type: "missing-writer"');
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm rejects a subagent_types entry outside the caller allowlist', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const tool = new AgentSwarmTool(
+      host,
+      mockSwarmMode(),
+      undefined,
+      undefined,
+      undefined,
+      true,
+      ['tdd-typescript-writer'],
+    );
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Implement two clients',
+        prompts: ['Implement the TypeScript client.', 'Write the install script.'],
+        subagent_types: ['tdd-typescript-writer', 'shell-code-writer'],
+      }),
+    );
+
+    expect(result.output).toBe(
+      'Subagent type "shell-code-writer" is not allowed for this agent. Allowed subagent types: tdd-typescript-writer.',
+    );
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm falls back to the caller allowlist when constructed without one', async () => {
+    const host = mockSubagentHost({
+      runQueued: vi.fn(),
+      delegatableSubagents: vi.fn(
+        () =>
+          ({ 'tdd-typescript-writer': {} }) as unknown as ReturnType<
+            SessionSubagentHost['delegatableSubagents']
+          >,
+      ),
+    });
+    const tool = new AgentSwarmTool(host, mockSwarmMode());
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Implement two clients',
+        prompts: ['Implement the TypeScript client.', 'Write the install script.'],
+        subagent_types: ['tdd-typescript-writer', 'shell-code-writer'],
+      }),
+    );
+
+    expect(host.delegatableSubagents).toHaveBeenCalledWith();
+    expect(result.output).toBe(
+      'Subagent type "shell-code-writer" is not allowed for this agent. Allowed subagent types: tdd-typescript-writer.',
+    );
+    expect(result.isError).toBe(true);
+    expect(host.runQueued).not.toHaveBeenCalled();
+  });
+
+  it('AgentSwarm applies subagent_types only to item-spawned members, never to resumes', async () => {
+    const runQueued = vi.fn(
+      async <T>(
+        tasks: readonly QueuedSubagentTask<T>[],
+      ): Promise<Array<QueuedSubagentRunResult<T>>> => {
+        return tasks.map((task, index) => ({
+          task,
+          agentId: task.kind === 'resume' ? task.resumeAgentId : `agent-new-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: `result ${String(index + 1)}`,
+        }));
+      },
+    );
+    const host = mockSubagentHost({
+      runQueued: runQueued as unknown as SessionSubagentHost['runQueued'],
+    });
+    const tool = writerSwarmTool(host);
+
+    const result = await executeTool(
+      tool,
+      context(
+        {
+          description: 'Finish review',
+          prompts: ['Review the new file.'],
+          subagent_types: ['tdd-typescript-writer'],
+          resume_agent_ids: { 'agent-old-1': 'Continue previous review A' },
+        },
+        'call_swarm',
+      ),
+    );
+
+    expect(result.isError).toBeUndefined();
+    const tasks = runQueued.mock.calls[0]?.[0] as readonly QueuedSubagentTask[];
+    expect(tasks[0]).toMatchObject({
+      kind: 'resume',
+      resumeAgentId: 'agent-old-1',
+      profileName: 'subagent',
+      description: 'Finish review #1 (resume)',
+    });
+    expect(tasks[1]).toMatchObject({
+      kind: 'spawn',
+      profileName: 'tdd-typescript-writer',
+      description: 'Finish review #2 (tdd-typescript-writer)',
+    });
+  });
+
+  it('AgentSwarm rejects subagent_types when only resume_agent_ids is provided', async () => {
+    const host = mockSubagentHost({ runQueued: vi.fn() });
+    const tool = writerSwarmTool(host);
+
+    const result = await executeTool(
+      tool,
+      context({
+        description: 'Finish review',
+        resume_agent_ids: { 'agent-old-1': 'Continue previous review A' },
+        subagent_types: ['tdd-typescript-writer'],
+      }),
+    );
+
+    expect(result.output).toBe(
+      'subagent_types requires items or prompts; resumed subagents keep their existing types.',
+    );
     expect(result.isError).toBe(true);
     expect(host.runQueued).not.toHaveBeenCalled();
   });

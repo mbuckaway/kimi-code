@@ -918,6 +918,9 @@ export class ToolManager {
             ),
             this.agent.experimentalFlags.enabled('secondary-model'),
             agentMessagingEnabled,
+            Object.keys(
+              this.agent.subagentHost.delegatableSubagents(this.agent.config.profileName),
+            ),
           ),
         toolServices?.webSearcher && new b.WebSearchTool(toolServices.webSearcher),
         toolServices?.urlFetcher && new b.FetchURLTool(toolServices.urlFetcher),
