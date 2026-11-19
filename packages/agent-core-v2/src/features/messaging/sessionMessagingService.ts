@@ -58,7 +58,7 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 
 import { AgentMessageStepRequest } from './agentMessageRequest';
 import { ICrossSessionInboundService } from './crossSessionInboundService';
-import { AGENT_MESSAGING_FLAG_ID } from './flag';
+import { AGENT_MESSAGING_FLAG_ID, CROSS_SESSION_MESSAGING_FLAG_ID } from './flag';
 import {
   AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
   CROSS_SESSION_INBOUND_HOLD_VARIANT,
@@ -195,6 +195,13 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     this._register(
       this.sessionMetadata.onDidChangeMetadata((event) => {
         if (event.changed.includes('agents')) this.scheduleRosterSyncForAll();
+      }),
+    );
+    this._register(
+      this.crossSessionInbound.onDidChange((value) => {
+        if (value !== 'accept') return;
+        if (!this.flags.enabled(CROSS_SESSION_MESSAGING_FLAG_ID)) return;
+        this.drainHeldCrossSessionMessages();
       }),
     );
     this._register(
@@ -689,6 +696,37 @@ export class SessionMessagingService extends Service implements ISessionMessagin
 
   private crossSessionDedupeKey(fromSessionId: string, messageId: string): string {
     return `${fromSessionId}\0${messageId}`;
+  }
+
+  private drainHeldCrossSessionMessages(): void {
+    if (this.heldCrossSessionMessages.length === 0) return;
+    const held = this.heldCrossSessionMessages.splice(0);
+    void this.deliverHeldCrossSessionMessages(held);
+  }
+
+  private async deliverHeldCrossSessionMessages(
+    held: readonly HeldCrossSessionMessage[],
+  ): Promise<void> {
+    for (const message of held) {
+      const dedupeKey = this.crossSessionDedupeKey(message.fromSessionId, message.messageId);
+      this.receivedCrossSessionIds.delete(dedupeKey);
+      try {
+        await this.acceptCrossSessionMessage(
+          {
+            fromSessionId: message.fromSessionId,
+            fromSessionTitle: message.fromSessionTitle,
+            messageId: message.messageId,
+            message: message.message,
+            inReplyTo: message.inReplyTo,
+          },
+          message.message,
+          message.truncated,
+          dedupeKey,
+        );
+      } catch (error) {
+        onUnexpectedError(error);
+      }
+    }
   }
 
   private recordInboxEntry(

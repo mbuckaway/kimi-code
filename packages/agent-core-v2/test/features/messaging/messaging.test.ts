@@ -5654,6 +5654,128 @@ describe('SessionMessagingService cross-session inbound', () => {
     expect(result).toEqual({ kind: 'held', truncated: true });
     expect(harness.service.listHeldCrossSessionMessages()[0]?.truncated).toBe(true);
   });
+
+  function drainingHarness(): Harness {
+    const created = createHarness({
+      sessionId: 'session-local',
+      seams: {
+        flags: stubFlag(
+          (id) => id === AGENT_MESSAGING_FLAG_ID || id === CROSS_SESSION_MESSAGING_FLAG_ID,
+        ),
+      },
+    });
+    created.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
+    created.markLive(MAIN_AGENT_ID);
+    return created;
+  }
+
+  it('receiveCrossSession_acceptDrainsHeldMessagesOnPolicyChange', async () => {
+    const draining = drainingHarness();
+    draining.inbound.set('hold');
+
+    const held = await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: 'held-1', inReplyTo: 'message-9' }),
+    );
+
+    expect(held).toEqual({ kind: 'held', truncated: false });
+    expect(draining.service.listHeldCrossSessionMessages()).toHaveLength(1);
+    expect(draining.agents.get(MAIN_AGENT_ID)!.loop.enqueue).not.toHaveBeenCalled();
+
+    draining.inbound.set('accept');
+    await vi.waitFor(async () => {
+      expect((await draining.service.listMessages(MAIN_AGENT_ID)).messages).toHaveLength(1);
+    });
+
+    const inbox = await draining.service.listMessages(MAIN_AGENT_ID);
+    expect(inbox.messages[0]).toMatchObject({
+      fromSessionId: 'session-a',
+      fromSessionLabel: 'Alpha',
+      message: 'hello from alpha',
+      truncated: false,
+    });
+    expect(draining.service.listHeldCrossSessionMessages()).toEqual([]);
+    const request = draining.agents.get(MAIN_AGENT_ID)!.loop.turns[0]?.request;
+    expect(textOf(deliveredMessageOf(request))).toContain('[re: message-9]');
+    expect(draining.agents.get(MAIN_AGENT_ID)!.loop.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('receiveCrossSession_acceptDrainsHeldMessagesInInsertionOrder', async () => {
+    const draining = drainingHarness();
+    draining.inbound.set('hold');
+
+    await draining.service.receiveCrossSession(inboundMessage({ messageId: 'held-1' }));
+    await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: 'held-2', message: 'second from alpha' }),
+    );
+    draining.inbound.set('accept');
+    await vi.waitFor(async () => {
+      expect((await draining.service.listMessages(MAIN_AGENT_ID)).messages).toHaveLength(2);
+    });
+
+    const inbox = await draining.service.listMessages(MAIN_AGENT_ID);
+    expect(inbox.messages.map((entry) => entry.message)).toEqual([
+      'second from alpha',
+      'hello from alpha',
+    ]);
+    expect(inbox.messages.map((entry) => entry.fromSessionId)).toEqual([
+      'session-a',
+      'session-a',
+    ]);
+    expect(draining.service.listHeldCrossSessionMessages()).toEqual([]);
+    expect(draining.agents.get(MAIN_AGENT_ID)!.loop.enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('receiveCrossSession_acceptWithNoHeldMessagesDoesNotDeliver', async () => {
+    const draining = drainingHarness();
+
+    draining.inbound.set('hold');
+    draining.inbound.set('accept');
+    await Promise.resolve();
+
+    expect(draining.service.listHeldCrossSessionMessages()).toEqual([]);
+    expect(draining.agents.get(MAIN_AGENT_ID)!.loop.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('receiveCrossSession_doesNotDrainWhileTheCrossSessionFlagIsOff', async () => {
+    harness.inbound.set('hold');
+    await harness.service.receiveCrossSession(inboundMessage({ messageId: 'held-1' }));
+
+    harness.inbound.set('accept');
+    await Promise.resolve();
+
+    expect(harness.service.listHeldCrossSessionMessages()).toHaveLength(1);
+    expect(harness.agents.get(MAIN_AGENT_ID)!.loop.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('receiveCrossSession_continuesDrainingAfterAFailedDelivery', async () => {
+    const draining = drainingHarness();
+    draining.inbound.set('hold');
+    await draining.service.receiveCrossSession(inboundMessage({ messageId: 'held-1' }));
+    await draining.service.receiveCrossSession(inboundMessage({ messageId: 'held-2' }));
+    const main = draining.agents.get(MAIN_AGENT_ID)!;
+    main.bus.emit(
+      new TurnEnded({
+        agentId: MAIN_AGENT_ID,
+        turnId: 1,
+        reason: 'cancelled',
+        interruptReason: 'user_cancelled',
+      }),
+    );
+    const reported: unknown[] = [];
+    setUnexpectedErrorHandler((error) => reported.push(error));
+    try {
+      draining.inbound.set('accept');
+      await vi.waitFor(() => {
+        expect(reported).toHaveLength(2);
+      });
+
+      expect((reported[0] as Error).message).toMatch(/cancelled by the user/);
+      expect(draining.service.listHeldCrossSessionMessages()).toEqual([]);
+      expect(main.loop.enqueue).not.toHaveBeenCalled();
+    } finally {
+      resetUnexpectedErrorHandler();
+    }
+  });
 });
 
 
