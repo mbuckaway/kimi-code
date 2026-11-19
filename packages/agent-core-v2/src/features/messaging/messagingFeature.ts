@@ -18,6 +18,14 @@ import {
   CrossSessionInboundService,
   ICrossSessionInboundService,
 } from './crossSessionInboundService';
+import {
+  CrossSessionInboxHost,
+  ICrossSessionInboxHost,
+} from './crossSession/crossSessionInboxHost';
+import {
+  CrossSessionMessagingService,
+  ICrossSessionMessagingService,
+} from './crossSession/crossSessionMessaging';
 import { ISessionMessagingService } from './messaging';
 import { messagingAgentRuntimeProvider } from './messagingAgentRuntime';
 import { SessionMessagingService } from './sessionMessagingService';
@@ -62,6 +70,18 @@ export class MessagingFeature extends Feature {
       LifecycleScope.Session,
       ICrossSessionInboundService,
       CrossSessionInboundService,
+    );
+    this.contributeService(
+      LifecycleScope.App,
+      ICrossSessionMessagingService,
+      CrossSessionMessagingService,
+      { activation: ScopeActivation.OnScopeCreated },
+    );
+    this.contributeService(
+      LifecycleScope.App,
+      ICrossSessionInboxHost,
+      CrossSessionInboxHost,
+      { activation: ScopeActivation.OnScopeCreated },
     );
     this.contributeAgentRuntime(messagingAgentRuntimeProvider);
     this.contributeTool(ISendMessageTool, SendMessageTool, {
