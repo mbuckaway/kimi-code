@@ -80,6 +80,18 @@ import {
   type CrossSessionInboundMessage,
 } from '#/features/messaging/messaging';
 import {
+  CROSS_SESSION_ADDRESS_PREFIX,
+  classifyMessageAddress,
+  formatCrossSessionRoster,
+  formatCrossSessionSendResult,
+  resolveCrossSessionTarget,
+} from '#/features/messaging/addressing';
+import {
+  ICrossSessionMessagingService,
+  type CrossSessionSendResult,
+  type CrossSessionSessionEntry,
+} from '#/features/messaging/crossSession/crossSessionMessaging';
+import {
   CROSS_SESSION_INBOUND_SECTION,
   CrossSessionInboundSchema,
   DEFAULT_CROSS_SESSION_INBOUND,
@@ -128,7 +140,7 @@ import {
   RenameAgentInputSchema,
   type RenameAgentToolInput,
 } from '#/features/messaging/tools/rename-agent/rename-agent';
-import type { ExecutableToolResult } from '#/tool/toolContract';
+import type { ExecutableToolResult, ToolExecution } from '#/tool/toolContract';
 import { SubagentTask, type SubagentTaskInfo } from '#/agent/tools/agent/subagent-task';
 
 import { stubLog } from '../../_base/log/stubs';
@@ -2472,6 +2484,24 @@ describe('SendMessage tool', () => {
       listAgents: vi.fn(),
       rosterInstructions: vi.fn(),
     } as unknown as ISessionMessagingService);
+    ix.stub(ICrossSessionMessagingService, {
+      _serviceBrand: undefined,
+      listSessions: vi.fn().mockResolvedValue([]),
+      send: vi.fn(),
+    } as unknown as ICrossSessionMessagingService);
+    ix.stub(ISessionContext, {
+      _serviceBrand: undefined,
+      sessionId: 'session_00000000-0000-4000-8000-000000000001',
+    } as unknown as ISessionContext);
+    ix.stub(ISessionMetadata, {
+      _serviceBrand: undefined,
+      read: vi.fn().mockResolvedValue({
+        id: 'session_00000000-0000-4000-8000-000000000001',
+        createdAt: 0,
+        updatedAt: 0,
+        archived: false,
+      }),
+    } as unknown as ISessionMetadata);
     ix.stub(IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope: `agents/${agentId}` }));
     return ix.createInstance(SendMessageTool);
   }
@@ -2623,6 +2653,15 @@ describe('ListAgents tool', () => {
       listAgents,
       rosterInstructions: vi.fn(),
     } as unknown as ISessionMessagingService);
+    ix.stub(ICrossSessionMessagingService, {
+      _serviceBrand: undefined,
+      listSessions: vi.fn().mockResolvedValue([]),
+      send: vi.fn(),
+    } as unknown as ICrossSessionMessagingService);
+    ix.stub(ISessionContext, {
+      _serviceBrand: undefined,
+      sessionId: 'session_00000000-0000-4000-8000-000000000001',
+    } as unknown as ISessionContext);
     ix.stub(IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope: `agents/${agentId}` }));
     return ix.createInstance(ListAgentsTool);
   }
@@ -3789,12 +3828,30 @@ describe('ReplyMessage tool', () => {
     ix.stub(ISessionMessagingService, {
       _serviceBrand: undefined,
       sendMessage: vi.fn(),
-      listMessages: vi.fn(),
+      listMessages: vi.fn().mockResolvedValue({ messages: [], pending: 0 }),
       replyMessage,
       broadcastMessage: vi.fn(),
       listAgents: vi.fn(),
       rosterInstructions: vi.fn(),
     } as unknown as ISessionMessagingService);
+    ix.stub(ICrossSessionMessagingService, {
+      _serviceBrand: undefined,
+      listSessions: vi.fn().mockResolvedValue([]),
+      send: vi.fn(),
+    } as unknown as ICrossSessionMessagingService);
+    ix.stub(ISessionContext, {
+      _serviceBrand: undefined,
+      sessionId: 'session_00000000-0000-4000-8000-000000000001',
+    } as unknown as ISessionContext);
+    ix.stub(ISessionMetadata, {
+      _serviceBrand: undefined,
+      read: vi.fn().mockResolvedValue({
+        id: 'session_00000000-0000-4000-8000-000000000001',
+        createdAt: 0,
+        updatedAt: 0,
+        archived: false,
+      }),
+    } as unknown as ISessionMetadata);
     ix.stub(IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope: `agents/${agentId}` }));
     return ix.createInstance(ReplyMessageTool);
   }
@@ -5596,5 +5653,930 @@ describe('SessionMessagingService cross-session inbound', () => {
 
     expect(result).toEqual({ kind: 'held', truncated: true });
     expect(harness.service.listHeldCrossSessionMessages()[0]?.truncated).toBe(true);
+  });
+});
+
+
+const SELF_SESSION = 'session_00000000-0000-4000-8000-000000000001';
+const PEER_SESSION = 'session_11111111-1111-4111-8111-111111111111';
+const OTHER_SESSION = 'session_22222222-2222-4222-8222-222222222222';
+const PEER_ENTRY: CrossSessionSessionEntry = {
+  sessionId: PEER_SESSION,
+  title: 'Alpha',
+  status: 'running',
+};
+const PEER_LABEL = `${PEER_SESSION} ("Alpha")`;
+
+describe('cross-session addressing', () => {
+  it('crossSessionAddressing_prefix_classifiesAsCrossSession', () => {
+    expect(classifyMessageAddress('session:Alpha')).toEqual({
+      kind: 'crossSession',
+      target: 'Alpha',
+    });
+    expect(classifyMessageAddress(`  session:${PEER_SESSION}  `)).toEqual({
+      kind: 'crossSession',
+      target: PEER_SESSION,
+    });
+  });
+
+  it('crossSessionAddressing_bareEngineId_classifiesAsCrossSession', () => {
+    expect(classifyMessageAddress(PEER_SESSION)).toEqual({
+      kind: 'crossSession',
+      target: PEER_SESSION,
+    });
+    expect(classifyMessageAddress(PEER_SESSION.toUpperCase())).toEqual({
+      kind: 'crossSession',
+      target: PEER_SESSION.toUpperCase(),
+    });
+  });
+
+  it.each(['main', 'scout', 'agent-2', 'session', 'my-session', 'sessionish'])(
+    'crossSessionAddressing_%s_classifiesAsIntraSession',
+    (to) => {
+      expect(classifyMessageAddress(to)).toEqual({ kind: 'intraSession' });
+    },
+  );
+
+  it('crossSessionAddressing_exportsThePrefix', () => {
+    expect(CROSS_SESSION_ADDRESS_PREFIX).toBe('session:');
+    expect(classifyMessageAddress('session:')).toEqual({ kind: 'crossSession', target: '' });
+  });
+
+  function directoryOf(sessions: readonly CrossSessionSessionEntry[]) {
+    const listSessions = vi.fn().mockResolvedValue(sessions);
+    return {
+      listSessions,
+      directory: { listSessions } as unknown as Pick<
+        ICrossSessionMessagingService,
+        'listSessions'
+      >,
+    };
+  }
+
+  it('resolveCrossSession_exactId_beatsATitleMatch', async () => {
+    expect.assertions(2);
+    const { directory, listSessions } = directoryOf([
+      PEER_ENTRY,
+      { sessionId: OTHER_SESSION, title: PEER_SESSION, status: 'idle' },
+    ]);
+
+    const resolution = await resolveCrossSessionTarget(directory, SELF_SESSION, PEER_SESSION);
+
+    expect(resolution).toEqual({ kind: 'resolved', session: PEER_ENTRY });
+    expect(listSessions).toHaveBeenCalledWith(SELF_SESSION);
+  });
+
+  it('resolveCrossSession_singleTitle_resolvesTheSession', async () => {
+    expect.assertions(1);
+    const { directory } = directoryOf([PEER_ENTRY]);
+
+    const resolution = await resolveCrossSessionTarget(directory, SELF_SESSION, 'Alpha');
+
+    expect(resolution).toEqual({ kind: 'resolved', session: PEER_ENTRY });
+  });
+
+  it('resolveCrossSession_unknownTarget_listsEveryReachableSession', async () => {
+    expect.assertions(1);
+    const { directory } = directoryOf([PEER_ENTRY]);
+
+    const resolution = await resolveCrossSessionTarget(directory, SELF_SESSION, 'Ghost');
+
+    expect(resolution).toEqual({ kind: 'unknown', sessions: [PEER_ENTRY] });
+  });
+
+  it('resolveCrossSession_duplicateTitles_areAmbiguous', async () => {
+    expect.assertions(1);
+    const other = { sessionId: OTHER_SESSION, title: 'Alpha', status: 'idle' } as const;
+    const { directory } = directoryOf([PEER_ENTRY, other]);
+
+    const resolution = await resolveCrossSessionTarget(directory, SELF_SESSION, 'Alpha');
+
+    expect(resolution).toEqual({ kind: 'ambiguous', matches: [PEER_ENTRY, other] });
+  });
+
+  it('resolveCrossSession_emptyTarget_doesNotMatchAnEmptyTitle', async () => {
+    expect.assertions(1);
+    const untitled = { sessionId: PEER_SESSION, title: '', status: 'idle' } as const;
+    const { directory } = directoryOf([untitled]);
+
+    const resolution = await resolveCrossSessionTarget(directory, SELF_SESSION, '');
+
+    expect(resolution).toEqual({ kind: 'unknown', sessions: [untitled] });
+  });
+});
+
+describe('cross-session roster formatting', () => {
+  it('formatCrossSessionRoster_rowsCarryTheAddressAndTitle', () => {
+    const output = formatCrossSessionRoster([
+      PEER_ENTRY,
+      { sessionId: OTHER_SESSION, status: 'idle' },
+    ]);
+
+    expect(output.split('\n')).toEqual([
+      'Other sessions you can message:',
+      `- ${PEER_SESSION} ("Alpha") — running`,
+      `- ${OTHER_SESSION} — idle`,
+      'Use `SendMessage` with `to: "session:<sessionId>"` to reach one.',
+    ]);
+  });
+
+  it('formatCrossSessionRoster_noSessions_rendersNothing', () => {
+    expect(formatCrossSessionRoster([])).toBe('');
+  });
+});
+
+describe('cross-session send result formatting', () => {
+  function format(result: CrossSessionSendResult, kind: 'message' | 'reply' = 'message') {
+    return formatCrossSessionSendResult({
+      kind,
+      inReplyTo: kind === 'reply' ? 'message-7' : undefined,
+      target: PEER_ENTRY,
+      result,
+    });
+  }
+
+  it.each([
+    [
+      'steered',
+      { kind: 'delivered', delivery: 'steered', truncated: false },
+      `Message delivered to ${PEER_LABEL}; it reaches the receiving session's main agent at its next step boundary.`,
+    ],
+    [
+      'newTurn',
+      { kind: 'delivered', delivery: 'newTurn', truncated: false },
+      `Message delivered to ${PEER_LABEL} and started a new turn in that session.`,
+    ],
+    [
+      'resumed',
+      { kind: 'delivered', delivery: 'resumed', truncated: false },
+      `Message delivered to ${PEER_LABEL}; the receiving session's main agent was idle and has been resumed in the background. Its reply arrives automatically in a later turn.`,
+    ],
+  ] as const)('formatCrossSessionSendResult_%s_delivered', (_label, result, expected) => {
+    expect(format(result)).toEqual({ output: expected, isError: false, truncated: false });
+  });
+
+  it('formatCrossSessionSendResult_held_explainsTheInboundPolicy', () => {
+    expect(format({ kind: 'held', truncated: true })).toEqual({
+      output: `Message was held for ${PEER_LABEL} by the receiving session's cross-session inbound policy. It is delivered once that session accepts cross-session messages.`,
+      isError: false,
+      truncated: true,
+    });
+  });
+
+  it('formatCrossSessionSendResult_refusedPolicy_namesTheDisabledFeature', () => {
+    expect(format({ kind: 'refused', reason: 'policy', truncated: false })).toEqual({
+      output: `Cross-session messaging is unavailable, so the message to ${PEER_LABEL} was refused.`,
+      isError: false,
+      truncated: false,
+    });
+  });
+
+  it('formatCrossSessionSendResult_refusedDuplicate_reportsNoRedelivery', () => {
+    expect(format({ kind: 'refused', reason: 'duplicate', truncated: false })).toEqual({
+      output: `Duplicate message: ${PEER_LABEL} already received this message; it was not delivered again.`,
+      isError: false,
+      truncated: false,
+    });
+  });
+
+  it('formatCrossSessionSendResult_refusedSelf_rejectsTheOwnSession', () => {
+    expect(format({ kind: 'refused', reason: 'self', truncated: false })).toEqual({
+      output: 'Cannot send a cross-session message to your own session.',
+      isError: false,
+      truncated: false,
+    });
+  });
+
+  it('formatCrossSessionSendResult_offline_reportsTheMissingSession', () => {
+    expect(format({ kind: 'offline' })).toEqual({
+      output: `${PEER_LABEL} is offline; the message was not delivered.`,
+      isError: false,
+      truncated: false,
+    });
+  });
+
+  it('formatCrossSessionSendResult_error_surfacesTheFailure', () => {
+    expect(format({ kind: 'error', error: 'registry unreachable' })).toEqual({
+      output: `Message to ${PEER_LABEL} failed: registry unreachable`,
+      isError: true,
+      truncated: false,
+    });
+  });
+
+  it('formatCrossSessionSendResult_replySubject_namesTheInboxMessage', () => {
+    expect(format({ kind: 'delivered', delivery: 'steered', truncated: false }, 'reply').output).toBe(
+      `Reply to message-7 delivered to ${PEER_LABEL}; it reaches the receiving session's main agent at its next step boundary.`,
+    );
+    expect(format({ kind: 'held', truncated: false }, 'reply').output).toContain(
+      `Reply to message-7 was held for ${PEER_LABEL}`,
+    );
+  });
+
+  it('formatCrossSessionSendResult_untitledTarget_usesTheBareSessionId', () => {
+    expect(
+      formatCrossSessionSendResult({
+        kind: 'message',
+        target: { sessionId: OTHER_SESSION },
+        result: { kind: 'offline' },
+      }).output,
+    ).toBe(`${OTHER_SESSION} is offline; the message was not delivered.`);
+  });
+
+  it('formatCrossSessionSendResult_replyWithoutInboxId_usesThePlainLeader', () => {
+    expect(
+      formatCrossSessionSendResult({
+        kind: 'reply',
+        target: PEER_ENTRY,
+        result: { kind: 'offline' },
+      }).output,
+    ).toBe(`${PEER_LABEL} is offline; the reply was not delivered.`);
+  });
+});
+
+describe('SendMessage tool cross-session', () => {
+  function toolWith(
+    overrides: {
+      readonly sendMessage?: ReturnType<typeof vi.fn>;
+      readonly send?: ReturnType<typeof vi.fn>;
+      readonly sessions?: readonly CrossSessionSessionEntry[];
+      readonly title?: string;
+    } = {},
+  ) {
+    const sendMessage = overrides.sendMessage ?? vi.fn();
+    const send = overrides.send ?? vi.fn();
+    const listSessions = vi.fn().mockResolvedValue(overrides.sessions ?? []);
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionMessagingService, {
+      _serviceBrand: undefined,
+      sendMessage,
+      listAgents: vi.fn(),
+      rosterInstructions: vi.fn(),
+    } as unknown as ISessionMessagingService);
+    ix.stub(ICrossSessionMessagingService, {
+      _serviceBrand: undefined,
+      listSessions,
+      send,
+    } as unknown as ICrossSessionMessagingService);
+    ix.stub(ISessionContext, {
+      _serviceBrand: undefined,
+      sessionId: SELF_SESSION,
+    } as unknown as ISessionContext);
+    ix.stub(ISessionMetadata, {
+      _serviceBrand: undefined,
+      read: vi.fn().mockResolvedValue({
+        id: SELF_SESSION,
+        title: overrides.title,
+        createdAt: 0,
+        updatedAt: 0,
+        archived: false,
+      }),
+    } as unknown as ISessionMetadata);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
+    );
+    return { tool: ix.createInstance(SendMessageTool), sendMessage, send, listSessions };
+  }
+
+  async function run(
+    tool: SendMessageTool,
+    args: { to: string; message: string },
+  ): Promise<ExecutableToolResult> {
+    const execution = tool.resolveExecution(args);
+    if (!('execute' in execution)) return execution as ExecutableToolResult;
+    return execution.execute({ turnId: 0, toolCallId: 'call_send_cross', signal });
+  }
+
+  it('sendMessageTool_crossSessionBareId_routesToTheCrossSessionService', async () => {
+    expect.assertions(7);
+    const send = vi.fn().mockResolvedValue({ kind: 'delivered', delivery: 'steered', truncated: false });
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY], title: 'Self' });
+
+    const result = await run(tool, { to: PEER_SESSION, message: 'hello' });
+
+    const call = send.mock.calls[0] as [
+      string,
+      string,
+      {
+        readonly messageId: string;
+        readonly message: string;
+        readonly fromSessionTitle?: string;
+        readonly signal?: AbortSignal;
+      },
+    ];
+    expect(call[0]).toBe(SELF_SESSION);
+    expect(call[1]).toBe(PEER_SESSION);
+    expect(call[2].messageId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(call[2].message).toBe('hello');
+    expect(call[2].fromSessionTitle).toBe('Self');
+    expect(call[2].signal).toBe(signal);
+    expect(result.output).toBe(
+      `Message delivered to ${PEER_LABEL}; it reaches the receiving session's main agent at its next step boundary.`,
+    );
+  });
+
+  it('sendMessageTool_sessionPrefixTitle_resolvesTheSession', async () => {
+    expect.assertions(2);
+    const send = vi.fn().mockResolvedValue({ kind: 'delivered', delivery: 'newTurn', truncated: false });
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: 'session:Alpha', message: 'hello' });
+
+    expect(send.mock.calls[0]?.[1]).toBe(PEER_SESSION);
+    expect(result.output).toBe(
+      `Message delivered to ${PEER_LABEL} and started a new turn in that session.`,
+    );
+  });
+
+  it('sendMessageTool_sessionPrefixBareId_routesByExactId', async () => {
+    expect.assertions(2);
+    const send = vi.fn().mockResolvedValue({ kind: 'delivered', delivery: 'resumed', truncated: false });
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: `session:${PEER_SESSION}`, message: 'hello' });
+
+    expect(send.mock.calls[0]?.[1]).toBe(PEER_SESSION);
+    expect(result.output).toContain('has been resumed in the background');
+  });
+
+  it('sendMessageTool_unknownTarget_listsReachableSessionsAndSkipsTheSend', async () => {
+    expect.assertions(3);
+    const send = vi.fn();
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: 'session:Ghost', message: 'hello' });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe(
+      [
+        'Unknown session "Ghost".',
+        'Reachable sessions:',
+        `- ${PEER_SESSION} ("Alpha") — running`,
+      ].join('\n'),
+    );
+  });
+
+  it('sendMessageTool_noReachableSessions_reportsTheEmptyDirectory', async () => {
+    expect.assertions(2);
+    const { tool } = toolWith({ sessions: [] });
+
+    const result = await run(tool, { to: `session:${PEER_SESSION}`, message: 'hello' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe(
+      [
+        `Unknown session "${PEER_SESSION}".`,
+        'No other sessions are reachable for cross-session messaging.',
+      ].join('\n'),
+    );
+  });
+
+  it('sendMessageTool_ambiguousTitle_listsEverySessionId', async () => {
+    expect.assertions(3);
+    const send = vi.fn();
+    const other = { sessionId: OTHER_SESSION, title: 'Alpha', status: 'idle' } as const;
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY, other] });
+
+    const result = await run(tool, { to: 'session:Alpha', message: 'hello' });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe(
+      `Ambiguous session "Alpha": ${PEER_SESSION}, ${OTHER_SESSION}. Use the session id.`,
+    );
+  });
+
+  it.each([
+    ['held', { kind: 'held', truncated: false }, 'was held for'],
+    ['refused', { kind: 'refused', reason: 'policy', truncated: false }, 'Cross-session messaging is unavailable'],
+    ['offline', { kind: 'offline' }, 'is offline; the message was not delivered.'],
+  ] as const)('sendMessageTool_%s_formatsTheResult', async (_label, outcome, expected) => {
+    const send = vi.fn().mockResolvedValue(outcome);
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: PEER_SESSION, message: 'hello' });
+
+    expect(result.output).toContain(expected);
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('sendMessageTool_errorOutcome_returnsAnErrorResult', async () => {
+    expect.assertions(2);
+    const send = vi.fn().mockResolvedValue({ kind: 'error', error: 'registry unreachable' });
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: PEER_SESSION, message: 'hello' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe(`Message to ${PEER_LABEL} failed: registry unreachable`);
+  });
+
+  it('sendMessageTool_truncatedCrossSessionMessage_appendsTheNote', async () => {
+    expect.assertions(1);
+    const send = vi.fn().mockResolvedValue({ kind: 'delivered', delivery: 'steered', truncated: true });
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: PEER_SESSION, message: 'hello' });
+
+    expect(result.output).toContain(
+      'Note: the message exceeded 100000 characters and was truncated before delivery.',
+    );
+  });
+
+  it('sendMessageTool_intraSessionTarget_leavesTheCrossSessionLayerAlone', async () => {
+    expect.assertions(4);
+    const sendMessage = vi.fn().mockResolvedValue({
+      delivery: 'steered',
+      agentId: 'agent-2',
+      label: 'scout',
+      truncated: false,
+    });
+    const { tool, send, listSessions } = toolWith({ sendMessage, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: 'scout', message: 'hello' });
+
+    expect(sendMessage).toHaveBeenCalledWith(MAIN_AGENT_ID, 'scout', 'hello', signal);
+    expect(send).not.toHaveBeenCalled();
+    expect(listSessions).not.toHaveBeenCalled();
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('sendMessageTool_crossSessionRejection_returnsAnErrorResult', async () => {
+    expect.assertions(2);
+    const send = vi.fn().mockRejectedValue(new Error2(ErrorCodes.MESSAGE_DELIVERY_FAILED, 'socket closed'));
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: PEER_SESSION, message: 'hello' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe('socket closed');
+  });
+
+  it('sendMessageTool_nonErrorRejection_stringifiesTheValue', async () => {
+    expect.assertions(2);
+    const send = vi.fn().mockRejectedValue('socket closed');
+    const { tool } = toolWith({ send, sessions: [PEER_ENTRY] });
+
+    const result = await run(tool, { to: PEER_SESSION, message: 'hello' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe('socket closed');
+  });
+});
+
+describe('ListAgents tool cross-session', () => {
+  function toolWith(overrides: {
+    readonly listAgents?: ReturnType<typeof vi.fn>;
+    readonly sessions?: readonly CrossSessionSessionEntry[];
+    readonly agentId?: string;
+  } = {}) {
+    const listAgents =
+      overrides.listAgents ??
+      vi.fn().mockResolvedValue([{ agentId: 'agent-2', name: 'scout', role: 'sub', running: false }]);
+    const listSessions = vi.fn().mockResolvedValue(overrides.sessions ?? []);
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionMessagingService, {
+      _serviceBrand: undefined,
+      sendMessage: vi.fn(),
+      listAgents,
+      rosterInstructions: vi.fn(),
+    } as unknown as ISessionMessagingService);
+    ix.stub(ICrossSessionMessagingService, {
+      _serviceBrand: undefined,
+      listSessions,
+      send: vi.fn(),
+    } as unknown as ICrossSessionMessagingService);
+    ix.stub(ISessionContext, {
+      _serviceBrand: undefined,
+      sessionId: SELF_SESSION,
+    } as unknown as ISessionContext);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({
+        agentId: overrides.agentId ?? MAIN_AGENT_ID,
+        agentScope: `agents/${overrides.agentId ?? MAIN_AGENT_ID}`,
+      }),
+    );
+    return { tool: ix.createInstance(ListAgentsTool), listAgents, listSessions };
+  }
+
+  async function run(tool: ListAgentsTool): Promise<ExecutableToolResult> {
+    const execution = tool.resolveExecution({});
+    if (!('execute' in execution)) throw new Error('expected a runnable execution');
+    return execution.execute({ turnId: 0, toolCallId: 'call_list_cross', signal });
+  }
+
+  it('listAgentsTool_appendsTheCrossSessionSection', async () => {
+    expect.assertions(3);
+    const { tool, listSessions } = toolWith({
+      sessions: [PEER_ENTRY, { sessionId: OTHER_SESSION, status: 'idle' }],
+    });
+
+    const result = await run(tool);
+
+    expect(result.output).toBe(
+      [
+        'Agents you can message:',
+        '- scout (id: agent-2) — idle',
+        '',
+        'Other sessions you can message:',
+        `- ${PEER_SESSION} ("Alpha") — running`,
+        `- ${OTHER_SESSION} — idle`,
+        'Use `SendMessage` with `to: "session:<sessionId>"` to reach one.',
+      ].join('\n'),
+    );
+    expect(listSessions).toHaveBeenCalledWith(SELF_SESSION);
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('listAgentsTool_omitsTheCrossSessionSectionWhenNoSessionIsReachable', async () => {
+    expect.assertions(1);
+    const { tool } = toolWith({ sessions: [] });
+
+    const result = await run(tool);
+
+    expect(result.output).toBe('Agents you can message:\n- scout (id: agent-2) — idle');
+  });
+
+  it('listAgentsTool_keepsTheCallerAgentIdForTheIntraSessionRoster', async () => {
+    expect.assertions(1);
+    const { tool, listAgents } = toolWith({ agentId: 'agent-9' });
+
+    await run(tool);
+
+    expect(listAgents).toHaveBeenCalledWith('agent-9');
+  });
+});
+
+describe('ReplyMessage tool cross-session', () => {
+  function crossInboxMessage(overrides: Partial<AgentInboxMessage> = {}): AgentInboxMessage {
+    return {
+      id: 'message-7',
+      from: PEER_SESSION,
+      fromLabel: 'Alpha',
+      fromSessionId: PEER_SESSION,
+      fromSessionLabel: 'Alpha',
+      message: 'hello',
+      delivery: 'newTurn',
+      truncated: false,
+      ...overrides,
+    };
+  }
+
+  function toolWith(overrides: {
+    readonly replyMessage?: ReturnType<typeof vi.fn>;
+    readonly send?: ReturnType<typeof vi.fn>;
+    readonly messages?: readonly AgentInboxMessage[];
+    readonly title?: string;
+  } = {}) {
+    const replyMessage = overrides.replyMessage ?? vi.fn();
+    const send = overrides.send ?? vi.fn();
+    const listMessages = vi.fn().mockResolvedValue({ messages: overrides.messages ?? [], pending: 0 });
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionMessagingService, {
+      _serviceBrand: undefined,
+      sendMessage: vi.fn(),
+      listMessages,
+      replyMessage,
+      broadcastMessage: vi.fn(),
+      listAgents: vi.fn(),
+      rosterInstructions: vi.fn(),
+    } as unknown as ISessionMessagingService);
+    ix.stub(ICrossSessionMessagingService, {
+      _serviceBrand: undefined,
+      listSessions: vi.fn().mockResolvedValue([]),
+      send,
+    } as unknown as ICrossSessionMessagingService);
+    ix.stub(ISessionContext, {
+      _serviceBrand: undefined,
+      sessionId: SELF_SESSION,
+    } as unknown as ISessionContext);
+    ix.stub(ISessionMetadata, {
+      _serviceBrand: undefined,
+      read: vi.fn().mockResolvedValue({
+        id: SELF_SESSION,
+        title: overrides.title,
+        createdAt: 0,
+        updatedAt: 0,
+        archived: false,
+      }),
+    } as unknown as ISessionMetadata);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
+    );
+    return { tool: ix.createInstance(ReplyMessageTool), replyMessage, send, listMessages };
+  }
+
+  async function run(
+    tool: ReplyMessageTool,
+    args: { message_id: string; message: string },
+  ): Promise<ExecutableToolResult> {
+    const execution = tool.resolveExecution(args);
+    if (!('execute' in execution)) return execution as ExecutableToolResult;
+    return execution.execute({ turnId: 0, toolCallId: 'call_reply_cross', signal });
+  }
+
+  it('replyMessageTool_crossSessionOrigin_routesThroughTheCrossSessionService', async () => {
+    expect.assertions(7);
+    const send = vi.fn().mockResolvedValue({ kind: 'delivered', delivery: 'steered', truncated: false });
+    const replyMessage = vi.fn();
+    const { tool } = toolWith({
+      send,
+      replyMessage,
+      messages: [crossInboxMessage()],
+      title: 'Self',
+    });
+
+    const result = await run(tool, { message_id: 'message-7', message: 'answer' });
+
+    const call = send.mock.calls[0] as [
+      string,
+      string,
+      {
+        readonly messageId: string;
+        readonly message: string;
+        readonly fromSessionTitle?: string;
+        readonly inReplyTo?: string;
+        readonly signal?: AbortSignal;
+      },
+    ];
+    expect(call[0]).toBe(SELF_SESSION);
+    expect(call[1]).toBe(PEER_SESSION);
+    expect(call[2].messageId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(call[2].message).toBe('answer');
+    expect(call[2].inReplyTo).toBe('message-7');
+    expect(call[2].fromSessionTitle).toBe('Self');
+    expect(replyMessage).not.toHaveBeenCalled();
+  });
+
+  it('replyMessageTool_crossSessionOrigin_formatsDeliveredReplies', async () => {
+    expect.assertions(1);
+    const send = vi.fn().mockResolvedValue({ kind: 'delivered', delivery: 'steered', truncated: false });
+    const { tool } = toolWith({ send, messages: [crossInboxMessage()] });
+
+    const result = await run(tool, { message_id: 'message-7', message: 'answer' });
+
+    expect(result.output).toBe(
+      `Reply to message-7 delivered to ${PEER_LABEL}; it reaches the receiving session's main agent at its next step boundary.`,
+    );
+  });
+
+  it('replyMessageTool_crossSessionOrigin_appendsTheTruncationNote', async () => {
+    expect.assertions(1);
+    const send = vi.fn().mockResolvedValue({ kind: 'delivered', delivery: 'resumed', truncated: true });
+    const { tool } = toolWith({ send, messages: [crossInboxMessage()] });
+
+    const result = await run(tool, { message_id: 'message-7', message: 'answer' });
+
+    expect(result.output).toContain(
+      'Note: the message exceeded 100000 characters and was truncated before delivery.',
+    );
+  });
+
+  it('replyMessageTool_crossSessionOrigin_surfacesTheDeliveryError', async () => {
+    expect.assertions(2);
+    const send = vi.fn().mockResolvedValue({ kind: 'error', error: 'session not live' });
+    const { tool } = toolWith({ send, messages: [crossInboxMessage()] });
+
+    const result = await run(tool, { message_id: 'message-7', message: 'answer' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe(`Reply to message-7 to ${PEER_LABEL} failed: session not live`);
+  });
+
+  it('replyMessageTool_intraSessionOrigin_keepsTheExistingReplyPath', async () => {
+    expect.assertions(3);
+    const send = vi.fn();
+    const replyMessage = vi.fn().mockResolvedValue({
+      inReplyTo: 'message-3',
+      delivery: 'steered',
+      agentId: 'agent-2',
+      label: 'scout',
+      truncated: false,
+    });
+    const { tool } = toolWith({
+      send,
+      replyMessage,
+      messages: [
+        crossInboxMessage({ id: 'message-3', from: 'agent-2', fromLabel: 'scout', fromSessionId: undefined, fromSessionLabel: undefined }),
+      ],
+    });
+
+    const result = await run(tool, { message_id: 'message-3', message: 'answer' });
+
+    expect(replyMessage).toHaveBeenCalledWith(MAIN_AGENT_ID, 'message-3', 'answer', signal);
+    expect(send).not.toHaveBeenCalled();
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('replyMessageTool_unknownInboxId_fallsBackToTheIntraSessionError', async () => {
+    expect.assertions(2);
+    const replyMessage = vi
+      .fn()
+      .mockRejectedValue(new Error2(ErrorCodes.MESSAGE_NOT_FOUND, 'Unknown inbox message "message-9".'));
+    const { tool } = toolWith({ replyMessage, messages: [] });
+
+    const result = await run(tool, { message_id: 'message-9', message: 'answer' });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe('Unknown inbox message "message-9".');
+  });
+});
+
+describe('control tools refuse cross-session addresses', () => {
+  const targets = [`session:${PEER_SESSION}`, PEER_SESSION] as const;
+
+  function context(toolCallId: string) {
+    return { turnId: 0, toolCallId, args: {}, signal };
+  }
+
+  async function execute(
+    resolve: () => ToolExecution,
+    toolCallId: string,
+  ): Promise<ExecutableToolResult> {
+    const execution = resolve();
+    if (!('execute' in execution)) return execution as ExecutableToolResult;
+    return execution.execute(context(toolCallId));
+  }
+
+  it.each(targets)('stopAgentTool_refuses_%s', async (target) => {
+    expect.assertions(3);
+    const stopAgent = vi
+      .fn()
+      .mockRejectedValue(
+        new Error2(ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN, `Unknown recipient "${target}".`),
+      );
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionMessagingService, {
+      _serviceBrand: undefined,
+      stopAgent,
+      interruptAgent: vi.fn(),
+    } as unknown as ISessionMessagingService);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
+    );
+    const tool = ix.createInstance(StopAgentTool);
+
+    const result = await execute(() => tool.resolveExecution({ agent_id: target }), 'call_stop_x');
+
+    expect(stopAgent).toHaveBeenCalledWith(MAIN_AGENT_ID, target, undefined, signal);
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe(`Unknown recipient "${target}".`);
+  });
+
+  it.each(targets)('interruptAgentTool_refuses_%s', async (target) => {
+    expect.assertions(2);
+    const interruptAgent = vi
+      .fn()
+      .mockRejectedValue(
+        new Error2(ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN, `Unknown recipient "${target}".`),
+      );
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionMessagingService, {
+      _serviceBrand: undefined,
+      stopAgent: vi.fn(),
+      interruptAgent,
+    } as unknown as ISessionMessagingService);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
+    );
+    const tool = ix.createInstance(InterruptAgentTool);
+
+    const result = await execute(
+      () => tool.resolveExecution({ agent_id: target }),
+      'call_interrupt_x',
+    );
+
+    expect(interruptAgent).toHaveBeenCalledWith(MAIN_AGENT_ID, target, signal);
+    expect(result.output).toBe(`Unknown recipient "${target}".`);
+  });
+
+  it.each(targets)('dismissAgentsTool_refuses_%s', async (target) => {
+    expect.assertions(2);
+    const dismissAgents = vi
+      .fn()
+      .mockRejectedValue(new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent "${target}" does not exist.`));
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionSubagentService, {
+      _serviceBrand: undefined,
+      dismissAgents,
+      setAgentTags: vi.fn(),
+      renameAgent: vi.fn(),
+    } as unknown as ISessionSubagentService);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
+    );
+    const tool = ix.createInstance(DismissAgentsTool);
+
+    const result = await execute(
+      () => tool.resolveExecution({ ids: [target] }),
+      'call_dismiss_x',
+    );
+
+    expect(dismissAgents).toHaveBeenCalledWith(MAIN_AGENT_ID, { ids: [target] });
+    expect(result.output).toBe(`Agent "${target}" does not exist.`);
+  });
+
+  it.each(targets)('tagAgentTool_refuses_%s', async (target) => {
+    expect.assertions(2);
+    const setAgentTags = vi
+      .fn()
+      .mockRejectedValue(new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent "${target}" does not exist.`));
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionSubagentService, {
+      _serviceBrand: undefined,
+      dismissAgents: vi.fn(),
+      setAgentTags,
+      renameAgent: vi.fn(),
+    } as unknown as ISessionSubagentService);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
+    );
+    const tool = ix.createInstance(TagAgentTool);
+
+    const result = await execute(
+      () => tool.resolveExecution({ agent_id: target, tags: [] }),
+      'call_tag_x',
+    );
+
+    expect(setAgentTags).toHaveBeenCalledWith(MAIN_AGENT_ID, target, []);
+    expect(result.output).toBe(`Agent "${target}" does not exist.`);
+  });
+
+  it.each(targets)('renameAgentTool_refuses_%s', async (target) => {
+    expect.assertions(2);
+    const renameAgent = vi
+      .fn()
+      .mockRejectedValue(new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent "${target}" does not exist.`));
+    const ix = new TestInstantiationService();
+    ix.stub(ISessionSubagentService, {
+      _serviceBrand: undefined,
+      dismissAgents: vi.fn(),
+      setAgentTags: vi.fn(),
+      renameAgent,
+    } as unknown as ISessionSubagentService);
+    ix.stub(
+      IAgentScopeContext,
+      makeAgentScopeContext({ agentId: MAIN_AGENT_ID, agentScope: `agents/${MAIN_AGENT_ID}` }),
+    );
+    const tool = ix.createInstance(RenameAgentTool);
+
+    const result = await execute(
+      () => tool.resolveExecution({ agent_id: target, name: 'renamed' }),
+      'call_rename_x',
+    );
+
+    expect(renameAgent).toHaveBeenCalledWith(MAIN_AGENT_ID, target, 'renamed');
+    expect(result.output).toBe(`Agent "${target}" does not exist.`);
+  });
+
+  describe('real intra-session resolution', () => {
+    let harness: Harness;
+
+    beforeEach(() => {
+      harness = createHarness();
+      harness.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
+    });
+
+    it.each(targets)('stopAgentService_refuses_%s', async (target) => {
+      expect.assertions(2);
+      const failure = await harness.service
+        .stopAgent(MAIN_AGENT_ID, target)
+        .catch((error: unknown) => error);
+
+      expect(isMessagingError(failure, ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN)).toBe(true);
+      expect((failure as Error).message).toContain(`Unknown recipient "${target}"`);
+    });
+
+    it.each(targets)('interruptAgentService_refuses_%s', async (target) => {
+      expect.assertions(2);
+      const failure = await harness.service
+        .interruptAgent(MAIN_AGENT_ID, target)
+        .catch((error: unknown) => error);
+
+      expect(isMessagingError(failure, ErrorCodes.MESSAGE_RECIPIENT_UNKNOWN)).toBe(true);
+      expect((failure as Error).message).toContain(`Unknown recipient "${target}"`);
+    });
+  });
+});
+
+describe('cross-session messaging instructions', () => {
+  it('documents the cross-session addressing grammar', () => {
+    expect(MESSAGING_INSTRUCTIONS).toContain('session:<sessionId>');
+    expect(MESSAGING_INSTRUCTIONS).toContain('reachable sessions');
+  });
+
+  it('states that a cross-session message reaches only the other main agent', () => {
+    expect(MESSAGING_INSTRUCTIONS).toContain("other session's main agent");
   });
 });

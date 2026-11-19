@@ -62,8 +62,12 @@ export function resolveCrossSessionRegistryDir(homeDir: string): string {
   return join(homeDir, 'messaging', 'registry');
 }
 
+export function isEngineSessionId(sessionId: string): boolean {
+  return ENGINE_SESSION_ID.test(sessionId);
+}
+
 export function safeSessionFileName(sessionId: string): string {
-  return ENGINE_SESSION_ID.test(sessionId)
+  return isEngineSessionId(sessionId)
     ? sessionId
     : Buffer.from(sessionId, 'utf8').toString('hex');
 }

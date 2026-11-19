@@ -29,7 +29,7 @@ export const SendMessageToolInputSchema = z.object({
     .trim()
     .min(1)
     .describe(
-      'Recipient: "main" for the root agent, an agent name, or a raw agent id (see ListAgents).',
+      'Recipient: "main" for the root agent, an agent name or raw agent id (see ListAgents), or another session as "session:<sessionId>" or "session:<title>".',
     ),
   message: z
     .string()
