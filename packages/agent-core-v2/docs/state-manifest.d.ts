@@ -791,6 +791,12 @@ export interface AgentStateSnapshot {
         readonly kind: 'agent_message';
         readonly from: string;
         readonly replyTo?: string;
+      } | /* SessionMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+        readonly kind: 'session_message';
+        readonly fromSessionId: string;
+        readonly fromSessionTitle?: string;
+        readonly replyToSessionId?: string;
+        readonly replyToSessionTitle?: string;
       };
       readonly phase: /* TurnPhase — packages/agent-core-v2/src/agent/activityView/activityView.ts */ 'running' | 'streaming' | 'tool_call' | 'retrying';
       readonly stream?: 'tool_call' | 'assistant' | 'thinking';
@@ -940,6 +946,12 @@ export interface AgentStateSnapshot {
       readonly kind: 'agent_message';
       readonly from: string;
       readonly replyTo?: string;
+    } | /* SessionMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+      readonly kind: 'session_message';
+      readonly fromSessionId: string;
+      readonly fromSessionTitle?: string;
+      readonly replyToSessionId?: string;
+      readonly replyToSessionTitle?: string;
     };
     snapshot: () => /* ActivityTurnState — packages/agent-core-v2/src/agent/activityView/activityView.ts */ {
       readonly turnId: number;
@@ -1021,6 +1033,12 @@ export interface AgentStateSnapshot {
         readonly kind: 'agent_message';
         readonly from: string;
         readonly replyTo?: string;
+      } | /* SessionMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+        readonly kind: 'session_message';
+        readonly fromSessionId: string;
+        readonly fromSessionTitle?: string;
+        readonly replyToSessionId?: string;
+        readonly replyToSessionTitle?: string;
       };
       readonly phase: /* TurnPhase — packages/agent-core-v2/src/agent/activityView/activityView.ts */ 'running' | 'streaming' | 'tool_call' | 'retrying';
       readonly stream?: 'tool_call' | 'assistant' | 'thinking';
@@ -1184,6 +1202,12 @@ export interface AgentStateSnapshot {
       readonly kind: 'agent_message';
       readonly from: string;
       readonly replyTo?: string;
+    } | /* SessionMessageOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
+      readonly kind: 'session_message';
+      readonly fromSessionId: string;
+      readonly fromSessionTitle?: string;
+      readonly replyToSessionId?: string;
+      readonly replyToSessionTitle?: string;
     };
     readonly isError?: boolean;
     readonly note?: string;
