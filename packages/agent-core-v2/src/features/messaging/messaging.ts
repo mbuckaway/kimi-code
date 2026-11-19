@@ -9,6 +9,8 @@ export interface AgentInboxMessage {
   readonly id: string;
   readonly from: string;
   readonly fromLabel?: string;
+  readonly fromSessionId?: string;
+  readonly fromSessionLabel?: string;
   readonly message: string;
   readonly delivery: AgentInboxDelivery;
   readonly truncated: boolean;
@@ -57,6 +59,48 @@ export interface SendMessageOptions {
   readonly inReplyTo?: string;
 }
 
+export interface CrossSessionInboundMessage {
+  readonly fromSessionId: string;
+  readonly fromSessionTitle?: string;
+  readonly messageId: string;
+  readonly message: string;
+  readonly inReplyTo?: string;
+  readonly signal?: AbortSignal;
+}
+
+export type CrossSessionRefusalReason = 'policy' | 'duplicate' | 'self';
+
+export interface CrossSessionDeliveredResult {
+  readonly kind: 'delivered';
+  readonly delivery: AgentInboxDelivery;
+  readonly truncated: boolean;
+}
+
+export interface CrossSessionHeldResult {
+  readonly kind: 'held';
+  readonly truncated: boolean;
+}
+
+export interface CrossSessionRefusedResult {
+  readonly kind: 'refused';
+  readonly reason: CrossSessionRefusalReason;
+  readonly truncated: boolean;
+}
+
+export type CrossSessionReceiveResult =
+  | CrossSessionDeliveredResult
+  | CrossSessionHeldResult
+  | CrossSessionRefusedResult;
+
+export interface HeldCrossSessionMessage {
+  readonly messageId: string;
+  readonly fromSessionId: string;
+  readonly fromSessionTitle?: string;
+  readonly message: string;
+  readonly truncated: boolean;
+  readonly inReplyTo?: string;
+}
+
 export interface StopAgentResult {
   readonly agentId: string;
   readonly label: string;
@@ -92,6 +136,10 @@ export interface ISessionMessagingService {
   ): Promise<SendMessageResult>;
 
   listMessages(callerAgentId: string, options?: ListMessagesOptions): Promise<AgentInbox>;
+
+  receiveCrossSession(input: CrossSessionInboundMessage): Promise<CrossSessionReceiveResult>;
+
+  listHeldCrossSessionMessages(): readonly HeldCrossSessionMessage[];
 
   replyMessage(
     callerAgentId: string,

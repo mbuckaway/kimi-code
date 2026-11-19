@@ -180,6 +180,7 @@ export function compactionUserMessageDisposition(
     case 'hook_result':
     case 'retry':
     case 'agent_message':
+    case 'session_message':
       return 'drop';
     default: {
       const exhaustive: never = origin;

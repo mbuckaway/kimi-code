@@ -17,7 +17,11 @@ import { IEventBus } from '#/app/event/eventBus';
 import { IFlagService } from '#/app/flag/flag';
 import { Error2, ErrorCodes } from '#/errors';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import type { AgentMessageOrigin, ContextMessage } from '#/agent/contextMemory/types';
+import type {
+  AgentMessageOrigin,
+  ContextMessage,
+  SessionMessageOrigin,
+} from '#/agent/contextMemory/types';
 import { IAgentLoopService, type Turn } from '#/agent/loop/loop';
 import { TurnStarted } from '#/agent/loop/turnEvents';
 import { TurnEnded, turnKey } from '#/agent/loop/turnOps';
@@ -50,18 +54,25 @@ import {
   ISessionMetadata,
   type AgentMeta,
 } from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
 
 import { AgentMessageStepRequest } from './agentMessageRequest';
+import { ICrossSessionInboundService } from './crossSessionInboundService';
 import { AGENT_MESSAGING_FLAG_ID } from './flag';
 import {
   AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
+  CROSS_SESSION_INBOUND_HOLD_VARIANT,
   DEFAULT_INBOX_LIMIT,
   MAX_BUFFERED_AGENT_MESSAGES,
+  MAX_HELD_CROSS_SESSION_MESSAGES,
   MESSAGING_INSTRUCTIONS,
+  formatHeldCrossSessionNotice,
   formatRosterChangeNotice,
+  recordRecentKey,
   recordRecentSend,
   truncateAgentMessage,
   wrapAgentMessage,
+  wrapSessionMessage,
 } from './envelope';
 import { MAX_INBOX_MESSAGES, appendInboxEntry } from './sessionInbox';
 import {
@@ -72,6 +83,9 @@ import {
   type BroadcastDelivery,
   type BroadcastFailure,
   type BroadcastMessageResult,
+  type CrossSessionInboundMessage,
+  type CrossSessionReceiveResult,
+  type HeldCrossSessionMessage,
   type InterruptAgentResult,
   type ISessionMessagingService,
   type ListMessagesOptions,
@@ -104,6 +118,36 @@ interface AddressableAgent {
 
 type RecipientReach = 'addressable' | 'any';
 
+type DeliverySource = AgentMessageOrigin | SessionMessageOrigin;
+
+interface DeliverySender {
+  readonly origin: DeliverySource;
+  readonly identity: string;
+  readonly inboxFrom: string;
+  readonly inboxLabel?: string;
+  readonly fromSessionId?: string;
+  readonly fromSessionLabel?: string;
+  readonly resumeOwnerAgentId: string;
+  readonly resumeDescription: string;
+}
+
+interface DeliveryOutcome {
+  readonly delivery: AgentInboxDelivery;
+  readonly agentId: string;
+  readonly label: string;
+  readonly truncated: boolean;
+}
+
+interface DeliveryInput {
+  readonly sender: DeliverySender;
+  readonly recipient: AgentMessageRecipient;
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly signal: AbortSignal | undefined;
+  readonly inReplyTo: string | undefined;
+  readonly onDelivered: () => void;
+}
+
 export class SessionMessagingService extends Service implements ISessionMessagingService {
   declare readonly _serviceBrand: undefined;
 
@@ -118,6 +162,8 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   private readonly inbox = new Map<string, AgentInboxMessage[]>();
   private readonly lastRosterText = new Map<string, string>();
   private readonly rosterSyncs = new Map<string, Promise<void>>();
+  private readonly receivedCrossSessionIds = new Set<string>();
+  private readonly heldCrossSessionMessages: HeldCrossSessionMessage[] = [];
   private nextMessageNumber = 1;
 
   constructor(
@@ -126,6 +172,8 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     @IConfigService private readonly configService: IConfigService,
     @IFlagService private readonly flags: IFlagService,
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
+    @ISessionContext private readonly sessionContext: ISessionContext,
+    @ICrossSessionInboundService private readonly crossSessionInbound: ICrossSessionInboundService,
   ) {
     super();
     for (const agent of this.agentLifecycle.list()) {
@@ -232,6 +280,41 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       messages: [...filtered].toReversed().slice(0, limit),
       pending: this.pendingMessages.get(callerAgentId) ?? 0,
     };
+  }
+
+  async receiveCrossSession(
+    input: CrossSessionInboundMessage,
+  ): Promise<CrossSessionReceiveResult> {
+    input.signal?.throwIfAborted();
+    if (input.message.trim().length === 0) {
+      throw new Error2(ErrorCodes.MESSAGE_EMPTY, 'Cannot send an empty message.');
+    }
+    const messageId = input.messageId.trim();
+    if (messageId.length === 0) {
+      throw new Error2(ErrorCodes.MESSAGE_EMPTY, 'A cross-session message needs a message id.');
+    }
+    if (input.fromSessionId === this.sessionContext.sessionId) {
+      return { kind: 'refused', reason: 'self', truncated: false };
+    }
+    const dedupeKey = this.crossSessionDedupeKey(input.fromSessionId, messageId);
+    if (this.receivedCrossSessionIds.has(dedupeKey)) {
+      return { kind: 'refused', reason: 'duplicate', truncated: false };
+    }
+    const { text, truncated } = truncateAgentMessage(input.message);
+    switch (this.crossSessionInbound.get()) {
+      case 'refuse':
+        return { kind: 'refused', reason: 'policy', truncated };
+      case 'hold':
+        recordRecentKey(this.receivedCrossSessionIds, dedupeKey);
+        this.holdCrossSessionMessage(input, text, truncated);
+        return { kind: 'held', truncated };
+      case 'accept':
+        return this.acceptCrossSessionMessage(input, text, truncated, dedupeKey);
+    }
+  }
+
+  listHeldCrossSessionMessages(): readonly HeldCrossSessionMessage[] {
+    return [...this.heldCrossSessionMessages];
   }
 
   async replyMessage(
@@ -392,8 +475,9 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     signal?: AbortSignal,
     inReplyTo?: string,
   ): Promise<SendMessageResult> {
+    const sender = await this.agentSender(callerAgentId);
     const { text, truncated } = truncateAgentMessage(message);
-    const dedupeKey = this.dedupeKey(callerAgentId, recipient.agentId);
+    const dedupeKey = this.dedupeKey(sender, recipient.agentId);
     const duplicate = (): SendMessageResult => ({
       delivery: 'duplicate',
       agentId: recipient.agentId,
@@ -406,14 +490,17 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     const ownsInFlight = inFlightText === undefined;
     if (ownsInFlight) this.inFlightSends.set(dedupeKey, text);
     try {
-      return await this.deliverMessage(
-        callerAgentId,
+      return await this.deliverCore({
+        sender,
         recipient,
         text,
         truncated,
         signal,
         inReplyTo,
-      );
+        onDelivered: () => {
+          recordRecentSend(this.lastSentMessage, dedupeKey, text);
+        },
+      });
     } finally {
       if (ownsInFlight && this.inFlightSends.get(dedupeKey) === text) {
         this.inFlightSends.delete(dedupeKey);
@@ -421,22 +508,9 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     }
   }
 
-  private async deliverMessage(
-    callerAgentId: string,
-    recipient: AgentMessageRecipient,
-    text: string,
-    truncated: boolean,
-    signal: AbortSignal | undefined,
-    inReplyTo?: string,
-  ): Promise<SendMessageResult> {
-    const origin = await this.agentMessageOrigin(callerAgentId);
-    const envelopeOptions = inReplyTo === undefined ? undefined : { inReplyTo };
-    const message: ContextMessage = {
-      role: 'user',
-      content: [{ type: 'text', text: wrapAgentMessage(origin, text, envelopeOptions) }],
-      toolCalls: [],
-      origin,
-    };
+  private async deliverCore(input: DeliveryInput): Promise<DeliveryOutcome> {
+    const { sender, recipient, text, truncated, signal, inReplyTo, onDelivered } = input;
+    const message = buildDeliveryMessage(sender.origin, text, inReplyTo);
     const target = await this.ensureTarget(recipient.agentId, signal);
     signal?.throwIfAborted();
     if (target === undefined) {
@@ -463,15 +537,10 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       throw interruptedAgentError(recipient.agentId);
     }
     if (running || recipient.role === 'main') {
-      this.steerMessage(callerAgentId, target, recipient, message, text);
+      this.steerMessage(target, recipient, message);
       const delivery: AgentInboxDelivery = running ? 'steered' : 'newTurn';
-      this.recordInboxEntry(recipient.agentId, {
-        from: callerAgentId,
-        fromLabel: origin.replyTo,
-        message: text,
-        delivery,
-        truncated,
-      });
+      onDelivered();
+      this.recordDelivery(sender, recipient, text, truncated, delivery);
       return {
         delivery,
         agentId: recipient.agentId,
@@ -480,29 +549,18 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       };
     }
     const outcome = await this.resumeAgentForMessage(
-      callerAgentId,
+      sender,
       recipient,
       target,
       message,
       signal,
-      () => {
-        recordRecentSend(
-          this.lastSentMessage,
-          this.dedupeKey(callerAgentId, recipient.agentId),
-          text,
-        );
-      },
+      onDelivered,
     );
     signal?.throwIfAborted();
     if (outcome === 'busy') {
-      this.steerMessage(callerAgentId, target, recipient, message, text);
-      this.recordInboxEntry(recipient.agentId, {
-        from: callerAgentId,
-        fromLabel: origin.replyTo,
-        message: text,
-        delivery: 'steered',
-        truncated,
-      });
+      this.steerMessage(target, recipient, message);
+      onDelivered();
+      this.recordDelivery(sender, recipient, text, truncated, 'steered');
       return {
         delivery: 'steered',
         agentId: recipient.agentId,
@@ -510,19 +568,127 @@ export class SessionMessagingService extends Service implements ISessionMessagin
         truncated,
       };
     }
-    recordRecentSend(
-      this.lastSentMessage,
-      this.dedupeKey(callerAgentId, recipient.agentId),
-      text,
-    );
+    onDelivered();
+    this.recordDelivery(sender, recipient, text, truncated, 'resumed');
+    return { delivery: 'resumed', agentId: recipient.agentId, label: recipient.label, truncated };
+  }
+
+  private recordDelivery(
+    sender: DeliverySender,
+    recipient: AgentMessageRecipient,
+    text: string,
+    truncated: boolean,
+    delivery: AgentInboxDelivery,
+  ): void {
     this.recordInboxEntry(recipient.agentId, {
-      from: callerAgentId,
-      fromLabel: origin.replyTo,
+      from: sender.inboxFrom,
+      fromLabel: sender.inboxLabel,
+      fromSessionId: sender.fromSessionId,
+      fromSessionLabel: sender.fromSessionLabel,
       message: text,
-      delivery: 'resumed',
+      delivery,
       truncated,
     });
-    return { delivery: 'resumed', agentId: recipient.agentId, label: recipient.label, truncated };
+  }
+
+  private async agentSender(callerAgentId: string): Promise<DeliverySender> {
+    const origin = await this.agentMessageOrigin(callerAgentId);
+    return {
+      origin,
+      identity: `${this.sessionContext.sessionId}\0agent:${callerAgentId}`,
+      inboxFrom: callerAgentId,
+      inboxLabel: origin.replyTo,
+      resumeOwnerAgentId: callerAgentId,
+      resumeDescription: `Message reply from agent ${callerAgentId}`,
+    };
+  }
+
+  private sessionSender(
+    fromSessionId: string,
+    fromSessionTitle: string | undefined,
+  ): DeliverySender {
+    const origin: SessionMessageOrigin = {
+      kind: 'session_message',
+      fromSessionId,
+      fromSessionTitle,
+    };
+    return {
+      origin,
+      identity: `${fromSessionId}\0agent:${MAIN_AGENT_ID}`,
+      inboxFrom: fromSessionId,
+      inboxLabel: fromSessionTitle,
+      fromSessionId,
+      fromSessionLabel: fromSessionTitle,
+      resumeOwnerAgentId: MAIN_AGENT_ID,
+      resumeDescription: `Message reply from session ${fromSessionId}`,
+    };
+  }
+
+  private async acceptCrossSessionMessage(
+    input: CrossSessionInboundMessage,
+    text: string,
+    truncated: boolean,
+    dedupeKey: string,
+  ): Promise<CrossSessionReceiveResult> {
+    recordRecentKey(this.receivedCrossSessionIds, dedupeKey);
+    try {
+      const result = await this.deliverCore({
+        sender: this.sessionSender(input.fromSessionId, input.fromSessionTitle),
+        recipient: { agentId: MAIN_AGENT_ID, label: MAIN_AGENT_ID, role: 'main' },
+        text,
+        truncated,
+        signal: input.signal,
+        inReplyTo: input.inReplyTo,
+        onDelivered: () => {},
+      });
+      return { kind: 'delivered', delivery: result.delivery, truncated: result.truncated };
+    } catch (error) {
+      this.receivedCrossSessionIds.delete(dedupeKey);
+      throw error;
+    }
+  }
+
+  private holdCrossSessionMessage(
+    input: CrossSessionInboundMessage,
+    text: string,
+    truncated: boolean,
+  ): void {
+    this.heldCrossSessionMessages.push({
+      messageId: input.messageId.trim(),
+      fromSessionId: input.fromSessionId,
+      fromSessionTitle: input.fromSessionTitle,
+      message: text,
+      truncated,
+      inReplyTo: input.inReplyTo,
+    });
+    if (this.heldCrossSessionMessages.length > MAX_HELD_CROSS_SESSION_MESSAGES) {
+      this.heldCrossSessionMessages.splice(
+        0,
+        this.heldCrossSessionMessages.length - MAX_HELD_CROSS_SESSION_MESSAGES,
+      );
+    }
+    this.notifyHeldCrossSession(input.fromSessionId, input.fromSessionTitle);
+  }
+
+  private notifyHeldCrossSession(
+    fromSessionId: string,
+    fromSessionTitle: string | undefined,
+  ): void {
+    const context = this.agentLifecycle.get(MAIN_AGENT_ID);
+    if (context === undefined) return;
+    let reminder: ReminderRuntime;
+    try {
+      reminder = this.agentLifecycle.resolve(context, AgentReminder);
+    } catch {
+      return;
+    }
+    reminder.notify(formatHeldCrossSessionNotice(fromSessionId, fromSessionTitle), {
+      variant: CROSS_SESSION_INBOUND_HOLD_VARIANT,
+    });
+  }
+
+  private crossSessionDedupeKey(fromSessionId: string, messageId: string): string {
+    return `${fromSessionId}\0${messageId}`;
   }
 
   private recordInboxEntry(
@@ -535,16 +701,14 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     });
   }
 
-  private dedupeKey(callerAgentId: string, recipientAgentId: string): string {
-    return `${callerAgentId}\0${recipientAgentId}`;
+  private dedupeKey(sender: DeliverySender, recipientAgentId: string): string {
+    return `${sender.identity}\0${recipientAgentId}`;
   }
 
   private steerMessage(
-    callerAgentId: string,
     target: IAgentScopeHandle,
     recipient: AgentMessageRecipient,
     message: ContextMessage,
-    text: string,
   ): void {
     const release = this.reservePendingMessage(recipient.agentId);
     const request = new AgentMessageStepRequest(message, release);
@@ -557,15 +721,10 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       release();
       throw error;
     }
-    recordRecentSend(
-      this.lastSentMessage,
-      this.dedupeKey(callerAgentId, recipient.agentId),
-      text,
-    );
   }
 
   private async resumeAgentForMessage(
-    callerAgentId: string,
+    sender: DeliverySender,
     recipient: AgentMessageRecipient,
     target: IAgentScopeHandle,
     message: ContextMessage,
@@ -629,12 +788,12 @@ export class SessionMessagingService extends Service implements ISessionMessagin
           profileName: this.profileNameOf(target) ?? 'subagent',
           completion: this.replyOf(target, turn),
         },
-        `Message reply from agent ${callerAgentId}`,
+        sender.resumeDescription,
         controller,
         { messageDelivery: true },
       );
       try {
-        this.taskServiceOf(this.requireHandle(callerAgentId)).registerTask(task, {
+        this.taskServiceOf(this.requireHandle(sender.resumeOwnerAgentId)).registerTask(task, {
           detached: true,
           timeoutMs: remainingTimeoutMs,
         });
@@ -1058,6 +1217,35 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       });
     }
     return handle;
+  }
+}
+
+function buildDeliveryMessage(
+  origin: DeliverySource,
+  text: string,
+  inReplyTo: string | undefined,
+): ContextMessage {
+  const envelopeOptions = inReplyTo === undefined ? undefined : { inReplyTo };
+  return {
+    role: 'user',
+    content: [
+      { type: 'text', text: wrapDeliveryMessage(origin, text, envelopeOptions) },
+    ],
+    toolCalls: [],
+    origin,
+  };
+}
+
+function wrapDeliveryMessage(
+  origin: DeliverySource,
+  body: string,
+  options: { readonly inReplyTo?: string } | undefined,
+): string {
+  switch (origin.kind) {
+    case 'agent_message':
+      return wrapAgentMessage(origin, body, options);
+    case 'session_message':
+      return wrapSessionMessage(origin, body, options);
   }
 }
 

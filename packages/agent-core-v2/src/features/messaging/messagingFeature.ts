@@ -14,9 +14,13 @@ import { IStopAgentsTool } from '#/agent/tools/task/task-stop-agents/task-stop-a
 import { StopAgentsTool } from '#/agent/tools/task/task-stop-agents/taskStopAgentsTool';
 
 import { AGENT_FLEET_CONTROL_FLAG_ID, AGENT_MESSAGING_FLAG_ID } from './flag';
+import {
+  CrossSessionInboundService,
+  ICrossSessionInboundService,
+} from './crossSessionInboundService';
 import { ISessionMessagingService } from './messaging';
-import { SessionMessagingService } from './sessionMessagingService';
 import { messagingAgentRuntimeProvider } from './messagingAgentRuntime';
+import { SessionMessagingService } from './sessionMessagingService';
 import { IBroadcastMessageTool } from './tools/broadcast-message/broadcast-message';
 import { BroadcastMessageTool } from './tools/broadcast-message/broadcastMessageTool';
 import { IDismissAgentsTool } from './tools/dismiss-agents/dismiss-agents';
@@ -54,6 +58,11 @@ export class MessagingFeature extends Feature {
     this.contributeService(LifecycleScope.Session, ISessionMessagingService, SessionMessagingService, {
       activation: ScopeActivation.OnScopeCreated,
     });
+    this.contributeService(
+      LifecycleScope.Session,
+      ICrossSessionInboundService,
+      CrossSessionInboundService,
+    );
     this.contributeAgentRuntime(messagingAgentRuntimeProvider);
     this.contributeTool(ISendMessageTool, SendMessageTool, {
       name: 'SendMessage',
