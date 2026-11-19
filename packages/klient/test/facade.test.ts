@@ -404,6 +404,41 @@ describe('agent mcp / compaction routing', () => {
   });
 });
 
+describe('session cross-session inbound routing', () => {
+  it('get/set route to crossSessionInboundService with the session scope', async () => {
+    const channel = new FakeChannel();
+    const klient = createKlientFromChannel(channel);
+
+    channel.result = 'hold';
+    await expect(klient.session('s1').getCrossSessionInbound()).resolves.toBe('hold');
+    expect(channel.calls[0]).toEqual({
+      scope: { sessionId: 's1' },
+      service: 'crossSessionInboundService',
+      method: 'get',
+      args: [],
+    });
+
+    channel.result = undefined;
+    await expect(klient.session('s1').setCrossSessionInbound('refuse')).resolves.toBeUndefined();
+    expect(channel.calls[1]).toEqual({
+      scope: { sessionId: 's1' },
+      service: 'crossSessionInboundService',
+      method: 'set',
+      args: ['refuse'],
+    });
+  });
+
+  it('rejects an unknown policy before the call leaves the client', async () => {
+    const channel = new FakeChannel();
+    const klient = createKlientFromChannel(channel);
+
+    await expect(
+      klient.session('s1').setCrossSessionInbound('maybe' as never),
+    ).rejects.toBeInstanceOf(KlientValidationError);
+    expect(channel.calls).toHaveLength(0);
+  });
+});
+
 describe('session lifecycle routing', () => {
   it('delete calls the App session manager', async () => {
     const channel = new FakeChannel();
