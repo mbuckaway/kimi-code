@@ -18,6 +18,7 @@ import type {
   CapabilityStatus,
   CompactOptions,
   CreateGoalInput,
+  CrossSessionInbound,
   GetCronTasksResult,
   GoalSnapshot,
   GoalToolResult,
@@ -290,6 +291,27 @@ export class Session {
       );
     }
     await this.rpc.setPermission({ sessionId: this.id, mode });
+  }
+
+  /**
+   * This session's cross-session inbound policy (agent-core-v2 only — a
+   * v1-backed client rejects with `not_implemented`).
+   */
+  async getCrossSessionInbound(): Promise<CrossSessionInbound> {
+    this.ensureOpen();
+    return this.rpc.getCrossSessionInbound({ sessionId: this.id });
+  }
+
+  /** Change this session's cross-session inbound policy at runtime. */
+  async setCrossSessionInbound(value: CrossSessionInbound): Promise<void> {
+    this.ensureOpen();
+    if (!isCrossSessionInbound(value)) {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Session cross-session inbound must be accept, hold, or refuse',
+      );
+    }
+    await this.rpc.setCrossSessionInbound({ sessionId: this.id, value });
   }
 
   /** Shallow-merge host-owned fields into this session's persisted custom metadata. */
@@ -854,6 +876,10 @@ function normalizeOptionalString(value: string | undefined): string | undefined 
 
 function isPermissionMode(value: unknown): value is PermissionMode {
   return value === 'yolo' || value === 'manual' || value === 'auto';
+}
+
+function isCrossSessionInbound(value: unknown): value is CrossSessionInbound {
+  return value === 'accept' || value === 'hold' || value === 'refuse';
 }
 
 function resumeStateFromSummary(

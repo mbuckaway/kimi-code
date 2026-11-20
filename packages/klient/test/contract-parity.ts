@@ -86,6 +86,8 @@ import type {
   SessionMetaPatch,
 } from '@moonshot-ai/agent-core-v2/session/sessionMetadata/sessionMetadata';
 import type { ISessionTitleService } from '@moonshot-ai/agent-core-v2/session/sessionTitle/sessionTitle';
+import type { CrossSessionInbound } from '@moonshot-ai/agent-core-v2/features/messaging/crossSessionInbound';
+import type { ICrossSessionInboundService } from '@moonshot-ai/agent-core-v2/features/messaging/crossSessionInboundService';
 import type {
   AuthStatus,
   IOAuthService,
@@ -255,6 +257,10 @@ import {
 } from '../src/contract/session/question.js';
 import { skillSummarySchema } from '../src/contract/session/skills.js';
 import { sessionTitleContract } from '../src/contract/session/title.js';
+import {
+  crossSessionInboundContract,
+  crossSessionInboundSchema,
+} from '../src/contract/session/crossSessionInbound.js';
 
 import {
   authStatusSchema,
@@ -599,6 +605,18 @@ const _skillSummary: AssertWire<typeof skillSummarySchema, SkillSummary> = true;
 const _generateTitleOutput: AssertWire<
   (typeof sessionTitleContract)['generateTitle']['output'],
   Awaited<ReturnType<ISessionTitleService['generateTitle']>>
+> = true;
+
+// session/crossSessionInbound.ts
+const _crossSessionInbound: AssertWire<typeof crossSessionInboundSchema, CrossSessionInbound> =
+  true;
+const _getCrossSessionInboundOutput: AssertWire<
+  (typeof crossSessionInboundContract)['get']['output'],
+  ReturnType<ICrossSessionInboundService['get']>
+> = true;
+const _setCrossSessionInboundValue: AssertWire<
+  typeof crossSessionInboundSchema,
+  Parameters<ICrossSessionInboundService['set']>[0]
 > = true;
 
 // agent/activity.ts

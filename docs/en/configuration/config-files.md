@@ -108,6 +108,7 @@ Fields in the config file fall into two categories: **top-level scalars** that d
 | `default_permission_mode` | `string` | `manual` | Default permission mode for new sessions; one of `manual` (prompt each time), `yolo` (auto-approve tool actions, but the agent may still ask questions), or `auto` (fully autonomous — the agent decides everything without asking) |
 | `default_plan_mode` | `boolean` | `false` | Whether new sessions start in Plan mode (produce a plan before executing) by default |
 | `default_swarm_mode` | `boolean` | `true` | Whether new sessions start in Swarm mode (prefer parallel `AgentSwarm` subagents) by default |
+| `cross_session_inbound` | `string` | `accept` | Default cross-session inbound policy: `accept` delivers each message from another session, `hold` withholds them until the session switches to `accept`, `refuse` drops them |
 | `merge_all_available_skills` | `boolean` | `true` | Whether to merge Agent Skills from all available directories |
 | `extra_skill_dirs` | `array<string>` | — | Extra skill search directories, layered on top of the default directories |
 | `extra_agent_dirs` | `array<string>` | — | Extra custom agent search directories, layered on top of the default directories |

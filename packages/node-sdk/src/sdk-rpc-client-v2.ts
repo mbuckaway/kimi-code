@@ -267,6 +267,7 @@ import {
   type SwitchSessionRuntimeRpcInput,
   type SessionPromptRpcInput,
   type SessionPromptWithSkillsRpcInput,
+  type SetSessionCrossSessionInboundRpcInput,
   type SetSessionModelRpcInput,
   type SetSessionModelRpcResult,
   type SetSessionPermissionRpcInput,
@@ -289,6 +290,7 @@ import type {
   ConfigDiagnostics,
   CreateGoalInput,
   CreateSessionOptions,
+  CrossSessionInbound,
   ExportSessionInput,
   ExportSessionResult,
   FileMeta,
@@ -1830,6 +1832,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async setPermission(input: SetSessionPermissionRpcInput): Promise<void> {
     const agent = await this.agentFacade(input.sessionId);
     return agent.setPermission(input.mode);
+  }
+
+  override async getCrossSessionInbound(input: SessionIdRpcInput): Promise<CrossSessionInbound> {
+    return this.klient.session(input.sessionId).getCrossSessionInbound();
+  }
+
+  override async setCrossSessionInbound(input: SetSessionCrossSessionInboundRpcInput): Promise<void> {
+    return this.klient.session(input.sessionId).setCrossSessionInbound(input.value);
   }
 
   /** v1 maps the toggle onto two RPCs (`enterPlan` / `cancelPlan`); so does v2. */

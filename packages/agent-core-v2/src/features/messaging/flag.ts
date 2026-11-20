@@ -6,6 +6,10 @@ export const AGENT_MESSAGING_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING'
 export const AGENT_FLEET_CONTROL_FLAG_ID = 'agent_fleet_control';
 export const AGENT_FLEET_CONTROL_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_AGENT_FLEET_CONTROL';
 
+export const CROSS_SESSION_MESSAGING_FLAG_ID = 'cross_session_messaging';
+export const CROSS_SESSION_MESSAGING_FLAG_ENV =
+  'KIMI_CODE_EXPERIMENTAL_CROSS_SESSION_MESSAGING';
+
 export const agentMessagingFlag: FlagDefinitionInput = {
   id: AGENT_MESSAGING_FLAG_ID,
   title: 'Agent messaging',
@@ -26,5 +30,16 @@ export const agentFleetControlFlag: FlagDefinitionInput = {
   surface: 'both',
 };
 
+export const crossSessionMessagingFlag: FlagDefinitionInput = {
+  id: CROSS_SESSION_MESSAGING_FLAG_ID,
+  title: 'Cross-session messaging',
+  description:
+    'Let an agent receive messages from another session and route replies back to the sending session.',
+  env: CROSS_SESSION_MESSAGING_FLAG_ENV,
+  default: true,
+  surface: 'both',
+};
+
 registerFlagDefinition(agentMessagingFlag);
 registerFlagDefinition(agentFleetControlFlag);
+registerFlagDefinition(crossSessionMessagingFlag);

@@ -93,6 +93,11 @@ export type { AgentCommandInfo } from '@moonshot-ai/agent-core-v2/agent/command/
 
 export type PermissionMode = 'yolo' | 'manual' | 'auto';
 
+// Cross-session inbound is an agent-core-v2 Session-scope service; the type
+// is re-exported so callers of `Session.get/setCrossSessionInbound` stay in
+// the SDK's public vocabulary.
+export type { CrossSessionInbound } from '@moonshot-ai/agent-core-v2/features/messaging/crossSessionInbound';
+
 /**
  * Trust state of a workspace directory. Only meaningful on the agent-core-v2
  * engine; the v1 engine has no workspace-trust concept and reports

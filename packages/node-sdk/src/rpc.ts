@@ -32,6 +32,7 @@ import type {
   BackgroundTaskInfo,
   ConfigDiagnostics,
   CreateSessionOptions,
+  CrossSessionInbound,
   ExportSessionInput,
   ExportSessionResult,
   CreateGoalInput,
@@ -126,6 +127,10 @@ export interface SetSessionThinkingRpcInput extends SessionIdRpcInput {
 
 export interface SetSessionPermissionRpcInput extends SessionIdRpcInput {
   readonly mode: PermissionMode;
+}
+
+export interface SetSessionCrossSessionInboundRpcInput extends SessionIdRpcInput {
+  readonly value: CrossSessionInbound;
 }
 
 export interface UpdateSessionMetadataRpcInput extends SessionIdRpcInput {
@@ -666,6 +671,25 @@ export abstract class SDKRpcClientBase {
       agentId: this.interactiveAgentId,
       mode: input.mode,
     });
+  }
+
+  /**
+   * v2-only (`ICrossSessionInboundService`, Session scope); the v1 engine has
+   * no cross-session messaging, so the base fails loudly and
+   * `SDKRpcClientV2` overrides these.
+   */
+  async getCrossSessionInbound(_input: SessionIdRpcInput): Promise<CrossSessionInbound> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'getCrossSessionInbound is only available on the agent-core-v2 engine.',
+    );
+  }
+
+  async setCrossSessionInbound(_input: SetSessionCrossSessionInboundRpcInput): Promise<void> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'setCrossSessionInbound is only available on the agent-core-v2 engine.',
+    );
   }
 
   async updateSessionMetadata(input: UpdateSessionMetadataRpcInput): Promise<void> {
