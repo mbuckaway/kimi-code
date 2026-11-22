@@ -84,6 +84,8 @@ worker 会在预留的 scope 内提交所有交付物，并将 `reports/q3/summa
 
 你不需要了解 worker 间的通讯协议，也能查看和干预 tower。
 
+`/tower status` 和 `/tower teardown` 依赖只在 tower 模式开启时加载的 tower 工具。如果 tower 模式未开启，请先运行 `/tower on`，或让 Agent 先调用 `TowerInit`；命令仍会发送提示词，并在其中提醒 Agent 先初始化 tower 模式。
+
 - **查看状态面板：** `/tower` 或 `/tower status` 会让 Agent 调用 `TowerStatus` 读取当前状态并汇总。汇总内容包括 base、mission、roster、合并检查、inbox 数量、并发情况和近期活动。
 - **调整任务方向：** tower 开启期间，直接发送普通消息即可补充约束、调整优先级或要求总结。tower 把消息转给 worker 后，worker 会在下一步看到，不会打断当前工具调用。
 - **检查或停止 Agent：** 打开 `/tasks` 查看后台 Agent 的进展和输出，必要时可以停止其中一个。对于你主动停止的 worker 或 reviewer，tower 默认不会恢复、改派或替换，除非你另有指示。
@@ -109,6 +111,8 @@ worker 会在预留的 scope 内提交所有交付物，并将 `reports/q3/summa
 | 退出 Kimi Code 或关闭会话 | 停止 tower worker 和 reviewer，之后需要重新派发 | 磁盘上的 `.tower/` 状态、branch 和 worktree |
 
 Kimi Code 重启后，如果改由另一个会话接管当前项目，原会话的 roster 条目会失效，但 mission 和 worktree 会保留；新的主控需要重新派发 worker。一个项目不能同时存在多个 tower 主控。
+
+`/tower teardown` 同样要求 tower 模式处于开启状态，因为 tower 模式关闭时 `TowerTeardown` 不会加载。请先运行 `/tower on`，或让 Agent 先调用 `TowerInit`。
 
 ## 模式互斥
 

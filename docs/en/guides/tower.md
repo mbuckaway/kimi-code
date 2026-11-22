@@ -84,6 +84,8 @@ The worker commits all deliverables inside the reserved scope and marks `reports
 
 You do not need to understand the worker communication protocol to monitor and intervene in Tower.
 
+`/tower status` and `/tower teardown` rely on tower tools that load only while tower mode is active. If tower mode is off, run `/tower on` or let the agent call `TowerInit` first; the command still sends its prompt, with a note telling the agent to initialize tower mode before using the tool.
+
 - **Read the dashboard:** `/tower` or `/tower status` asks the agent to read the current state with `TowerStatus` and summarize it. The summary covers the base, missions, roster, merge checks, inbox count, concurrency, and recent activity.
 - **Redirect work:** while Tower is active, send a normal message to add constraints, change priorities, or request a summary. After Tower relays a message to a worker, the worker sees it at its next step without interrupting the current tool call.
 - **Inspect or stop an agent:** open `/tasks` to view background agent progress and output, and stop one if needed. For a worker or reviewer you stop deliberately, Tower does not resume, reassign, or replace it unless you say otherwise.
@@ -109,6 +111,8 @@ These actions clean up different things:
 | Exit Kimi Code or close the session | Stops Tower workers and reviewers; they must be spawned again later | On-disk `.tower/` state, branches, and worktrees |
 
 After Kimi Code restarts, if another session takes over the project, the previous session's roster entries become inactive, but missions and worktrees are preserved. The new coordinator must spawn workers again. A project cannot have two tower coordinators at the same time.
+
+`/tower teardown` also requires tower mode, because `TowerTeardown` is unloaded while tower mode is off. Run `/tower on` or have the agent call `TowerInit` first.
 
 ## Mode exclusivity
 

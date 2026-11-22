@@ -60,14 +60,12 @@ import { AgentMessageStepRequest } from './agentMessageRequest';
 import { ICrossSessionInboundService } from './crossSessionInboundService';
 import { AGENT_MESSAGING_FLAG_ID, CROSS_SESSION_MESSAGING_FLAG_ID } from './flag';
 import {
-  AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
   CROSS_SESSION_INBOUND_HOLD_VARIANT,
   DEFAULT_INBOX_LIMIT,
   MAX_BUFFERED_AGENT_MESSAGES,
   MAX_HELD_CROSS_SESSION_MESSAGES,
   MESSAGING_INSTRUCTIONS,
   formatHeldCrossSessionNotice,
-  formatRosterChangeNotice,
   recordRecentKey,
   recordRecentSend,
   truncateAgentMessage,
@@ -120,6 +118,11 @@ type RecipientReach = 'addressable' | 'any';
 
 type DeliverySource = AgentMessageOrigin | SessionMessageOrigin;
 
+interface SessionReplyTarget {
+  readonly sessionId: string;
+  readonly title?: string;
+}
+
 interface DeliverySender {
   readonly origin: DeliverySource;
   readonly identity: string;
@@ -127,6 +130,7 @@ interface DeliverySender {
   readonly inboxLabel?: string;
   readonly fromSessionId?: string;
   readonly fromSessionLabel?: string;
+  readonly replyToSession?: SessionReplyTarget;
   readonly resumeOwnerAgentId: string;
   readonly resumeDescription: string;
 }
@@ -160,8 +164,6 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   private readonly pendingInterrupts = new Map<string, IDisposable>();
   private readonly watchedAgents = new Map<string, IDisposable>();
   private readonly inbox = new Map<string, AgentInboxMessage[]>();
-  private readonly lastRosterText = new Map<string, string>();
-  private readonly rosterSyncs = new Map<string, Promise<void>>();
   private readonly receivedCrossSessionIds = new Set<string>();
   private readonly heldCrossSessionMessages: HeldCrossSessionMessage[] = [];
   private nextMessageNumber = 1;
@@ -176,25 +178,15 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     @ICrossSessionInboundService private readonly crossSessionInbound: ICrossSessionInboundService,
   ) {
     super();
-    for (const agent of this.agentLifecycle.list()) {
-      this.watchAgent(agent.agentId);
-      this.scheduleRosterSync(agent.agentId);
-    }
+    for (const agent of this.agentLifecycle.list()) this.watchAgent(agent.agentId);
     this._register(
       this.agentLifecycle.onDidCreate((agent) => {
         this.watchAgent(agent.agentId);
-        this.scheduleRosterSyncForAll();
       }),
     );
     this._register(
       this.agentLifecycle.onDidClose((agent) => {
         this.unwatchAgent(agent.agentId);
-        this.scheduleRosterSyncForAll();
-      }),
-    );
-    this._register(
-      this.sessionMetadata.onDidChangeMetadata((event) => {
-        if (event.changed.includes('agents')) this.scheduleRosterSyncForAll();
       }),
     );
     this._register(
@@ -312,8 +304,10 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       case 'refuse':
         return { kind: 'refused', reason: 'policy', truncated };
       case 'hold':
+        if (!this.holdCrossSessionMessage(input, text, truncated)) {
+          return { kind: 'refused', reason: 'queue_full', truncated };
+        }
         recordRecentKey(this.receivedCrossSessionIds, dedupeKey);
-        this.holdCrossSessionMessage(input, text, truncated);
         return { kind: 'held', truncated };
       case 'accept':
         return this.acceptCrossSessionMessage(input, text, truncated, dedupeKey);
@@ -517,7 +511,8 @@ export class SessionMessagingService extends Service implements ISessionMessagin
 
   private async deliverCore(input: DeliveryInput): Promise<DeliveryOutcome> {
     const { sender, recipient, text, truncated, signal, inReplyTo, onDelivered } = input;
-    const message = buildDeliveryMessage(sender.origin, text, inReplyTo);
+    const origin = withSessionReplyTarget(sender.origin, sender.replyToSession);
+    const message = buildDeliveryMessage(origin, text, inReplyTo);
     const target = await this.ensureTarget(recipient.agentId, signal);
     signal?.throwIfAborted();
     if (target === undefined) {
@@ -613,6 +608,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   private sessionSender(
     fromSessionId: string,
     fromSessionTitle: string | undefined,
+    replyToSession?: SessionReplyTarget,
   ): DeliverySender {
     const origin: SessionMessageOrigin = {
       kind: 'session_message',
@@ -626,6 +622,7 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       inboxLabel: fromSessionTitle,
       fromSessionId,
       fromSessionLabel: fromSessionTitle,
+      replyToSession,
       resumeOwnerAgentId: MAIN_AGENT_ID,
       resumeDescription: `Message reply from session ${fromSessionId}`,
     };
@@ -639,8 +636,15 @@ export class SessionMessagingService extends Service implements ISessionMessagin
   ): Promise<CrossSessionReceiveResult> {
     recordRecentKey(this.receivedCrossSessionIds, dedupeKey);
     try {
+      const replyToSession =
+        input.inReplyTo === undefined
+          ? undefined
+          : {
+              sessionId: this.sessionContext.sessionId,
+              title: (await this.sessionMetadata.read()).title,
+            };
       const result = await this.deliverCore({
-        sender: this.sessionSender(input.fromSessionId, input.fromSessionTitle),
+        sender: this.sessionSender(input.fromSessionId, input.fromSessionTitle, replyToSession),
         recipient: { agentId: MAIN_AGENT_ID, label: MAIN_AGENT_ID, role: 'main' },
         text,
         truncated,
@@ -659,7 +663,8 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     input: CrossSessionInboundMessage,
     text: string,
     truncated: boolean,
-  ): void {
+  ): boolean {
+    if (this.heldCrossSessionMessages.length >= MAX_HELD_CROSS_SESSION_MESSAGES) return false;
     this.heldCrossSessionMessages.push({
       messageId: input.messageId.trim(),
       fromSessionId: input.fromSessionId,
@@ -668,13 +673,8 @@ export class SessionMessagingService extends Service implements ISessionMessagin
       truncated,
       inReplyTo: input.inReplyTo,
     });
-    if (this.heldCrossSessionMessages.length > MAX_HELD_CROSS_SESSION_MESSAGES) {
-      this.heldCrossSessionMessages.splice(
-        0,
-        this.heldCrossSessionMessages.length - MAX_HELD_CROSS_SESSION_MESSAGES,
-      );
-    }
     this.notifyHeldCrossSession(input.fromSessionId, input.fromSessionTitle);
+    return true;
   }
 
   private notifyHeldCrossSession(
@@ -1171,64 +1171,12 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     else this.interruptedAgents.delete(agentId);
   }
 
-  async syncRoster(agentId: string): Promise<void> {
-    const previous = this.rosterSyncs.get(agentId) ?? Promise.resolve();
-    const run = previous.then(() => this.applyRosterSync(agentId));
-    const tail = run.then(() => undefined, onUnexpectedError);
-    this.rosterSyncs.set(agentId, tail);
-    try {
-      await run;
-    } finally {
-      if (this.rosterSyncs.get(agentId) === tail) this.rosterSyncs.delete(agentId);
-    }
-  }
-
-  private async applyRosterSync(agentId: string): Promise<void> {
-    if (!this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
-      this.lastRosterText.delete(agentId);
-      return;
-    }
-    const text = await this.rosterInstructions(agentId);
-    if (text === undefined) {
-      this.lastRosterText.delete(agentId);
-      return;
-    }
-    const previous = this.lastRosterText.get(agentId);
-    if (previous === undefined) {
-      this.lastRosterText.set(agentId, text);
-      return;
-    }
-    if (previous === text) return;
-    this.lastRosterText.set(agentId, text);
-    const context = this.agentLifecycle.get(agentId);
-    if (context === undefined) return;
-    let reminder: ReminderRuntime;
-    try {
-      reminder = this.agentLifecycle.resolve(context, AgentReminder);
-    } catch {
-      return;
-    }
-    reminder.notify(formatRosterChangeNotice(previous, text), {
-      variant: AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
-    });
-  }
-
-  private scheduleRosterSync(agentId: string): void {
-    void this.syncRoster(agentId).catch(onUnexpectedError);
-  }
-
-  private scheduleRosterSyncForAll(): void {
-    for (const agent of this.agentLifecycle.list()) this.scheduleRosterSync(agent.agentId);
-  }
-
   private unwatchAgent(agentId: string): void {
     this.watchedAgents.get(agentId)?.dispose();
     this.watchedAgents.delete(agentId);
     this.clearPendingInterrupt(agentId);
     this.interruptedAgents.delete(agentId);
     this.inbox.delete(agentId);
-    this.lastRosterText.delete(agentId);
-    this.rosterSyncs.delete(agentId);
   }
 
   private loopOf(handle: IAgentScopeHandle): IAgentLoopService {
@@ -1256,6 +1204,18 @@ export class SessionMessagingService extends Service implements ISessionMessagin
     }
     return handle;
   }
+}
+
+function withSessionReplyTarget(
+  origin: DeliverySource,
+  replyToSession: SessionReplyTarget | undefined,
+): DeliverySource {
+  if (origin.kind !== 'session_message' || replyToSession === undefined) return origin;
+  return {
+    ...origin,
+    replyToSessionId: replyToSession.sessionId,
+    replyToSessionTitle: replyToSession.title,
+  };
 }
 
 function buildDeliveryMessage(

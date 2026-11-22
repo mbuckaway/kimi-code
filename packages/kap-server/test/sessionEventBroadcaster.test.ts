@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import type { WebSocket } from 'ws';
 import type {
   AgentActivityState,
   AgentContext,
@@ -46,12 +47,14 @@ import type { AgentEvent } from '../src/transport/ws/v1/events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { sessionEventMessageSchema } from '../src/protocol/ws-control';
+import type { IConnectionRegistry } from '../src/transport/ws/connectionRegistry';
 import {
   type BroadcastDelivery,
   type BroadcastTarget,
   SessionEventBroadcaster,
 } from '../src/transport/ws/v1/sessionEventBroadcaster';
 import type { EventEnvelope } from '../src/transport/ws/v1/sessionEventJournal';
+import { WsConnectionV1 } from '../src/transport/ws/v1/wsConnectionV1';
 import { TranscriptService } from '../src/services/transcript/transcriptService';
 
 type FakeBusEvent = { type: string };
@@ -537,6 +540,68 @@ function collectingTarget(): {
     },
     envelopes,
     deliveries,
+  };
+}
+
+function serializingTarget(): {
+  target: BroadcastTarget;
+  envelopes: EventEnvelope[];
+  wires: string[];
+  deliveries: BroadcastDelivery[];
+} {
+  const envelopes: EventEnvelope[] = [];
+  const wires: string[] = [];
+  const deliveries: BroadcastDelivery[] = [];
+  return {
+    target: {
+      send: (envelope, delivery = 'subscription') => {
+        envelopes.push(envelope);
+        deliveries.push(delivery);
+      },
+      sendSerialized: (wire, delivery = 'subscription') => {
+        wires.push(wire);
+        envelopes.push(JSON.parse(wire) as EventEnvelope);
+        deliveries.push(delivery);
+      },
+    },
+    envelopes,
+    wires,
+    deliveries,
+  };
+}
+
+class FakeBroadcastSocket {
+  readonly OPEN = 1;
+  readyState = 1;
+  bufferedAmount = 0;
+  readonly sent: string[] = [];
+  private readonly handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+
+  on(event: string, handler: (...args: unknown[]) => void): this {
+    const list = this.handlers.get(event) ?? [];
+    list.push(handler);
+    this.handlers.set(event, list);
+    return this;
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close(): void {
+    this.readyState = 3;
+    for (const handler of this.handlers.get('close') ?? []) handler();
+  }
+}
+
+function makeTestRegistry(): IConnectionRegistry {
+  return {
+    add: () => {},
+    remove: () => {},
+    get: () => undefined,
+    values: () => [],
+    closeAll: () => {},
+    size: () => 0,
   };
 }
 
@@ -1374,6 +1439,266 @@ describe('SessionEventBroadcaster', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(diView.envelopes).toHaveLength(1);
     expect(plainView.envelopes).toHaveLength(0);
+  });
+
+  describe('serialised fan-out', () => {
+    function serialisedCount(spy: { mock: { calls: unknown[][] } }, type: string): number {
+      return spy.mock.calls.filter(
+        ([value]) => (value as { type?: unknown } | null)?.type === type,
+      ).length;
+    }
+
+    it('serialises a global event once and writes the same wire string to every connection', async () => {
+      const views = [serializingTarget(), serializingTarget(), serializingTarget()];
+      for (const view of views) bc.addGlobalTarget(view.target);
+      bc.addDiEventTarget(views[0]!.target);
+
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        const config = { default_model: 'k2', providers: {} };
+        eventBus.emit({
+          type: 'event.config.changed',
+          payload: { changedFields: ['defaultModel'], config },
+        });
+
+        await vi.waitFor(() => {
+          for (const view of views) expect(view.envelopes).toHaveLength(1);
+        });
+
+        const wire = views[0]!.wires[0];
+        expect(typeof wire).toBe('string');
+        expect(views.map((view) => view.wires[0])).toEqual([wire, wire, wire]);
+        expect(JSON.parse(wire as string) as EventEnvelope).toMatchObject({
+          type: 'event.config.changed',
+          session_id: '__global__',
+          payload: { changedFields: ['defaultModel'], config },
+        });
+        expect(views.map((view) => view.deliveries)).toEqual([
+          ['immediate'],
+          ['immediate'],
+          ['immediate'],
+        ]);
+        expect(serialisedCount(stringify, 'event.config.changed')).toBe(1);
+
+        eventBus.emit({
+          type: 'event.di.unit_changed',
+          payload: { scope: 'app', token: 'someService', state: 'Active' },
+        });
+
+        await vi.waitFor(() => {
+          expect(views[0]!.envelopes).toHaveLength(2);
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(views[0]!.envelopes.map((envelope) => envelope.type)).toEqual([
+          'event.config.changed',
+          'event.di.unit_changed',
+        ]);
+        expect(views[1]!.envelopes).toHaveLength(1);
+        expect(views[2]!.envelopes).toHaveLength(1);
+        expect(serialisedCount(stringify, 'event.di.unit_changed')).toBe(1);
+      } finally {
+        stringify.mockRestore();
+      }
+    });
+
+    it('keeps agent_filter delivery per connection while sharing one wire string per session event', async () => {
+      const lc = new FakeLifecycle();
+      const main = lc.addAgent('main');
+      lc.addAgent('agent-0');
+      sessions.set('s1', lc);
+
+      const mainView = serializingTarget();
+      const peerView = serializingTarget();
+      const mutedView = serializingTarget();
+      await bc.subscribe('s1', mainView.target, new Set(['main']));
+      await bc.subscribe('s1', peerView.target, new Set(['main']));
+      await bc.subscribe('s1', mutedView.target, new Set(['agent-0']));
+
+      const wireOfType = (view: ReturnType<typeof serializingTarget>, type: string) =>
+        view.wires.find((wire) => (JSON.parse(wire) as EventEnvelope).type === type);
+
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        main.bus.emit(agentEvent('turn.ended', { turnId: 1, reason: 'completed' }));
+        await bc.getCursor('s1');
+
+        expect(wireOfType(mainView, 'turn.ended')).toBeDefined();
+        expect(wireOfType(peerView, 'turn.ended')).toBe(wireOfType(mainView, 'turn.ended'));
+        expect(wireOfType(mutedView, 'turn.ended')).toBeUndefined();
+        expect(
+          mainView.envelopes.filter((envelope) => envelope.type === 'turn.ended'),
+        ).toHaveLength(1);
+        expect(
+          peerView.envelopes.filter((envelope) => envelope.type === 'turn.ended'),
+        ).toHaveLength(1);
+        expect(
+          mutedView.envelopes.filter((envelope) => envelope.type === 'turn.ended'),
+        ).toHaveLength(0);
+        expect(mainView.deliveries[0]).toBe('subscription');
+        expect(serialisedCount(stringify, 'turn.ended')).toBe(1);
+      } finally {
+        stringify.mockRestore();
+      }
+    });
+
+    it('keeps delta frames on the object path so per-connection coalescing still applies', async () => {
+      const lc = new FakeLifecycle();
+      const main = lc.addAgent('main');
+      sessions.set('s1', lc);
+
+      const view = serializingTarget();
+      await bc.subscribe('s1', view.target);
+
+      main.bus.emit(agentEvent('turn.started', { turnId: 1 }));
+      main.bus.emit(agentEvent('assistant.delta', { turnId: 1, delta: 'a' }));
+      await bc.getCursor('s1');
+
+      expect(
+        view.wires.filter((wire) => (JSON.parse(wire) as EventEnvelope).type === 'turn.started'),
+      ).toHaveLength(1);
+      expect(
+        view.wires.filter((wire) => (JSON.parse(wire) as EventEnvelope).type === 'assistant.delta'),
+      ).toHaveLength(0);
+      expect(
+        view.envelopes.filter((envelope) => envelope.type === 'assistant.delta'),
+      ).toHaveLength(1);
+      expect(view.envelopes.filter((envelope) => envelope.type === 'turn.started')).toHaveLength(1);
+    });
+
+    it('does no serialisation when no connection matches', async () => {
+      const plainView = serializingTarget();
+      bc.addGlobalTarget(plainView.target);
+
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        eventBus.emit({
+          type: 'event.di.unit_changed',
+          payload: { scope: 'app', token: 'someService', state: 'Active' },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(plainView.envelopes).toHaveLength(0);
+        expect(serialisedCount(stringify, 'event.di.unit_changed')).toBe(0);
+      } finally {
+        stringify.mockRestore();
+      }
+    });
+
+    it('writes one shared wire string through the buffered subscription path', async () => {
+      const lc = new FakeLifecycle();
+      const main = lc.addAgent('main');
+      sessions.set('s1', lc);
+
+      const sockets = [new FakeBroadcastSocket(), new FakeBroadcastSocket()];
+      const connections = sockets.map(
+        (socket) =>
+          new WsConnectionV1({
+            socket: socket as unknown as WebSocket,
+            broadcaster: bc,
+            connectionRegistry: makeTestRegistry(),
+            remoteAddress: null,
+            userAgent: null,
+          }),
+      );
+      await bc.subscribe('s1', connections[0]!, new Set(['main']));
+      await bc.subscribe('s1', connections[1]!, new Set(['main']));
+
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        main.bus.emit(agentEvent('turn.ended', { turnId: 1, reason: 'completed' }));
+
+        const rawFrames = () =>
+          sockets.map((socket) =>
+            socket.sent.filter(
+              (data) => (JSON.parse(data) as { type?: string }).type === 'turn.ended',
+            ),
+          );
+
+        await vi.waitFor(() => {
+          for (const frames of rawFrames()) expect(frames).toHaveLength(1);
+        });
+
+        const frames = rawFrames();
+        expect(frames[1]).toEqual(frames[0]);
+        expect(serialisedCount(stringify, 'turn.ended')).toBe(1);
+      } finally {
+        stringify.mockRestore();
+        for (const connection of connections) connection.close();
+      }
+    });
+
+    it('falls back to the object path when a volatile envelope cannot be serialised', async () => {
+      const lc = new FakeLifecycle();
+      const main = lc.addAgent('main');
+      sessions.set('s1', lc);
+
+      const view = serializingTarget();
+      await bc.subscribe('s1', view.target);
+
+      main.bus.emit(agentEvent('tool.progress', { progress: 1n }));
+      await bc.getCursor('s1');
+
+      expect(view.wires).toHaveLength(0);
+      expect(view.envelopes).toHaveLength(1);
+      expect(view.deliveries).toEqual(['subscription']);
+      expect(view.envelopes[0]).toMatchObject({
+        type: 'tool.progress',
+        session_id: 's1',
+        volatile: true,
+      });
+      expect((view.envelopes[0]!.payload as { progress: bigint }).progress).toBe(1n);
+    });
+
+    it('serialises a global event once across real connection sockets', async () => {
+      const sockets = [
+        new FakeBroadcastSocket(),
+        new FakeBroadcastSocket(),
+        new FakeBroadcastSocket(),
+      ];
+      const connections = sockets.map(
+        (socket) =>
+          new WsConnectionV1({
+            socket: socket as unknown as WebSocket,
+            broadcaster: bc,
+            connectionRegistry: makeTestRegistry(),
+            remoteAddress: null,
+            userAgent: null,
+          }),
+      );
+
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        const config = { default_model: 'k2', providers: {} };
+        eventBus.emit({
+          type: 'event.config.changed',
+          payload: { changedFields: ['defaultModel'], config },
+        });
+
+        const rawFrames = () =>
+          sockets.map((socket) =>
+            socket.sent.filter(
+              (data) => (JSON.parse(data) as { type?: string }).type === 'event.config.changed',
+            ),
+          );
+
+        await vi.waitFor(() => {
+          for (const frames of rawFrames()) expect(frames).toHaveLength(1);
+        });
+
+        const frames = rawFrames();
+        expect(frames[1]).toEqual(frames[0]);
+        expect(frames[2]).toEqual(frames[0]);
+        expect(JSON.parse(frames[0]![0]!) as EventEnvelope).toMatchObject({
+          type: 'event.config.changed',
+          payload: { changedFields: ['defaultModel'], config },
+        });
+        expect(serialisedCount(stringify, 'event.config.changed')).toBe(1);
+      } finally {
+        stringify.mockRestore();
+        for (const connection of connections) connection.close();
+      }
+    });
   });
 
   describe('global fan-out to unsubscribed connections', () => {
@@ -3103,6 +3428,36 @@ describe('sessionEventMessageSchema', () => {
     expect(
       sessionEventMessageSchema.safeParse(
         envelope({ type: 'turn.started', turnId: 4, origin: { kind: 'agent_message' } }),
+      ).success,
+    ).toBe(false);
+  });
+
+  it('accepts a turn.started envelope with a cross-session message origin', () => {
+    expect.assertions(1);
+
+    expect(
+      sessionEventMessageSchema.safeParse(
+        envelope({
+          type: 'turn.started',
+          turnId: 5,
+          origin: {
+            kind: 'session_message',
+            fromSessionId: 'session-b',
+            fromSessionTitle: 'Beta',
+            replyToSessionId: 'session-a',
+            replyToSessionTitle: 'Alpha',
+          },
+        }),
+      ).success,
+    ).toBe(true);
+  });
+
+  it('rejects a session_message origin without a sender session', () => {
+    expect.assertions(1);
+
+    expect(
+      sessionEventMessageSchema.safeParse(
+        envelope({ type: 'turn.started', turnId: 5, origin: { kind: 'session_message' } }),
       ).success,
     ).toBe(false);
   });

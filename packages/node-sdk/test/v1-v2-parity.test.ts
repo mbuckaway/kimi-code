@@ -22,6 +22,8 @@ import {
   ensureMainAgent,
   getLiveSessionById,
 } from '@moonshot-ai/agent-core-v2';
+import { ISessionIndexMirror } from '@moonshot-ai/agent-core-v2/app/sessionIndex/sessionIndex';
+import { drainSessionMetadataWrites } from '@moonshot-ai/agent-core-v2/session/sessionMetadata/sessionMetadataService';
 
 import { McpOAuthService } from '../../agent-core/src/mcp/oauth/service';
 
@@ -465,7 +467,27 @@ function projectResumedAgents(
  *   rosters. A model-less
  *   agent's roster is not compared at all (v1 initializes builtin tools
  *   only on a profiled agent; v2 exposes them unbound).
+ * - `agent_messaging_roster_change` injections: v1 has no per-step roster
+ *   provider, so it appends a change notice to every affected agent; v2
+ *   delivers the same information from its per-step `agent_messaging`
+ *   provider and no longer journals a notice. The reminders are dropped from
+ *   both the context history and the replay, so the conversation still
+ *   compares in full.
  */
+function isRosterChangeInjection(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const message = value as {
+    readonly origin?: { readonly kind?: string; readonly variant?: string };
+    readonly content?: readonly { readonly text?: string }[];
+  };
+  if (message.origin?.kind === 'injection' && message.origin.variant === 'agent_messaging_roster_change') {
+    return true;
+  }
+  if (message.origin !== undefined) return false;
+  const text = (message.content ?? []).map((part) => part.text ?? '').join('');
+  return text.includes('The agent roster changed.');
+}
+
 function projectResumedAgent(agent: ResumedAgentState, home: HomePair): unknown {
   const projected = scrubHomePrefixes(agent, home) as Record<string, unknown>;
   const config = projected['config'] as Record<string, unknown>;
@@ -488,10 +510,11 @@ function projectResumedAgent(agent: ResumedAgentState, home: HomePair): unknown 
       .toSorted((a, b) => String(a.name).localeCompare(String(b.name)));
   }
   const context = projected['context'] as { readonly history: readonly unknown[] };
-  projected['context'] =
-    context.history.length === 0 ? context : { history: context.history };
+  const history = context.history.filter((message) => !isRosterChangeInjection(message));
+  projected['context'] = context.history.length === 0 ? { ...context, history } : { history };
   const replay = (projected['replay'] as readonly Record<string, unknown>[])
     .filter((record) => record['type'] !== 'config_updated')
+    .filter((record) => !isRosterChangeInjection(record['message']))
     .map((record) => {
       const { time: _time, ...rest } = record;
       if (rest['type'] === 'goal_updated') {
@@ -1301,6 +1324,35 @@ async function createOnBoth(
   ]);
 }
 
+/**
+ * Wait until the v2 session index has absorbed the metadata writes the test
+ * already awaited. `listSessions` answers from that read model: `SessionMetadata`
+ * queues its writes and the index mirror batches them behind a 100ms flush
+ * timer, so a listing taken right after a create / rename / metadata / prompt /
+ * steer / skill activation can still observe the pre-write summary. Both queues
+ * are drained here — the same settlement kap-server and the SDK client perform
+ * on shutdown — so the compared read sees the write.
+ */
+async function drainV2ReadModel(pair: SessionParityPair): Promise<void> {
+  await drainSessionMetadataWrites();
+  const mirror = pair.v2.engineAccessor.get(ISessionIndexMirror);
+  // `drain()` flushes until the queue is empty (bounded, retrying transient
+  // failures) and cancels the flush timer before returning, so no flush runs
+  // concurrently with the compared read. If the read model cannot write in this
+  // harness, the listing merges the pending summaries, so the read stays
+  // correct either way.
+  await mirror.drain();
+}
+
+/** Both engines' listings, taken after {@link drainV2ReadModel}. */
+async function listSessionsOnBoth(
+  pair: SessionParityPair,
+  options: Parameters<SDKRpcClient['listSessions']>[0] = {},
+): Promise<readonly [readonly SessionSummary[], readonly SessionSummary[]]> {
+  await drainV2ReadModel(pair);
+  return Promise.all([pair.v1.listSessions(options), pair.v2.listSessions(options)]);
+}
+
 /** v2 materializes the main agent lazily (on the cold-resume path) where v1
  *  creates it eagerly; the fork copies the source's agent roster, so close +
  *  cold-resume the source on both engines first to give the fork the same
@@ -1485,26 +1537,21 @@ describe('v1↔v2 session lifecycle parity', () => {
         pair.v2.renameSession({ id: 'session_parity_one', title: 'Parity Session One' }),
       ]);
       const project = KNOWN_DIFFS.listSessions;
-      const [v1All, v2All] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1All, v2All] = await listSessionsOnBoth(pair);
       expect(normalize(project(v2All, pair.v2Home), 'id')).toEqual(
         normalize(project(v1All, pair.v1Home), 'id'),
       );
       expect(v1All).toHaveLength(2);
-      const [v1Filtered, v2Filtered] = await Promise.all([
-        pair.v1.listSessions({ workDir: pair.workDir }),
-        pair.v2.listSessions({ workDir: pair.workDir }),
-      ]);
+      const [v1Filtered, v2Filtered] = await listSessionsOnBoth(pair, {
+        workDir: pair.workDir,
+      });
       expect(normalize(project(v2Filtered, pair.v2Home), 'id')).toEqual(
         normalize(project(v1Filtered, pair.v1Home), 'id'),
       );
       expect(v1Filtered.map((summary) => summary.id)).toEqual(['session_parity_one']);
-      const [v1ById, v2ById] = await Promise.all([
-        pair.v1.listSessions({ sessionId: 'session_parity_two' }),
-        pair.v2.listSessions({ sessionId: 'session_parity_two' }),
-      ]);
+      const [v1ById, v2ById] = await listSessionsOnBoth(pair, {
+        sessionId: 'session_parity_two',
+      });
       expect(normalize(project(v2ById, pair.v2Home), 'id')).toEqual(
         normalize(project(v1ById, pair.v1Home), 'id'),
       );
@@ -1512,7 +1559,9 @@ describe('v1↔v2 session lifecycle parity', () => {
     } finally {
       await closeSessionPair(pair);
     }
-  });
+    // Two engines, two sessions, and six read-model-drained listings: budget
+    // for the fixture instead of the 5s default.
+  }, 15_000);
 
   it('renameSession renames a closed session and rejects an empty title on both engines', async () => {
     const pair = await makeSessionParityPair();
@@ -1526,10 +1575,7 @@ describe('v1↔v2 session lifecycle parity', () => {
         pair.v1.renameSession({ id: 'session_parity_rename', title: 'Renamed After Close' }),
         pair.v2.renameSession({ id: 'session_parity_rename', title: 'Renamed After Close' }),
       ]);
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       const project = KNOWN_DIFFS.listSessions;
       expect(normalize(project(v2List, pair.v2Home), 'id')).toEqual(
         normalize(project(v1List, pair.v1Home), 'id'),
@@ -1557,10 +1603,7 @@ describe('v1↔v2 session lifecycle parity', () => {
         pair.v2.closeSession({ sessionId: 'session_parity_close' }),
       ]);
       const project = KNOWN_DIFFS.listSessions;
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       expect(normalize(project(v2List, pair.v2Home), 'id')).toEqual(
         normalize(project(v1List, pair.v1Home), 'id'),
       );
@@ -1570,10 +1613,7 @@ describe('v1↔v2 session lifecycle parity', () => {
         pair.v1.closeSession({ sessionId: 'session_parity_close' }),
         pair.v2.closeSession({ sessionId: 'session_parity_close' }),
       ]);
-      const [v1Again, v2Again] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1Again, v2Again] = await listSessionsOnBoth(pair);
       expect(normalize(project(v2Again, pair.v2Home), 'id')).toEqual(
         normalize(project(v1Again, pair.v1Home), 'id'),
       );
@@ -1592,10 +1632,7 @@ describe('v1↔v2 session lifecycle parity', () => {
         pair.v2.deleteSession({ sessionId: 'session_parity_delete' }),
       ]);
       const project = KNOWN_DIFFS.listSessions;
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       expect(normalize(project(v2List, pair.v2Home), 'id')).toEqual(
         normalize(project(v1List, pair.v1Home), 'id'),
       );
@@ -1644,10 +1681,7 @@ describe('v1↔v2 session lifecycle parity', () => {
       // The fork merges source and caller custom metadata (goal excluded).
       expect(v1Fork.metadata).toEqual({ origin: 'source', shared: 'fork', fork: 'yes' });
       expect(v2Fork.metadata).toEqual({ origin: 'source', shared: 'fork', fork: 'yes' });
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       const projectList = KNOWN_DIFFS.listSessions;
       expect(normalize(projectList(v2List, pair.v2Home), 'id')).toEqual(
         normalize(projectList(v1List, pair.v1Home), 'id'),
@@ -1870,10 +1904,7 @@ describe('v1↔v2 session lifecycle parity', () => {
           metadata: { b: '2', shared: 'new' },
         }),
       ]);
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       const project = KNOWN_DIFFS.listSessions;
       expect(normalize(project(v2List, pair.v2Home), 'id')).toEqual(
         normalize(project(v1List, pair.v1Home), 'id'),
@@ -1883,7 +1914,7 @@ describe('v1↔v2 session lifecycle parity', () => {
     } finally {
       await closeSessionPair(pair);
     }
-  });
+  }, 15_000);
 
   it('addAdditionalDir returns the same result for persist and non-persist', async () => {
     const pair = await makeSessionParityPair();
@@ -2791,10 +2822,7 @@ describe('v1↔v2 agent interaction parity', () => {
         pair.v2.prompt({ ...input, input: [{ type: 'text', text: 'hello parity' }] }),
       ]);
       const project = KNOWN_DIFFS.listSessions;
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       expect(normalize(project(v2List, pair.v2Home), 'id')).toEqual(
         normalize(project(v1List, pair.v1Home), 'id'),
       );
@@ -2826,10 +2854,7 @@ describe('v1↔v2 agent interaction parity', () => {
       // turn is returned instead of rejecting, and the metadata is updated.
       await pair.v1.steer({ ...input, input: [{ type: 'text', text: 'steer text' }] });
       await pair.v2.steer({ ...input, input: [{ type: 'text', text: 'steer text' }] });
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       expect(v1List[0]?.title).toBe('steer text');
       expect(v1List[0]?.lastPrompt).toBe('steer text');
       expect(v2List[0]?.title).toBe('steer text');
@@ -2875,10 +2900,7 @@ describe('v1↔v2 agent interaction parity', () => {
         pair.v2.activateSkill({ ...input, name: 'parity-skill', args: 'some args' }),
       ]);
       const project = KNOWN_DIFFS.listSessions;
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       expect(normalize(project(v2List, pair.v2Home), 'id')).toEqual(
         normalize(project(v1List, pair.v1Home), 'id'),
       );
@@ -2902,7 +2924,7 @@ describe('v1↔v2 agent interaction parity', () => {
       await closeSessionPair(pair);
       restoreEnv();
     }
-  });
+  }, 15_000);
 
   it('activatePluginCommand activates and rejects identically', async () => {
     const restoreEnv = scrubConfigEnv();
@@ -2952,10 +2974,7 @@ describe('v1↔v2 agent interaction parity', () => {
         }),
       ]);
       const project = KNOWN_DIFFS.listSessions;
-      const [v1List, v2List] = await Promise.all([
-        pair.v1.listSessions(),
-        pair.v2.listSessions(),
-      ]);
+      const [v1List, v2List] = await listSessionsOnBoth(pair);
       expect(normalize(project(v2List, pair.v2Home), 'id')).toEqual(
         normalize(project(v1List, pair.v1Home), 'id'),
       );
@@ -3696,7 +3715,10 @@ describe('v1↔v2 print policy parity', () => {
       await closeSessionPair(ceilingPair);
       restoreEnv();
     }
-  });
+    // Two agent pairs, four background shells, and the 1.1s wall-clock wait
+    // below are all part of the scenario: budget for them explicitly instead
+    // of relying on the 5s default.
+  }, 20_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -5354,18 +5376,24 @@ describe('v1↔v2 residual surface parity', () => {
             key === 'origin' ? undefined : value,
           ),
         );
-      // Both engines materialize the side-question reminder while forking, and
-      // both inject the roster-change reminder for the forked child ahead of it:
-      // v2 appends the roster reminder during the fork and the side-question
-      // reminder at the fork event point, so the inherited contexts are
-      // identical right after fork.
+      // Both engines materialize the side-question reminder while forking.
+      // v1 also injects a roster-change notice (it has no per-step roster
+      // provider); v2 delivers the roster from its provider and journals no
+      // notice, so the notice is projected out of both contexts.
+      const withoutRosterChange = (
+        context: { readonly history: readonly unknown[] },
+      ): readonly unknown[] =>
+        context.history.filter((message) => !isRosterChangeInjection(message));
       expect(v1Context.history).toHaveLength(3);
-      expect(v2Context.history).toHaveLength(3);
-      expect(stripOrigins(v2Context)).toEqual(stripOrigins(v1Context));
-      // Non-vacuous: the inherited import plus the roster-change reminder plus
-      // the side-question reminder (byte-identical templates on both engines).
-      const v1History = v1Context.history;
-      expect(v1History.length).toBeGreaterThanOrEqual(3);
+      expect(v2Context.history).toHaveLength(2);
+      const v1History = withoutRosterChange(v1Context);
+      const v2History = withoutRosterChange(v2Context);
+      expect(v1History).toHaveLength(2);
+      expect(v2History).toHaveLength(2);
+      expect(stripOrigins({ history: v2History })).toEqual(stripOrigins({ history: v1History }));
+      // Non-vacuous: the inherited import plus the side-question reminder
+      // (byte-identical templates on both engines).
+      expect(v1History.length).toBeGreaterThanOrEqual(2);
       const reminder = v1History.at(-1);
       expect(JSON.stringify(reminder)).toContain('side-channel conversation');
     } finally {

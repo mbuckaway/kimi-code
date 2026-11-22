@@ -7,8 +7,15 @@ import { TestInstantiationService } from '#/_base/di/test';
 import { ILogService } from '#/_base/log/log';
 import { ISessionIndexMirror } from '#/app/sessionIndex/sessionIndex';
 import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
-import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
-import { SessionMetadata } from '#/session/sessionMetadata/sessionMetadataService';
+import {
+  ISessionMetadata,
+  type AgentMeta,
+  type SessionMeta,
+} from '#/session/sessionMetadata/sessionMetadata';
+import {
+  SessionMetadata,
+  drainSessionMetadataWrites,
+} from '#/session/sessionMetadata/sessionMetadataService';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
 import { JsonAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
@@ -386,6 +393,18 @@ describe('SessionMetadata', () => {
     );
   });
 
+  it('treats regenerating the current generated title as success without a write', async () => {
+    const store = ix.get(IAtomicDocumentStore);
+    const meta = ix.get(ISessionMetadata);
+    await meta.setGeneratedTitleIfUncustomized('generated title');
+    const set = vi.spyOn(store, 'set');
+
+    await expect(
+      meta.setGeneratedTitleIfUncustomized('generated title', { force: true }),
+    ).resolves.toBe(true);
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('does not downgrade a modern titleKind on a legacy false marker', async () => {
     const store = ix.get(IAtomicDocumentStore);
     await store.set(META_SCOPE, 'state.json', {
@@ -552,6 +571,115 @@ describe('SessionMetadata', () => {
     ]);
   });
 
+  it('coalesces concurrent agent registrations into one queued write', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const store = ix.get(IAtomicDocumentStore);
+    const setSpy = vi.spyOn(store, 'set');
+    const agentIds = Array.from({ length: 8 }, (_, index) => `agent-${index}`);
+
+    await Promise.all(
+      agentIds.map((agentId, index) =>
+        meta.registerAgent(agentId, { homedir: `/tmp/agents/${index}`, type: 'sub' }),
+      ),
+    );
+
+    expect(setSpy.mock.calls.length).toBeLessThan(agentIds.length);
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    const persisted = await store.get<SessionMeta>(META_SCOPE, 'state.json');
+    expect(Object.keys(persisted?.agents ?? {}).toSorted()).toEqual(agentIds.toSorted());
+    expect(Object.keys((await meta.read()).agents ?? {}).toSorted()).toEqual(agentIds.toSorted());
+  });
+
+  it('fires one change event per coalesced agents patch', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const events: { readonly changed: readonly string[] }[] = [];
+    const sub = meta.onDidChangeMetadata((event) => {
+      events.push(event);
+    });
+
+    await Promise.all([
+      meta.registerAgent('agent-0', { type: 'sub' }),
+      meta.registerAgent('agent-1', { type: 'sub' }),
+    ]);
+
+    expect(events).toEqual([{ changed: ['agents'] }]);
+    sub.dispose();
+  });
+
+  it('coalesces a queued unregister with a register into one write', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.registerAgent('agent-a', { type: 'sub' });
+    const store = ix.get(IAtomicDocumentStore);
+    const setSpy = vi.spyOn(store, 'set');
+
+    await Promise.all([
+      meta.unregisterAgent('agent-a'),
+      meta.registerAgent('agent-b', { type: 'sub' }),
+    ]);
+
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    const persisted = await store.get<SessionMeta>(META_SCOPE, 'state.json');
+    expect(persisted?.agents).toEqual({ 'agent-b': { type: 'sub' } });
+  });
+
+  it('keeps agent registration order around an interleaved non-agents patch', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const store = ix.get(IAtomicDocumentStore);
+    const setSpy = vi.spyOn(store, 'set');
+
+    await Promise.all([
+      meta.registerAgent('agent-0', { type: 'sub' }),
+      meta.update({ title: 'mid' }, { touchUpdatedAt: false }),
+      meta.registerAgent('agent-1', { type: 'sub' }),
+    ]);
+
+    expect(setSpy).toHaveBeenCalledTimes(3);
+    const documents = setSpy.mock.calls.map((call) => call[2] as SessionMeta);
+    expect(documents[0]?.agents).toEqual({ 'agent-0': { type: 'sub' } });
+    expect(documents[1]).toMatchObject({ title: 'mid', agents: { 'agent-0': { type: 'sub' } } });
+    expect(documents[2]?.agents).toEqual({
+      'agent-0': { type: 'sub' },
+      'agent-1': { type: 'sub' },
+    });
+  });
+
+  it('writes once for a non-agents patch', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const store = ix.get(IAtomicDocumentStore);
+    const setSpy = vi.spyOn(store, 'set');
+
+    await meta.update({ title: 'single write' });
+
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    expect(setSpy).toHaveBeenCalledWith(
+      META_SCOPE,
+      'state.json',
+      expect.objectContaining({ title: 'single write' }),
+    );
+  });
+
+  it('skips the write when every coalesced registration is unchanged', async () => {
+    const meta = ix.get(ISessionMetadata);
+    const alreadyKnown: AgentMeta = { homedir: '/tmp/sessions/wd_test/s1/agents/main', type: 'main' };
+    await meta.registerAgent('main', alreadyKnown);
+    const store = ix.get(IAtomicDocumentStore);
+    const setSpy = vi.spyOn(store, 'set');
+    let fired = 0;
+    const sub = meta.onDidChangeMetadata(() => {
+      fired++;
+    });
+
+    await Promise.all([meta.registerAgent('main', alreadyKnown), meta.registerAgent('main', alreadyKnown)]);
+
+    expect(setSpy).not.toHaveBeenCalled();
+    expect(fired).toBe(0);
+    sub.dispose();
+  });
+
   it('treats re-registering an unchanged agent as a no-op', async () => {
     const meta = ix.get(ISessionMetadata);
     await meta.registerAgent('main', {
@@ -667,5 +795,216 @@ describe('SessionMetadata', () => {
     await meta.setArchived(true);
     expect(mirror.recorded).toHaveLength(1);
     expect(mirror.recorded[0]?.archived).toBe(true);
+  });
+
+  it('skips an unchanged non-agents patch without writing or firing', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const store = ix.get(IAtomicDocumentStore);
+    const setSpy = vi.spyOn(store, 'set');
+    let fired = 0;
+    const sub = meta.onDidChangeMetadata(() => {
+      fired++;
+    });
+
+    await meta.update({ title: 'same' }, { touchUpdatedAt: false });
+    await meta.update({ title: 'same' }, { touchUpdatedAt: false });
+    await meta.update({ lastTurnReason: undefined }, { touchUpdatedAt: false });
+    await meta.update({ custom: { a: [1, { b: 'c' }] } }, { touchUpdatedAt: false });
+    await meta.update({ custom: { a: [1, { b: 'c' }] } }, { touchUpdatedAt: false });
+
+    expect(setSpy).toHaveBeenCalledTimes(2);
+    expect(fired).toBe(2);
+
+    const before = (await meta.read()).updatedAt;
+    await new Promise((r) => setTimeout(r, 2));
+    await meta.setTitle('same');
+    await meta.setTitle('same');
+
+    expect(setSpy).toHaveBeenCalledTimes(3);
+    expect(fired).toBe(3);
+    expect((await meta.read()).titleKind).toBe('custom');
+    expect((await meta.read()).updatedAt).toBe(before);
+    sub.dispose();
+  });
+
+  it('skips setArchived on an already-archived session', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    await meta.setArchived(true);
+    const store = ix.get(IAtomicDocumentStore);
+    const setSpy = vi.spyOn(store, 'set');
+    let fired = 0;
+    const sub = meta.onDidChangeMetadata(() => {
+      fired++;
+    });
+    const archivedAt = (await meta.read()).archivedAt;
+
+    await meta.setArchived(true);
+
+    expect(setSpy).not.toHaveBeenCalled();
+    expect(fired).toBe(0);
+    expect((await meta.read()).archivedAt).toBe(archivedAt);
+    sub.dispose();
+  });
+
+  it('restores the previous non-agents state when the write rejects', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const before = await meta.read();
+    const store = ix.get(IAtomicDocumentStore);
+    vi.spyOn(store, 'set').mockRejectedValueOnce(new Error('disk full'));
+    let fired = 0;
+    const sub = meta.onDidChangeMetadata(() => {
+      fired++;
+    });
+    const mirrored = mirror.recorded.length;
+
+    await expect(meta.update({ title: 'lost' })).rejects.toThrow('disk full');
+
+    expect(fired).toBe(0);
+    expect(mirror.recorded).toHaveLength(mirrored);
+    expect(await meta.read()).toMatchObject({ updatedAt: before.updatedAt });
+    expect((await meta.read()).title).toBeUndefined();
+
+    await meta.update({ lastPrompt: 'kept' });
+    const persisted = await store.get<SessionMeta>(META_SCOPE, 'state.json');
+    expect(persisted).toMatchObject({ lastPrompt: 'kept' });
+    expect(persisted?.title).toBeUndefined();
+    sub.dispose();
+  });
+
+  it('restores the previous agents when the write rejects', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.registerAgent('main', { type: 'main' });
+    const store = ix.get(IAtomicDocumentStore);
+    vi.spyOn(store, 'set').mockRejectedValueOnce(new Error('agents down'));
+    let fired = 0;
+    const sub = meta.onDidChangeMetadata(() => {
+      fired++;
+    });
+    const mirrored = mirror.recorded.length;
+
+    await expect(meta.registerAgent('sub', { type: 'sub' })).rejects.toThrow('agents down');
+
+    expect(fired).toBe(0);
+    expect(mirror.recorded).toHaveLength(mirrored);
+    expect((await meta.read()).agents).toEqual({ main: { type: 'main' } });
+    const persisted = await store.get<SessionMeta>(META_SCOPE, 'state.json');
+    expect(persisted?.agents).toEqual({ main: { type: 'main' } });
+    sub.dispose();
+  });
+
+  it('drain awaits a write enqueued while it is already draining', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const store = ix.get(IAtomicDocumentStore);
+    const set = store.set.bind(store);
+    let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    let markFirstStarted: (() => void) | undefined;
+    let markSecondStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondReleased = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let call = 0;
+    vi.spyOn(store, 'set').mockImplementation(async (scope, key, value) => {
+      call += 1;
+      if (call === 1) {
+        markFirstStarted?.();
+        await firstReleased;
+      }
+      if (call === 2) {
+        markSecondStarted?.();
+        await secondReleased;
+      }
+      await set(scope, key, value);
+    });
+
+    const first = meta.update({ title: 'first' });
+    await firstStarted;
+    const drained = drainSessionMetadataWrites();
+    const second = meta.update({ title: 'second' });
+    let drainedSettled = false;
+    void drained.then(() => {
+      drainedSettled = true;
+    });
+    try {
+      releaseFirst?.();
+      await secondStarted;
+      await new Promise((r) => setTimeout(r, 0));
+      expect(drainedSettled).toBe(false);
+    } finally {
+      releaseFirst?.();
+      releaseSecond?.();
+    }
+
+    await drained;
+    expect(await store.get<SessionMeta>(META_SCOPE, 'state.json')).toMatchObject({
+      title: 'second',
+    });
+    await Promise.all([first, second]);
+  });
+
+  it('drain awaits the document written during load', async () => {
+    const store = ix.get(IAtomicDocumentStore);
+    const set = store.set.bind(store);
+    let releaseWrite: (() => void) | undefined;
+    let markWriteStarted: (() => void) | undefined;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const writeReleased = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    vi.spyOn(store, 'set').mockImplementation(async (scope, key, value) => {
+      markWriteStarted?.();
+      await writeReleased;
+      await set(scope, key, value);
+    });
+
+    ix.get(ISessionMetadata);
+    await writeStarted;
+    const drained = drainSessionMetadataWrites();
+    let drainedSettled = false;
+    void drained.then(() => {
+      drainedSettled = true;
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 0));
+      expect(drainedSettled).toBe(false);
+      expect(await store.get(META_SCOPE, 'state.json')).toBeUndefined();
+    } finally {
+      releaseWrite?.();
+    }
+
+    await drained;
+    expect(await store.get(META_SCOPE, 'state.json')).toMatchObject({ id: 's1' });
+  });
+
+  it('keeps draining the queue after a drain microtask rejection', async () => {
+    const warn = vi.fn();
+    ix.stub(ILogService, { ...stubLog(), warn });
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const internals = meta as unknown as { drainTasks(): Promise<void> };
+    vi.spyOn(internals, 'drainTasks').mockRejectedValueOnce(new Error('drain exploded'));
+
+    await expect(meta.update({ title: 'after rejection' })).resolves.toBeUndefined();
+
+    expect(await meta.read()).toMatchObject({ title: 'after rejection' });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('drain failed'),
+      expect.objectContaining({ sessionId: 's1', error: 'drain exploded' }),
+    );
   });
 });

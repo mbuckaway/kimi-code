@@ -208,6 +208,18 @@ describe('isInternalMessage', () => {
     ).toBe(true);
   });
 
+  it('marks session_message origin as internal', () => {
+    expect(
+      isInternalMessage(
+        userMsg('x', {
+          kind: 'session_message',
+          fromSessionId: 'session-b',
+          fromSessionTitle: 'Beta',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it('keeps real user messages', () => {
     expect(isInternalMessage(userMsg('hello', { kind: 'user' }))).toBe(false);
   });

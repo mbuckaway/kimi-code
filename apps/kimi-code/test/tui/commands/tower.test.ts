@@ -54,12 +54,16 @@ function makeHost(
 }
 
 describe('handleTowerCommand', () => {
-  it('reports tower status when called without args, without touching the mode', async () => {
+  it('reports tower status with a TowerInit fallback when called without args, without touching the mode', async () => {
     const { host, session } = makeHost({ towerMode: false });
 
     await handleTowerCommand(host, '');
 
-    expect(host.sendNormalUserInput).toHaveBeenCalledWith(TOWER_STATUS_PROMPT);
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(
+      expect.stringContaining(TOWER_STATUS_PROMPT),
+    );
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(expect.stringContaining('TowerInit'));
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(expect.stringContaining('TowerStatus'));
     expect(session.setTowerMode).not.toHaveBeenCalled();
     expect(host.ensureSession).not.toHaveBeenCalled();
   });
@@ -73,12 +77,66 @@ describe('handleTowerCommand', () => {
     expect(session.setTowerMode).not.toHaveBeenCalled();
   });
 
+  it('trusts the live session status over a stale cached tower mode', async () => {
+    const { host, session } = makeHost({ towerMode: false });
+    session.getStatus.mockResolvedValueOnce({ towerMode: true });
+
+    await handleTowerCommand(host, 'status');
+
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(TOWER_STATUS_PROMPT);
+    expect(session.setTowerMode).not.toHaveBeenCalled();
+  });
+
+  it('uses a live off status even when the cache says tower mode is on', async () => {
+    const { host, session } = makeHost({ towerMode: true });
+    session.getStatus.mockResolvedValueOnce({ towerMode: false });
+
+    await handleTowerCommand(host, 'teardown');
+
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(
+      expect.stringContaining(TOWER_TEARDOWN_PROMPT),
+    );
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(expect.stringContaining('TowerInit'));
+  });
+
+  it('falls back to the cached tower mode when the status call fails', async () => {
+    const { host, session } = makeHost({ towerMode: true });
+    session.getStatus.mockRejectedValueOnce(new Error('status unavailable'));
+
+    await handleTowerCommand(host, 'status');
+
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(TOWER_STATUS_PROMPT);
+  });
+
+  it('uses the cached mode without creating a session when none exists', async () => {
+    const { host, session } = makeHost({ hasSession: false, towerMode: false });
+
+    await handleTowerCommand(host, 'status');
+
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(expect.stringContaining('TowerInit'));
+    expect(host.ensureSession).not.toHaveBeenCalled();
+    expect(session.getStatus).not.toHaveBeenCalled();
+  });
+
   it('sends the teardown instruction for the teardown subcommand, without touching the mode', async () => {
     const { host, session } = makeHost({ towerMode: true });
 
     await handleTowerCommand(host, 'teardown');
 
     expect(host.sendNormalUserInput).toHaveBeenCalledWith(TOWER_TEARDOWN_PROMPT);
+    expect(session.setTowerMode).not.toHaveBeenCalled();
+  });
+
+  it('names TowerInit for teardown when tower mode is off', async () => {
+    const { host, session } = makeHost({ towerMode: false });
+
+    await handleTowerCommand(host, 'teardown');
+
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(
+      expect.stringContaining(TOWER_TEARDOWN_PROMPT),
+    );
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(expect.stringContaining('TowerInit'));
+    expect(host.sendNormalUserInput).toHaveBeenCalledWith(expect.stringContaining('TowerTeardown'));
     expect(session.setTowerMode).not.toHaveBeenCalled();
   });
 

@@ -171,6 +171,11 @@ function formatRefused(
         `Cannot send a cross-session ${kind} to your own session.`,
         result.truncated,
       );
+    case 'queue_full':
+      return output(
+        `The ${kind} to ${label} was refused because the receiving session's cross-session hold queue is full. Retry later.`,
+        result.truncated,
+      );
   }
 }
 

@@ -18,6 +18,7 @@ import { CROSS_SESSION_MESSAGING_FLAG_ID } from '../flag';
 import {
   createCrossSessionRegistry,
   resolveCrossSessionRegistryDir,
+  type CrossSessionRegistration,
   type ICrossSessionRegistry,
 } from './crossSessionRegistry';
 import {
@@ -75,8 +76,28 @@ export interface ICrossSessionMessagingService {
 export const ICrossSessionMessagingService: ServiceIdentifier<ICrossSessionMessagingService> =
   createDecorator<ICrossSessionMessagingService>('crossSessionMessagingService');
 
+const BIND_WINDOW_TOTAL_MS = 500;
+const BIND_WINDOW_STEP_MS = 50;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function bindWindowDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) {
+    return Promise.reject(signal.reason ?? new Error('cross-session send aborted'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('cross-session send aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function sendResultFromAck(ack: CrossSessionAckFrame): CrossSessionSendResult {
@@ -161,50 +182,20 @@ export class CrossSessionMessagingService
       return { kind: 'refused', reason: 'self', truncated: false };
     }
 
-    const target = this.sessions.get(toSessionId);
-    if (target !== undefined) {
-      try {
-        const result: CrossSessionReceiveResult = await target.accessor
-          .get(ISessionMessagingService)
-          .receiveCrossSession({
-            fromSessionId,
-            fromSessionTitle: input.fromSessionTitle,
-            messageId: input.messageId,
-            message: input.message,
-            inReplyTo: input.inReplyTo,
-            signal: input.signal,
-          });
-        return result;
-      } catch (error) {
-        if (input.signal?.aborted === true) throw error;
-        return { kind: 'error', error: errorMessage(error) };
+    const deadline = Date.now() + BIND_WINDOW_TOTAL_MS;
+    for (;;) {
+      input.signal?.throwIfAborted();
+      const inProcess = await this.deliverInProcess(fromSessionId, toSessionId, input);
+      if (inProcess !== undefined) return inProcess;
+
+      const registration = await this.registry.get(toSessionId);
+      if (registration !== undefined) {
+        return this.deliverOverSocket(registration, toSessionId, fromSessionId, input);
       }
-    }
 
-    const registration = await this.registry.get(toSessionId);
-    if (registration === undefined) return { kind: 'offline' };
-
-    try {
-      const ack = await sendCrossSessionFrame(
-        registration.socketPath,
-        registration.token,
-        {
-          messageId: input.messageId,
-          from: {
-            sessionId: fromSessionId,
-            ...(input.fromSessionTitle !== undefined
-              ? { title: input.fromSessionTitle }
-              : {}),
-          },
-          message: input.message,
-          ...(input.inReplyTo !== undefined ? { inReplyTo: input.inReplyTo } : {}),
-        },
-        { signal: input.signal },
-      );
-      return sendResultFromAck(ack);
-    } catch (error) {
-      if (input.signal?.aborted === true) throw error;
-      return { kind: 'error', error: errorMessage(error) };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { kind: 'offline' };
+      await bindWindowDelay(Math.min(BIND_WINDOW_STEP_MS, remaining), input.signal);
     }
   }
 
@@ -239,6 +230,62 @@ export class CrossSessionMessagingService
         truncated: false,
         error: errorMessage(error),
       };
+    }
+  }
+
+  private async deliverInProcess(
+    fromSessionId: string,
+    toSessionId: string,
+    input: CrossSessionSendInput,
+  ): Promise<CrossSessionSendResult | undefined> {
+    const target = this.sessions.get(toSessionId);
+    if (target === undefined) return undefined;
+    try {
+      const result: CrossSessionReceiveResult = await target.accessor
+        .get(ISessionMessagingService)
+        .receiveCrossSession({
+          fromSessionId,
+          fromSessionTitle: input.fromSessionTitle,
+          messageId: input.messageId,
+          message: input.message,
+          inReplyTo: input.inReplyTo,
+          signal: input.signal,
+        });
+      return result;
+    } catch (error) {
+      if (input.signal?.aborted === true) throw error;
+      return { kind: 'error', error: errorMessage(error) };
+    }
+  }
+
+  private async deliverOverSocket(
+    registration: CrossSessionRegistration,
+    toSessionId: string,
+    fromSessionId: string,
+    input: CrossSessionSendInput,
+  ): Promise<CrossSessionSendResult> {
+    try {
+      const ack = await sendCrossSessionFrame(
+        registration.socketPath,
+        registration.token,
+        {
+          sessionId: toSessionId,
+          messageId: input.messageId,
+          from: {
+            sessionId: fromSessionId,
+            ...(input.fromSessionTitle !== undefined
+              ? { title: input.fromSessionTitle }
+              : {}),
+          },
+          message: input.message,
+          ...(input.inReplyTo !== undefined ? { inReplyTo: input.inReplyTo } : {}),
+        },
+        { signal: input.signal },
+      );
+      return sendResultFromAck(ack);
+    } catch (error) {
+      if (input.signal?.aborted === true) throw error;
+      return { kind: 'error', error: errorMessage(error) };
     }
   }
 

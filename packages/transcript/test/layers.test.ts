@@ -1404,6 +1404,159 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
     ]);
   });
 
+  it('opens a promptless other-origin turn for titled cross-session messages', () => {
+    const origin = {
+      kind: 'session_message',
+      fromSessionId: 'session-b',
+      fromSessionTitle: 'Beta',
+      replyToSessionId: 'session-a',
+      replyToSessionTitle: 'Alpha',
+    };
+    const snapshot = groupMessagesIntoSnapshot([
+      { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'answer' }], toolCalls: [] },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '<agent-message from="session:session-b">\nstatus?\n</agent-message>',
+          },
+        ],
+        toolCalls: [],
+        origin: origin as { kind: string },
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'peer reply' }], toolCalls: [] },
+    ]);
+
+    expect(snapshot.items.map((item) => item.kind)).toEqual(['turn', 'turn']);
+    const peerTurn = snapshot.items[1];
+    if (peerTurn?.kind !== 'turn') throw new Error('expected turn');
+    expect(peerTurn.origin).toEqual({ kind: 'other', payload: origin });
+    expect(peerTurn.prompt).toBeUndefined();
+    expect(peerTurn.steps).toHaveLength(1);
+    const frames = peerTurn.steps[0]!.frames;
+    expect(frames).toEqual([
+      { kind: 'text', frameId: 't1.1.f1', role: 'assistant', text: 'peer reply' },
+    ]);
+  });
+
+  it('keeps a steered cross-session message inside the running turn', () => {
+    const steered = [
+      {
+        type: 'text',
+        text: '<agent-message from="session:session-b">\nstatus?\n</agent-message>',
+      },
+    ];
+    const snapshot = groupMessagesIntoSnapshot(
+      [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [], origin: { kind: 'user' } },
+        { role: 'assistant', content: [{ type: 'text', text: 'working' }], toolCalls: [] },
+        {
+          role: 'user',
+          content: steered,
+          toolCalls: [],
+          origin: { kind: 'session_message', fromSessionId: 'session-b' } as { kind: string },
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'done' }], toolCalls: [] },
+      ],
+      {
+        steeredContents: new Map([
+          [JSON.stringify(steered), new Map([['session_message', 1]])],
+        ]),
+      },
+    );
+
+    expect(snapshot.items.map((item) => item.kind)).toEqual(['turn']);
+    const turn = snapshot.items[0];
+    if (turn?.kind !== 'turn') throw new Error('expected turn');
+    expect(turn.origin.kind).toBe('user');
+    expect(turn.steps).toHaveLength(2);
+    expect(turn.steps.flatMap((step) => step.frames)).toEqual([
+      { kind: 'text', frameId: 't0.1.f1', role: 'assistant', text: 'working' },
+      { kind: 'text', frameId: 't0.2.f1', role: 'assistant', text: 'done' },
+    ]);
+  });
+
+  it('keeps a steered peer agent message inside the running turn after a tool result', () => {
+    const steered = [
+      {
+        type: 'text',
+        text: '<agent-message from="agent-b">\nstatus?\n</agent-message>',
+      },
+    ];
+    const snapshot = groupMessagesIntoSnapshot(
+      [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [], origin: { kind: 'user' } },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'checking' }],
+          toolCalls: [{ id: 'c1', name: 'Bash', arguments: '{}' }],
+        },
+        { role: 'tool', content: [{ type: 'text', text: 'ok' }], toolCalls: [], toolCallId: 'c1' },
+        {
+          role: 'user',
+          content: steered,
+          toolCalls: [],
+          origin: { kind: 'agent_message', from: 'agent-b' } as { kind: string },
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'done' }], toolCalls: [] },
+      ],
+      {
+        steeredContents: new Map([
+          [JSON.stringify(steered), new Map([['agent_message', 1]])],
+        ]),
+      },
+    );
+
+    expect(snapshot.items.map((item) => item.kind)).toEqual(['turn']);
+    const turn = snapshot.items[0];
+    if (turn?.kind !== 'turn') throw new Error('expected turn');
+    expect(turn.steps).toHaveLength(2);
+    expect(turn.steps[1]?.frames).toEqual([
+      { kind: 'text', frameId: 't0.2.f1', role: 'assistant', text: 'done' },
+    ]);
+  });
+
+  it('opens a new turn for an identical cross-session message after its steer is consumed', () => {
+    const content = [
+      {
+        type: 'text',
+        text: '<agent-message from="session:session-b">\nstatus?\n</agent-message>',
+      },
+    ];
+    const origin = { kind: 'session_message', fromSessionId: 'session-b' };
+    const snapshot = groupMessagesIntoSnapshot(
+      [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [], origin: { kind: 'user' } },
+        { role: 'assistant', content: [{ type: 'text', text: 'working' }], toolCalls: [] },
+        {
+          role: 'user',
+          content,
+          toolCalls: [],
+          origin: origin as { kind: string },
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'done' }], toolCalls: [] },
+        {
+          role: 'user',
+          content,
+          toolCalls: [],
+          origin: origin as { kind: string },
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'still here' }], toolCalls: [] },
+      ],
+      {
+        steeredContents: new Map([[JSON.stringify(content), new Map([['session_message', 1]])]]),
+      },
+    );
+
+    expect(snapshot.items.map((item) => item.kind)).toEqual(['turn', 'turn']);
+    const later = snapshot.items[1];
+    if (later?.kind !== 'turn') throw new Error('expected turn');
+    expect(later.origin).toEqual({ kind: 'other', payload: origin });
+    expect(later.steps).toHaveLength(1);
+  });
+
   it('hides injected user messages and maps cron origins', () => {
     const snapshot = groupMessagesIntoSnapshot([
       {

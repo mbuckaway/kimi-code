@@ -12,6 +12,7 @@ import type {
   InjectionOrigin,
   PluginCommandOrigin,
   RetryOrigin,
+  SessionMessageOrigin,
   ShellCommandOrigin,
   SkillActivationOrigin,
   SkillSource,
@@ -220,6 +221,14 @@ export const agentMessageOriginSchema = z.object({
   replyTo: z.string().optional(),
 }) satisfies z.ZodType<AgentMessageOrigin>;
 
+export const sessionMessageOriginSchema = z.object({
+  kind: z.literal('session_message'),
+  fromSessionId: z.string(),
+  fromSessionTitle: z.string().optional(),
+  replyToSessionId: z.string().optional(),
+  replyToSessionTitle: z.string().optional(),
+}) satisfies z.ZodType<SessionMessageOrigin>;
+
 export const promptOriginSchema = z.discriminatedUnion('kind', [
   userPromptOriginSchema,
   skillActivationOriginSchema,
@@ -235,6 +244,7 @@ export const promptOriginSchema = z.discriminatedUnion('kind', [
   hookResultOriginSchema,
   retryOriginSchema,
   agentMessageOriginSchema,
+  sessionMessageOriginSchema,
 ]);
 
 export const goalStatusSchema = z.enum(['active', 'paused', 'blocked', 'complete']) satisfies z.ZodType<GoalStatus>;

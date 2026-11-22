@@ -33,6 +33,7 @@ const NON_USER_ORIGIN_KINDS: ReadonlySet<string> = new Set([
   'retry',
   'compaction_summary',
   'agent_message',
+  'session_message',
 ]);
 
 const HIDDEN_USER_ORIGINS: ReadonlySet<string> = new Set(['injection', 'system_trigger', 'retry']);

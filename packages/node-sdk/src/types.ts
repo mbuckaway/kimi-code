@@ -1,14 +1,27 @@
 import type {
+  ContextMessage as CoreContextMessage,
   ExportSessionManifest,
+  PromptOrigin as CorePromptOrigin,
   ResumeSessionResult,
   ShellEnvironment,
   TelemetryClient,
   TelemetryContextPatch,
   TelemetryProperties,
 } from '@moonshot-ai/agent-core';
+import type { SessionMessageOrigin } from '@moonshot-ai/agent-core-v2/agent/contextMemory/types';
 import type { Kaos } from '@moonshot-ai/kaos';
 import type { KimiHostIdentity, OAuthRefreshOutcome } from '@moonshot-ai/kimi-code-oauth';
 import type { ContentPart } from '@moonshot-ai/kosong';
+
+export type { SessionMessageOrigin };
+
+// The v2 engine also records cross-session peer messages, so the SDK contract
+// that replay and export consume carries their origin alongside the v1 kinds.
+export type PromptOrigin = CorePromptOrigin | SessionMessageOrigin;
+
+export type ContextMessage = Omit<CoreContextMessage, 'origin'> & {
+  readonly origin?: PromptOrigin | undefined;
+};
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue };
@@ -34,7 +47,6 @@ export type {
   BackgroundTaskInfo,
   BackgroundTaskStatus,
   ConfigDiagnostics,
-  ContextMessage,
   CronTaskSnapshot,
   ExperimentalFeatureState,
   ExperimentalFlagMap,
@@ -69,7 +81,6 @@ export type {
   PluginSource,
   PluginSummary,
   ProcessBackgroundTaskInfo,
-  PromptOrigin,
   ProviderConfig,
   ProviderType,
   QuestionBackgroundTaskInfo,

@@ -18,6 +18,7 @@ import {
   resolveActiveToolNames,
 } from '#/agent/toolPolicy/evaluate';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
+import { TOOLS_SECTION } from '#/agent/toolPolicy/configSection';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import {
@@ -67,6 +68,7 @@ import {
   exposesSubagentModelChoice,
   formatSubagentTimeoutDescription,
   resolveSubagentTimeoutMs,
+  SECONDARY_MODEL_SECTION,
   stripSubagentForkParameter,
   stripSubagentModelParameter,
   stripSubagentNameParameter,
@@ -103,6 +105,15 @@ export class SubagentTool implements ISubagentTool {
   readonly name: string = 'Agent';
 
   get parameters(): Record<string, unknown> {
+    const key = this.parametersKey();
+    const cached = this.parametersCache;
+    if (cached !== undefined && cached.key === key) return cached.value;
+    const value = this.renderParameters();
+    this.parametersCache = { key, value };
+    return value;
+  }
+
+  private renderParameters(): Record<string, unknown> {
     const parameters = exposesSubagentModelChoice(this.config, this.flags)
       ? SUBAGENT_TOOL_PARAMETERS
       : SUBAGENT_TOOL_PARAMETERS_NO_MODEL;
@@ -117,10 +128,25 @@ export class SubagentTool implements ISubagentTool {
       : stripParameters(withName, 'persona');
   }
 
+  private parametersKey(): string {
+    return [
+      exposesSubagentModelChoice(this.config, this.flags) ? '1' : '0',
+      this.flags.enabled(SUBAGENT_FORK_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_MESSAGING_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_PERSONA_FLAG_ID) ? '1' : '0',
+    ].join('');
+  }
+
   private readonly callerAgentId: string;
   private readonly canRunInBackground: () => boolean;
   private catalogReady = false;
-  private frozenCatalogProfiles: readonly AgentProfile[] | undefined;
+  private frozenCatalogProfiles:
+    | { readonly revision: number; readonly profiles: readonly AgentProfile[] }
+    | undefined;
+  private parametersCache:
+    | { readonly key: string; readonly value: Record<string, unknown> }
+    | undefined;
+  private descriptionCache: { readonly key: string; readonly value: string } | undefined;
 
   constructor(
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
@@ -148,6 +174,48 @@ export class SubagentTool implements ISubagentTool {
   }
 
   get description(): string {
+    const key = this.descriptionKey();
+    const cached = this.descriptionCache;
+    if (cached !== undefined && cached.key === key) return cached.value;
+    const value = this.renderDescription();
+    this.descriptionCache = { key, value };
+    return value;
+  }
+
+  private descriptionKey(): string {
+    const own = this.profile.data();
+    return [
+      String(this.toolRegistry.revision ?? 0),
+      this.catalogReady
+        ? `revision:${String(this.catalog.revision)}`
+        : this.catalog
+            .list()
+            .map((profile) => profile.name)
+            .join(','),
+      own.profileName ?? '',
+      (own.subagents ?? this.catalog.getDefault().subagents ?? []).join(','),
+      own.modelAlias ?? '',
+      JSON.stringify(this.config.get(SECONDARY_MODEL_SECTION) ?? null),
+      JSON.stringify(this.config.get(TOOLS_SECTION) ?? null),
+      this.contributions.items
+        .map(
+          (contribution) =>
+            `${contribution.options.name}:${contribution.options.source ?? ''}:${contribution.options.disclosure ?? ''}`,
+        )
+        .toSorted()
+        .join(','),
+      this.profile.getActiveToolNames?.()?.join(',') ?? 'all',
+      this.canRunInBackground() ? '1' : '0',
+      this.flags.enabled(AGENT_MESSAGING_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_PERSONA_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(SUBAGENT_FORK_FLAG_ID) ? '1' : '0',
+      exposesSubagentModelChoice(this.config, this.flags) ? '1' : '0',
+      String(this.toolPolicy.revision ?? 0),
+    ].join('\u0000');
+  }
+
+  private renderDescription(): string {
     const backgroundDescription = this.canRunInBackground()
       ? AGENT_BACKGROUND_DESCRIPTION
       : AGENT_BACKGROUND_DISABLED_DESCRIPTION;
@@ -194,9 +262,12 @@ export class SubagentTool implements ISubagentTool {
   }
 
   private catalogProfiles(): readonly AgentProfile[] {
-    if (this.frozenCatalogProfiles !== undefined) return this.frozenCatalogProfiles;
+    if (!this.catalogReady) return this.catalog.list();
+    const revision = this.catalog.revision;
+    const frozen = this.frozenCatalogProfiles;
+    if (frozen !== undefined && frozen.revision === revision) return frozen.profiles;
     const profiles = this.catalog.list();
-    if (this.catalogReady) this.frozenCatalogProfiles = profiles;
+    this.frozenCatalogProfiles = { revision, profiles };
     return profiles;
   }
 

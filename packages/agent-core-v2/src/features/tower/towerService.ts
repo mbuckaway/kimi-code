@@ -6,6 +6,7 @@ import { activateReminderWhenReady } from '#/features/reminder/internal/reminder
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { profileKey } from '#/agent/profile/profileOps';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { TaskTerminatedNotice } from '#/agent/task/taskOps';
@@ -60,6 +61,8 @@ import { TowerModeEnter, TowerModeExit, towerKey, towerOwnerKey } from './towerO
 
 export const TOWER_MODE_TOOLS: readonly string[] = ['TowerInit', ...TOWER_TOOL_NAMES];
 
+export const TOWER_VETO_TOOL_NAMES: readonly string[] = ['TowerComplete', ...TOWER_MODE_TOOLS];
+
 function stringArg(args: unknown, key: string): string | undefined {
   if (typeof args !== 'object' || args === null) return undefined;
   const value = (args as Record<string, unknown>)[key];
@@ -98,60 +101,10 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
         await next();
       }),
     );
-    if (featureManager !== undefined) {
-      this._register(
-        featureManager.onDidChangeUnits(() => {
-          this.reconcileTowerProjection();
-        }),
-      );
-    }
-    if (config !== undefined) {
-      this._register(
-        config.onDidChangeConfiguration(() => {
-          this.reconcileTowerProjection();
-        }),
-      );
-    }
-    this._register(
-      eventBus.subscribe(AgentStatusUpdated, () => {
-        if (this.agentCtx.agentId !== 'main') return;
-        if (!this.isActive) return;
-        const active = this.profile.getActiveToolNames();
-        if (active === undefined) return;
-        if (TOWER_MODE_TOOLS.every((name) => active.includes(name))) return;
-        for (const name of TOWER_MODE_TOOLS) this.profile.addActiveTool(name);
-        void this.dispatcher.dispatch(
-          new AgentStatusUpdated({ agentId: this.agentCtx.agentId, towerMode: true }),
-        );
-      }),
-    );
-    this._register(
-      activateReminderWhenReady(agentLifecycle, this.agentCtx, (reminder) =>
-        new TowerModeInjection(reminder, this, context, this.flags),
-      ),
-    );
-    this._register(
-      eventBus.subscribe(TaskTerminatedNotice, (event) => {
-        if (this.agentCtx.agentId !== 'main') return;
-        if (!this.isActive) return;
-        const info = event.info;
-        if (info.kind !== 'agent') return;
-        if (info.agentId === undefined) return;
-        if (info.status === 'completed') return;
-        void this.markAgentDied(info.agentId, info.status, info.stopReason);
-      }),
-    );
-    this._register(
-      eventBus.subscribe(SubagentStarted, (event) => {
-        if (this.agentCtx.agentId !== 'main') return;
-        if (!this.isActive) return;
-        void this.clearAgentDied(event.subagentId);
-      }),
-    );
     this._register(
       toolExecutor.onBeforeExecuteTool((event) => {
         if (this.flags.enabled(TOWER_FLAG_ID)) return;
-        if (!TOWER_MODE_TOOLS.includes(event.toolCall.name)) return;
+        if (!TOWER_VETO_TOOL_NAMES.includes(event.toolCall.name)) return;
         event.veto(
           denyToolExecution(
             this.toolApproval.formatDenyMessage(
@@ -162,24 +115,10 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
       }),
     );
     this._register(
-      toolExecutor.onBeforeExecuteTool((event) => {
-        if (!this.flags.enabled(TOWER_FLAG_ID)) return;
-        if (!this.isActive) return;
-        if (event.toolCall.name !== 'TodoList') return;
-        event.veto(
-          denyToolExecution(
-            this.toolApproval.formatDenyMessage(
-              'TodoList is not available while tower mode is active — mission state lives in the tower protocol (TowerPlan/TowerMission/TowerStatus, MISSIONS.md), and todo semantics would serialize the fleet. Spawn every dependency-unblocked mission now, then end your turn: worker completions wake you.',
-            ),
-          ),
-        );
-      }),
-    );
-    this._register(
       toolExecutor.onBeforeExecuteTool(async (event) => {
-        if (this.profile.data().profileName !== TOWER_WORKER_PROFILE) return;
         const toolName = event.toolCall.name;
         if (toolName !== 'Write' && toolName !== 'Edit') return;
+        if (this.agentState.get(profileKey).profileName !== TOWER_WORKER_PROFILE) return;
 
         const store = new TowerStore(resolveTowerRepoRoot(this.sessionCtx.cwd));
         const entry = await store
@@ -229,13 +168,94 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
         event.veto(denyToolExecution(this.toolApproval.formatDenyMessage(reason)));
       }),
     );
+    if (!this.flags.enabled(TOWER_FLAG_ID)) return;
+    if (featureManager !== undefined) {
+      this._register(
+        featureManager.onDidChangeUnits(() => {
+          this.reconcileTowerProjection();
+        }),
+      );
+    }
+    if (config !== undefined) {
+      this._register(
+        config.onDidChangeConfiguration(() => {
+          this.reconcileTowerProjection();
+        }),
+      );
+    }
+    this._register(
+      eventBus.subscribe(AgentStatusUpdated, () => {
+        if (this.agentCtx.agentId !== 'main') return;
+        if (!this.isActive) return;
+        const active = this.profile.getActiveToolNames();
+        if (active === undefined) return;
+        if (TOWER_MODE_TOOLS.every((name) => active.includes(name))) return;
+        this.addTowerTools();
+        void this.dispatcher.dispatch(
+          new AgentStatusUpdated({ agentId: this.agentCtx.agentId, towerMode: true }),
+        );
+      }),
+    );
+    this._register(
+      activateReminderWhenReady(agentLifecycle, this.agentCtx, (reminder) =>
+        new TowerModeInjection(reminder, this, context, this.flags),
+      ),
+    );
+    this._register(
+      eventBus.subscribe(TaskTerminatedNotice, (event) => {
+        if (this.agentCtx.agentId !== 'main') return;
+        if (!this.isActive) return;
+        const info = event.info;
+        if (info.kind !== 'agent') return;
+        if (info.agentId === undefined) return;
+        if (info.status === 'completed') return;
+        void this.markAgentDied(info.agentId, info.status, info.stopReason);
+      }),
+    );
+    this._register(
+      eventBus.subscribe(SubagentStarted, (event) => {
+        if (this.agentCtx.agentId !== 'main') return;
+        if (!this.isActive) return;
+        void this.clearAgentDied(event.subagentId);
+      }),
+    );
+    this._register(
+      toolExecutor.onBeforeExecuteTool((event) => {
+        if (!this.flags.enabled(TOWER_FLAG_ID)) return;
+        if (!this.isActive) return;
+        if (event.toolCall.name !== 'TodoList') return;
+        event.veto(
+          denyToolExecution(
+            this.toolApproval.formatDenyMessage(
+              'TodoList is not available while tower mode is active — mission state lives in the tower protocol (TowerPlan/TowerMission/TowerStatus, MISSIONS.md), and todo semantics would serialize the fleet. Spawn every dependency-unblocked mission now, then end your turn: worker completions wake you.',
+            ),
+          ),
+        );
+      }),
+    );
   }
 
   private resolveBashGuardCwd(cwdArg: string): string {
     return this.workspaceCtx.resolve(cwdArg);
   }
 
+  private readonly addedTowerTools = new Set<string>();
+  private modeOperation: Promise<unknown> = Promise.resolve();
+
+  private serializeModeOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.modeOperation.then(operation, operation);
+    this.modeOperation = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   async enter(base?: string): Promise<TowerEnterResult> {
+    return this.serializeModeOperation(() => this.enterInternal(base));
+  }
+
+  private async enterInternal(base?: string): Promise<TowerEnterResult> {
     if (this.agentCtx.agentId !== 'main') return { entered: false, reason: 'not-main-agent' };
     if (!this.flags.enabled(TOWER_FLAG_ID)) return { entered: false, reason: 'experiment-off' };
     if (!isTowerFeatureAssembled(this.flags)) {
@@ -264,7 +284,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     if (base !== undefined) await this.prepareUserBase(base);
     if (this.isActive) return { entered: true };
     await this.adoptTowerRoster();
-    for (const name of TOWER_MODE_TOOLS) this.profile.addActiveTool(name);
+    this.addTowerTools();
     this.lastPublished = true;
     void this.dispatcher.dispatch(
       new TowerModeEnter({ agentId: this.agentCtx.agentId, sessionId: this.sessionCtx.sessionId }),
@@ -313,11 +333,37 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     }
   }
 
-  async exit(_reason: TowerExitReason = 'user'): Promise<void> {
-    if (!this.agentState.get(towerKey)) return;
-    this.lastPublished = false;
-    void this.dispatcher.dispatch(new TowerModeExit({ agentId: this.agentCtx.agentId }));
+  async exit(reason: TowerExitReason = 'user'): Promise<void> {
+    return this.serializeModeOperation(() => this.exitInternal(reason));
+  }
+
+  private async exitInternal(_reason: TowerExitReason): Promise<void> {
+    if (this.agentState.get(towerKey)) {
+      this.lastPublished = false;
+      await this.dispatcher.dispatch(new TowerModeExit({ agentId: this.agentCtx.agentId }));
+    }
+    if (this.releaseTowerTools()) {
+      await this.dispatcher.dispatch(
+        new AgentStatusUpdated({ agentId: this.agentCtx.agentId, towerMode: false }),
+      );
+    }
     await this.releaseTowerOwnership();
+  }
+
+  private addTowerTools(): void {
+    const active = this.profile.getActiveToolNames();
+    for (const name of TOWER_MODE_TOOLS) {
+      if (active !== undefined && active.includes(name)) continue;
+      if (active !== undefined) this.addedTowerTools.add(name);
+      this.profile.addActiveTool(name);
+    }
+  }
+
+  private releaseTowerTools(): boolean {
+    if (this.addedTowerTools.size === 0) return false;
+    for (const name of this.addedTowerTools) this.profile.removeActiveTool(name);
+    this.addedTowerTools.clear();
+    return true;
   }
 
   get isActive(): boolean {
@@ -419,7 +465,7 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     if (!this.flags.enabled(TOWER_FLAG_ID)) return;
     if (!this.isActive) return;
     if (this.agentCtx.agentId !== 'main') return;
-    for (const name of TOWER_MODE_TOOLS) this.profile.addActiveTool(name);
+    this.addTowerTools();
     this.lastPublished = true;
     void this.dispatcher.dispatch(new AgentStatusUpdated({ agentId: this.agentCtx.agentId, towerMode: true }));
   }

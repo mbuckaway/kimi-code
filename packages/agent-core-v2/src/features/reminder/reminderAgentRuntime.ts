@@ -71,15 +71,34 @@ function appendReminder(
   });
 }
 
+interface InjectionIndex {
+  readonly history: readonly ContextMessage[];
+  readonly positions: ReadonlyMap<string, readonly number[]>;
+}
+
+function buildInjectionIndex(history: readonly ContextMessage[]): InjectionIndex {
+  const positions = new Map<string, number[]>();
+  history.forEach((message, position) => {
+    if (message.origin?.kind !== 'injection') return;
+    const variant = message.origin.variant;
+    const existing = positions.get(variant);
+    if (existing === undefined) positions.set(variant, [position]);
+    else existing.push(position);
+  });
+  return { history, positions };
+}
+
 function providerContext(
-  runtime: AgentRuntimeContext<null>,
+  index: InjectionIndex,
   entry: ReminderEntry,
   isNewTurn: boolean,
+  historyLength: number,
 ): ContextInjectionContext<unknown> {
-  const history = runtime.get(IAgentContextMemoryService).get();
-  const injectedPositions = findInjections(history, entry.variant);
+  const injectedPositions = (index.positions.get(entry.variant) ?? []).filter(
+    (position) => position < historyLength,
+  );
   const lastInjectedAt = injectedPositions.at(-1) ?? null;
-  const lastInjection = lastInjectedAt === null ? undefined : history[lastInjectedAt];
+  const lastInjection = lastInjectedAt === null ? undefined : index.history[lastInjectedAt];
   return {
     injectedPositions,
     lastInjectedAt,
@@ -96,10 +115,14 @@ async function injectEntry(
   runtime: AgentRuntimeContext<null>,
   entry: ReminderEntry,
   isNewTurn: boolean,
+  index: InjectionIndex,
+  memory: IAgentContextMemoryService,
 ): Promise<void> {
+  const recorded = index.positions.get(entry.variant);
+  const historyLength = recorded === undefined ? index.history.length : memory.get().length;
   let content: Awaited<ReturnType<ContextInjectionProvider>>;
   try {
-    content = await entry.provider(providerContext(runtime, entry, isNewTurn));
+    content = await entry.provider(providerContext(index, entry, isNewTurn, historyLength));
   } catch (error) {
     runtime.get(ILogService).error('context provider failed; skipping it', {
       name: entry.variant,
@@ -165,7 +188,10 @@ async function inject(runtime: AgentRuntimeContext<null>, isNewTurn: boolean): P
       (REMINDER_VARIANT_PRIORITY.get(left.variant) ?? 0) -
       (REMINDER_VARIANT_PRIORITY.get(right.variant) ?? 0),
   );
-  for (const entry of entries) await injectEntry(runtime, entry, isNewTurn);
+  if (entries.length === 0) return;
+  const memory = runtime.get(IAgentContextMemoryService);
+  const index = buildInjectionIndex(memory.get());
+  for (const entry of entries) await injectEntry(runtime, entry, isNewTurn, index, memory);
 }
 
 const reminderEffects = fromCallback(({ input }: { input: { readonly runtime: AgentRuntimeContext<null> } }) => {
@@ -259,9 +285,13 @@ export class ReminderRuntime {
     const quiescence = loop.tryAcquireQuiescence();
     if (quiescence === undefined) return;
     try {
-      for (const entry of actorContext(this.runtime).entries) {
-        if (entry.variant === variant) await injectEntry(this.runtime, entry, false);
-      }
+      const entries = [...actorContext(this.runtime).entries].filter(
+        (entry) => entry.variant === variant,
+      );
+      if (entries.length === 0) return;
+      const memory = this.runtime.get(IAgentContextMemoryService);
+      const index = buildInjectionIndex(memory.get());
+      for (const entry of entries) await injectEntry(this.runtime, entry, false, index, memory);
     } finally {
       quiescence.dispose();
     }
@@ -297,12 +327,4 @@ function isInjectionResult(
   content: ContextInjectionContent | ContextInjectionResult<unknown>,
 ): content is ContextInjectionResult<unknown> {
   return typeof content === 'object' && content !== null && !Array.isArray(content) && 'content' in content;
-}
-
-function findInjections(history: readonly ContextMessage[], variant: string): number[] {
-  const positions: number[] = [];
-  history.forEach((message, index) => {
-    if (message.origin?.kind === 'injection' && message.origin.variant === variant) positions.push(index);
-  });
-  return positions;
 }

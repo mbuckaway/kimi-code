@@ -10,9 +10,12 @@ import { IBashParserService } from '#/app/bashParser/bashParser';
 import { BashParserService } from '#/app/bashParser/bashParserService';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
+import { createDecorator } from '#/_base/di/instantiation';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import type { ISessionScopeHandle } from '#/_base/di/scope';
+import { Service } from '#/_base/di/service';
 import { TestInstantiationService } from '#/_base/di/test';
+import { Event } from '#/_base/event';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { TaskTerminatedNotice } from '#/agent/task/taskOps';
 import { SubagentStarted } from '#/session/subagent/mirrorAgentRun';
@@ -24,9 +27,17 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { runWillBeginStepHooks, type StubLoop } from '../../agent/loop/stubs';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { profileKey } from '#/agent/profile/profileOps';
+import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentToolActivationService } from '#/agent/toolActivation/toolActivation';
+import { AgentToolActivationService } from '#/agent/toolActivation/toolActivationService';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { AgentToolContribution } from '#/agent/toolRegistry/toolContribution';
+import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
+import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
 import type {
   BeforeExecuteDecision,
   ResolvedToolExecutionHookContext,
@@ -52,7 +63,7 @@ import {
   towerWorkspaceOwned,
 } from '#/features/tower/bashGuard';
 import { _setTowerFeatureAssembledForTests } from '#/features/tower/towerFeature';
-import { AgentTowerService, TOWER_MODE_TOOLS } from '#/features/tower/towerService';
+import { AgentTowerService, TOWER_MODE_TOOLS, TOWER_VETO_TOOL_NAMES } from '#/features/tower/towerService';
 import { TowerInboxSent, towerKey } from '#/features/tower/towerOps';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
@@ -70,7 +81,7 @@ import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { ToolAccesses } from '#/tool/toolContract';
+import { ToolAccesses, type AgentTool, type ToolExecution } from '#/tool/toolContract';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 
 import { stubToolExecutorEvents, type ToolExecutorEventStubs } from '../../agent/toolExecutor/stubs';
@@ -151,6 +162,25 @@ function ownerSessionHandle(input: {
 }
 
 _setTowerFeatureAssembledForTests(true);
+
+let towerActivationRecords: AgentToolContribution[] = [];
+
+class TowerActivationProbeTool implements AgentTool {
+  declare readonly _serviceBrand: undefined;
+  readonly name = 'TowerActivationProbe';
+  readonly description = 'tower activation probe';
+  readonly parameters: Record<string, unknown> = {};
+  resolveExecution(): ToolExecution {
+    return { isError: true, output: 'probe' };
+  }
+}
+
+class TowerActivationAssembly extends Service {
+  constructor() {
+    super();
+    for (const record of towerActivationRecords) this.provide(AgentToolContribution, record);
+  }
+}
 
 const signal = new AbortController().signal;
 
@@ -265,7 +295,7 @@ describe('AgentTowerService', () => {
     } as unknown as IFeatureManager);
     addedTools = [];
     removedTools = [];
-    activeTools = undefined;
+    activeTools = ['Bash'];
     ix.stub(IAgentProfileService, {
       data: () => ({ profileName: undefined }),
       getActiveToolNames: () => activeTools,
@@ -328,6 +358,7 @@ describe('AgentTowerService', () => {
 
     expect(events).toEqual([
       { type: 'agent.status.updated', towerMode: true },
+      { type: 'agent.status.updated', towerMode: false },
       { type: 'agent.status.updated', towerMode: false },
     ]);
   });
@@ -486,6 +517,24 @@ describe('AgentTowerService', () => {
     expect(formatDenyMessage).toHaveBeenCalledTimes(1);
   });
 
+  it('denies TowerComplete while the tower flag is off, even with the mode active', async () => {
+    const tower = ix.get(IAgentTowerService);
+    await tower.enter();
+    expect(tower.isActive).toBe(true);
+    towerFlagOn = false;
+
+    const decision = await fire(hookContext([toolCall('TowerComplete', 'call_tc')]));
+
+    expect(decision).toEqual({
+      veto: {
+        output: expect.stringContaining('The tower experiment is disabled'),
+        isError: true,
+      },
+    });
+    expect(permissionGateRan).toBe(false);
+    expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('enter() returns experiment-off while the tower flag is off', async () => {
     towerFlagOn = false;
     const tower = ix.get(IAgentTowerService);
@@ -500,6 +549,39 @@ describe('AgentTowerService', () => {
 
     expect(tower.isActive).toBe(false);
     expect(events).toEqual([]);
+  });
+
+  it('registers only the flag-off hooks and subscriptions while the tower flag is off', async () => {
+    const beforeExecuteRegistrations = vi.spyOn(
+      executorEvents.executor,
+      'onBeforeExecuteTool',
+    );
+    const profileData = vi.spyOn(ix.get(IAgentProfileService), 'data');
+    const onUnitsChanged = vi.fn(() => ({ dispose: () => {} }));
+    ix.stub(IFeatureManager, {
+      onDidChangeUnits: onUnitsChanged,
+    } as unknown as IFeatureManager);
+    const onConfigChanged = vi.fn(() => ({ dispose: () => {} }));
+    ix.stub(IConfigService, {
+      onDidChangeConfiguration: onConfigChanged,
+    } as unknown as IConfigService);
+    const busSubscribe = vi.spyOn(ix.get(IEventBus), 'subscribe');
+    ix.get(IAgentStateService).contributeState(profileKey);
+    towerFlagOn = false;
+
+    ix.get(IAgentTowerService);
+
+    expect(beforeExecuteRegistrations).toHaveBeenCalledTimes(3);
+    expect(onUnitsChanged).not.toHaveBeenCalled();
+    expect(onConfigChanged).not.toHaveBeenCalled();
+    expect(busSubscribe).not.toHaveBeenCalled();
+    expect(profileData).not.toHaveBeenCalled();
+
+    const decision = await fire(writeHookContext('Write', ['/outside/workspace.txt']));
+
+    expect(decision).toBeUndefined();
+    expect(permissionGateRan).toBe(true);
+    expect(profileData).not.toHaveBeenCalled();
   });
 
   it('enter() returns feature-not-assembled until the feature is assembled — a live flag flip needs a restart', async () => {
@@ -724,6 +806,34 @@ describe('AgentTowerService', () => {
     }
   });
 
+  it('exit releases tower ownership even when the persisted mode flag is off', async () => {
+    const repo = await makeTowerRepo();
+    try {
+      await new TowerStore(repo).init('session-fork');
+      ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-fork' } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+      expect(tower.isActive).toBe(false);
+
+      await tower.exit();
+
+      expect((await new TowerStore(repo).load()).sessionId).toBeUndefined();
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('exit releases tracked tower tools even when the persisted mode flag is off', async () => {
+    const tower = ix.get(IAgentTowerService);
+    await tower.enter();
+    expect(addedTools).toEqual([...TOWER_MODE_TOOLS]);
+
+    ix.get(IAgentStateService).set(towerKey, false);
+    await tower.exit();
+
+    expect(removedTools).toEqual([...TOWER_MODE_TOOLS]);
+    expect(activeTools).toEqual(['Bash']);
+  });
+
   it('does not veto TodoList while the tower flag is off, even with tower mode persisted active', async () => {
     const tower = ix.get(IAgentTowerService);
     await tower.enter();
@@ -738,7 +848,7 @@ describe('AgentTowerService', () => {
     expect(tower.isActive).toBe(false);
   });
 
-  it('enter activates the tower tool set on the main agent; exit keeps it', async () => {
+  it('enter activates the tower tool set on the main agent; exit removes it', async () => {
     const tower = ix.get(IAgentTowerService);
 
     await tower.enter();
@@ -746,9 +856,138 @@ describe('AgentTowerService', () => {
     expect(removedTools).toEqual([]);
 
     await tower.exit();
-    expect(removedTools).toEqual([]);
+    expect(removedTools).toEqual([...TOWER_MODE_TOOLS]);
   });
 
+  it('exit keeps a TowerInit that the profile allow-list already contained', async () => {
+    activeTools = ['Bash', 'TowerInit'];
+    const tower = ix.get(IAgentTowerService);
+
+    await tower.enter();
+    expect(addedTools).toEqual(TOWER_MODE_TOOLS.filter((name) => name !== 'TowerInit'));
+
+    await tower.exit();
+    expect(removedTools).toEqual(TOWER_MODE_TOOLS.filter((name) => name !== 'TowerInit'));
+    expect(activeTools).toEqual(['Bash', 'TowerInit']);
+  });
+
+  it('serializes concurrent enters so TowerInit cannot adopt or emit twice', async () => {
+    const tower = ix.get(IAgentTowerService);
+    const events: { readonly type: string; readonly towerMode?: boolean }[] = [];
+    disposables.add(
+      ix.get(IEventBus).subscribe((e) => {
+        if (e.type === 'agent.status.updated') {
+          events.push({ type: e.type, towerMode: (e as AgentStatusUpdated).towerMode });
+        }
+      }),
+    );
+
+    const results = await Promise.all([tower.enter(), tower.enter()]);
+
+    expect(results).toEqual([{ entered: true }, { entered: true }]);
+    expect(addedTools).toEqual([...TOWER_MODE_TOOLS]);
+    expect(events).toEqual([{ type: 'agent.status.updated', towerMode: true }]);
+
+    const records: WireRecord[] = [];
+    for await (const record of ix.get(IAppendLogStore).read<WireRecord>(
+      testWireScope('wire', 'tower-test'),
+      AGENT_WIRE_RECORD_KEY,
+    )) {
+      records.push(record);
+    }
+    expect(records.filter((record) => record.type === 'tower_mode.enter')).toHaveLength(1);
+  });
+
+  it('serializes concurrent exits so the exit is recorded and published once', async () => {
+    const tower = ix.get(IAgentTowerService);
+    await tower.enter();
+    const events: { readonly type: string; readonly towerMode?: boolean }[] = [];
+    disposables.add(
+      ix.get(IEventBus).subscribe((e) => {
+        if (e.type === 'agent.status.updated') {
+          events.push({ type: e.type, towerMode: (e as AgentStatusUpdated).towerMode });
+        }
+      }),
+    );
+
+    await Promise.all([tower.exit(), tower.exit()]);
+
+    expect(events).toEqual([
+      { type: 'agent.status.updated', towerMode: false },
+      { type: 'agent.status.updated', towerMode: false },
+    ]);
+    expect(tower.isActive).toBe(false);
+
+    const records: WireRecord[] = [];
+    for await (const record of ix.get(IAppendLogStore).read<WireRecord>(
+      testWireScope('wire', 'tower-test'),
+      AGENT_WIRE_RECORD_KEY,
+    )) {
+      records.push(record);
+    }
+    expect(records.filter((record) => record.type === 'tower_mode.exit')).toHaveLength(1);
+  });
+
+  it('exit deregisters the tower tools and a later status update never re-adds them', async () => {
+    ix.stub(IAgentToolRegistryService, new AgentToolRegistryService());
+    const records: AgentToolContribution[] = TOWER_MODE_TOOLS.map((name) => {
+      const id = createDecorator<AgentTool>(`towerActivationProbe${name}`);
+      ix.stub(id, {
+        _serviceBrand: undefined,
+        name,
+        description: `stub ${name}`,
+        parameters: {},
+        resolveExecution: () => ({ isError: true, output: 'stub' }),
+      });
+      return { id, ctor: TowerActivationProbeTool, options: { name } };
+    });
+    towerActivationRecords = records;
+    ix.createInstance(TowerActivationAssembly);
+    ix.stub(ISessionToolPolicyGate, {
+      _serviceBrand: undefined,
+      disabledTools: [],
+      onDidChange: Event.None as Event<void>,
+    } satisfies ISessionToolPolicyGate);
+    ix.stub(IAgentRuntimeService, {
+      _serviceBrand: undefined,
+      onDidChange: Event.None,
+      isAvailable: () => true,
+    } as unknown as IAgentRuntimeService);
+    const active = ['Bash'];
+    ix.stub(IAgentProfileService, {
+      data: () => ({ profileName: undefined, activeToolNames: active, disallowedTools: [] }),
+      getActiveToolNames: () => active,
+      addActiveTool: (name: string) => {
+        if (!active.includes(name)) active.push(name);
+      },
+      removeActiveTool: (name: string) => {
+        const index = active.indexOf(name);
+        if (index !== -1) active.splice(index, 1);
+      },
+    } as unknown as IAgentProfileService);
+    ix.set(IAgentToolActivationService, new SyncDescriptor(AgentToolActivationService));
+    const activation = ix.get(IAgentToolActivationService);
+    await activation.activate();
+    const registry = ix.get(IAgentToolRegistryService);
+    expect(registry.list()).toEqual([]);
+
+    const tower = ix.get(IAgentTowerService);
+    await tower.enter();
+
+    expect(registry.list().map((tool) => tool.name).toSorted()).toEqual(
+      [...TOWER_MODE_TOOLS].toSorted(),
+    );
+
+    await tower.exit();
+
+    expect(active).toEqual(['Bash']);
+    expect(registry.list()).toEqual([]);
+
+    publishAsMain(ix, new AgentStatusUpdated({ agentId: 'main' }));
+
+    expect(registry.list()).toEqual([]);
+    expect(active).toEqual(['Bash']);
+  });
   it('enter is inert on a non-main agent', async () => {
     ix.stub(
       IAgentScopeContext,
@@ -802,6 +1041,7 @@ describe('AgentTowerService', () => {
       addActiveTool: (name: string) => {
         restoredAdded.push(name);
       },
+      getActiveToolNames: () => undefined,
       removeActiveTool: () => {},
     } as unknown as IAgentProfileService);
     registerTestAgentWire(ix2, testWireScope('wire', 'tower-restore'), {
@@ -902,6 +1142,7 @@ describe('AgentTowerService', () => {
       addActiveTool: (name: string) => {
         restoredAdded.push(name);
       },
+      getActiveToolNames: () => undefined,
       removeActiveTool: () => {},
     } as unknown as IAgentProfileService);
     registerTestAgentWire(ix2, testWireScope('wire', 'tower-restore-flag-off'), {
@@ -967,6 +1208,7 @@ describe('AgentTowerService', () => {
       addActiveTool: (name: string) => {
         restoredAdded.push(name);
       },
+      getActiveToolNames: () => undefined,
       removeActiveTool: () => {},
     } as unknown as IAgentProfileService);
     registerTestAgentWire(ix2, testWireScope('wire', 'tower-restore-non-main'), {
@@ -1045,6 +1287,7 @@ describe('AgentTowerService', () => {
         addActiveTool: (name: string) => {
           restoredAdded.push(name);
         },
+        getActiveToolNames: () => undefined,
         removeActiveTool: () => {},
       } as unknown as IAgentProfileService);
       registerTestAgentWire(ix2, testWireScope('wire', 'tower-fork-restore'), {
@@ -1127,6 +1370,7 @@ describe('AgentTowerService', () => {
         addActiveTool: (name: string) => {
           restoredAdded.push(name);
         },
+        getActiveToolNames: () => undefined,
         removeActiveTool: () => {},
       } as unknown as IAgentProfileService);
       registerTestAgentWire(ix2, testWireScope('wire', 'tower-fork-stale-restore'), {
@@ -1209,6 +1453,7 @@ describe('AgentTowerService', () => {
         addActiveTool: (name: string) => {
           restoredAdded.push(name);
         },
+        getActiveToolNames: () => undefined,
         removeActiveTool: () => {},
       } as unknown as IAgentProfileService);
       registerTestAgentWire(ix2, testWireScope('wire', 'tower-fork-flag-off-restore'), {
@@ -1288,6 +1533,7 @@ describe('AgentTowerService', () => {
       addActiveTool: (name: string) => {
         restoredAdded.push(name);
       },
+      getActiveToolNames: () => undefined,
       removeActiveTool: () => {},
     } as unknown as IAgentProfileService);
     registerTestAgentWire(ix2, testWireScope('wire', 'tower-fork-noinit'), {
@@ -1360,6 +1606,7 @@ describe('AgentTowerService', () => {
       addActiveTool: (name: string) => {
         restoredAdded.push(name);
       },
+      getActiveToolNames: () => undefined,
       removeActiveTool: () => {},
     } as unknown as IAgentProfileService);
     registerTestAgentWire(ix2, testWireScope('wire', 'tower-resume-noinit'), {
@@ -1413,6 +1660,7 @@ describe('AgentTowerService', () => {
       addActiveTool: (name: string) => {
         restoredAdded.push(name);
       },
+      getActiveToolNames: () => undefined,
       removeActiveTool: () => {},
     } as unknown as IAgentProfileService);
     registerTestAgentWire(ix2, testWireScope('wire', 'tower-restore-idle'), {
@@ -1467,6 +1715,9 @@ describe('AgentTowerService', () => {
       ix.stub(IAgentProfileService, {
         data: () => ({ profileName: 'tower-worker' }),
       } as unknown as IAgentProfileService);
+      const states = ix.get(IAgentStateService);
+      states.contributeState(profileKey);
+      states.set(profileKey, { ...profileKey.initial(), profileName: TOWER_WORKER_PROFILE });
       ix.stub(
         IAgentScopeContext,
         makeAgentScopeContext({ agentId: WORKER_AGENT_ID, agentScope: testWireScope('wire', 'tower-test'), generation: 0 }),
@@ -1516,6 +1767,16 @@ describe('AgentTowerService', () => {
       expect(formatDenyMessage).not.toHaveBeenCalled();
     });
 
+    it('checks the tool name before reading the profile', async () => {
+      const profileData = vi.spyOn(ix.get(IAgentProfileService), 'data');
+      ix.get(IAgentTowerService);
+
+      const decision = await fire(hookContext([toolCall('Read', 'call_read')]));
+
+      expect(decision).toBeUndefined();
+      expect(profileData).not.toHaveBeenCalled();
+    });
+
     it('guards worker writes even while the tower flag is off — isolation is identity-scoped', async () => {
       towerFlagOn = false;
       ix.get(IAgentTowerService);
@@ -1531,9 +1792,10 @@ describe('AgentTowerService', () => {
     });
 
     it('abstains when the agent is not a tower worker', async () => {
-      ix.stub(IAgentProfileService, {
-        data: () => ({ profileName: 'coder' }),
-      } as unknown as IAgentProfileService);
+      ix.get(IAgentStateService).set(profileKey, {
+        ...profileKey.initial(),
+        profileName: 'coder',
+      });
       ix.get(IAgentTowerService);
 
       const decision = await fire(writeHookContext('Write', [`${repo}/src/gemm.cpp`]));
@@ -2086,6 +2348,12 @@ describe('TowerModeInjection', () => {
 describe('tower mode API helpers', () => {
   it('lists TowerRebase among the tower tool names', () => {
     expect(TOWER_TOOL_NAMES).toContain('TowerRebase');
+  });
+
+  it('vetoes all thirteen tower tools while never granting TowerComplete to the main agent', () => {
+    expect(TOWER_VETO_TOOL_NAMES).toHaveLength(13);
+    expect(TOWER_VETO_TOOL_NAMES).toContain('TowerComplete');
+    expect(TOWER_MODE_TOOLS).not.toContain('TowerComplete');
   });
 
   it('pins the permission mode only for the tower-worker profile', () => {

@@ -57,8 +57,6 @@ const AGENT_TOOLS = [
   'SetGoalBudget',
   'UpdateGoal',
   'TowerInit',
-  'TowerStatus',
-  'TowerTeardown',
   'mcp__*',
 ] as const;
 

@@ -8,6 +8,8 @@ import { Error2, ErrorCodes, BugIndicatingError } from '#/errors';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
+import { TOOLS_SECTION } from '#/agent/toolPolicy/configSection';
+import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionSwarmService, type SessionSwarmTask } from '#/features/swarm/session/sessionSwarm';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -27,6 +29,7 @@ import { AGENT_PERSONA_FLAG_ID, SUBAGENT_FORK_FLAG_ID } from '#/session/subagent
 import {
   buildSubagentModelDescriptions,
   exposesSubagentModelChoice,
+  SECONDARY_MODEL_SECTION,
   stripSubagentForkParameter,
   stripSubagentModelParameter,
   stripParameters,
@@ -86,6 +89,15 @@ export class AgentSwarmTool implements IAgentSwarmTool {
   readonly name = 'AgentSwarm' as const;
 
   get parameters(): Record<string, unknown> {
+    const key = this.parametersKey();
+    const cached = this.parametersCache;
+    if (cached !== undefined && cached.key === key) return cached.value;
+    const value = this.renderParameters();
+    this.parametersCache = { key, value };
+    return value;
+  }
+
+  private renderParameters(): Record<string, unknown> {
     const parameters = exposesSubagentModelChoice(this.config, this.flags)
       ? AGENT_SWARM_PARAMETERS
       : AGENT_SWARM_PARAMETERS_NO_MODEL;
@@ -100,7 +112,20 @@ export class AgentSwarmTool implements IAgentSwarmTool {
       : stripParameters(withNames, 'persona', 'personas');
   }
 
+  private parametersKey(): string {
+    return [
+      exposesSubagentModelChoice(this.config, this.flags) ? '1' : '0',
+      this.flags.enabled(SUBAGENT_FORK_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_MESSAGING_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_PERSONA_FLAG_ID) ? '1' : '0',
+    ].join('');
+  }
+
   private readonly callerAgentId: string;
+  private parametersCache:
+    | { readonly key: string; readonly value: Record<string, unknown> }
+    | undefined;
+  private descriptionCache: { readonly key: string; readonly value: string } | undefined;
 
   constructor(
     @ISessionSwarmService private readonly swarmService: ISessionSwarmService,
@@ -110,11 +135,34 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     @IFlagService private readonly flags: IFlagService,
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
+    @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
 
   get description(): string {
+    const key = this.descriptionKey();
+    const cached = this.descriptionCache;
+    if (cached !== undefined && cached.key === key) return cached.value;
+    const value = this.renderDescription();
+    this.descriptionCache = { key, value };
+    return value;
+  }
+
+  private descriptionKey(): string {
+    const own = this.profile.data();
+    return [
+      `revision:${String(this.catalog.revision)}`,
+      this.flags.enabled(SUBAGENT_FORK_FLAG_ID) ? '1' : '0',
+      exposesSubagentModelChoice(this.config, this.flags) ? '1' : '0',
+      own.profileName ?? '',
+      own.modelAlias ?? '',
+      JSON.stringify(this.config.get(SECONDARY_MODEL_SECTION) ?? null),
+      JSON.stringify(this.config.get(TOOLS_SECTION) ?? null),
+    ].join('\u0000');
+  }
+
+  private renderDescription(): string {
     let description = AGENT_SWARM_DESCRIPTION;
     if (this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
       description += `\n\n${AGENT_SWARM_FORK_DESCRIPTION}`;

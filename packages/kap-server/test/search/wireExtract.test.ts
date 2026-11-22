@@ -54,6 +54,7 @@ describe('extractFromWireLine', () => {
     'compaction_summary',
     'plugin_command',
     'agent_message',
+    'session_message',
   ])(
     'filters out origin kind %s',
     (kind) => {
@@ -62,6 +63,20 @@ describe('extractFromWireLine', () => {
       ).toEqual([]);
     },
   );
+
+  it('filters out a titled cross-session message addressed as a reply', () => {
+    expect(
+      extractFromWireLine(
+        userRecord('peer text', 1_700_000_000_000, {
+          kind: 'session_message',
+          fromSessionId: 'session-b',
+          fromSessionTitle: 'Beta',
+          replyToSessionId: 'session-a',
+          replyToSessionTitle: 'Alpha',
+        }),
+      ),
+    ).toEqual([]);
+  });
 
   it('filters out subagent system triggers even though they open transcript turns', () => {
     expect(
@@ -280,7 +295,7 @@ describe('analyzeWireLine turn effects', () => {
     expect(turnOf(userRecord('sum', 1, { kind: 'compaction_summary' }))).toEqual({ kind: 'none' });
   });
 
-  it('cron / task / hook / shell_command / agent_message origins open non-anchor turns', () => {
+  it('cron / task / hook / shell_command / agent_message / session_message origins open non-anchor turns', () => {
     expect(turnOf(userRecord('cron', 1, { kind: 'cron_job', jobId: 'j' }))).toEqual({
       kind: 'open',
       anchor: false,
@@ -301,6 +316,16 @@ describe('analyzeWireLine turn effects', () => {
       kind: 'open',
       anchor: false,
     });
+    expect(
+      turnOf(
+        userRecord('peer', 1, {
+          kind: 'session_message',
+          fromSessionId: 'session-b',
+          fromSessionTitle: 'Beta',
+          replyToSessionId: 'session-a',
+        }),
+      ),
+    ).toEqual({ kind: 'open', anchor: false });
   });
 
   it('assistant-surviving loop events ensure a turn; tool results and bare steps do not', () => {

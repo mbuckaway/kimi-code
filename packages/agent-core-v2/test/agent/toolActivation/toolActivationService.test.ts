@@ -376,6 +376,46 @@ describe('AgentToolActivationService', () => {
     expect(gammaConstructions).toBe(0);
   });
 
+  it('does not evaluate when for a tool another owner already registered', async () => {
+    let whenCalls = 0;
+    registerAgentToolService(IGammaTool, GammaTool, {
+      name: 'Gamma',
+      when: () => {
+        whenCalls += 1;
+        return true;
+      },
+    });
+    const ix = createActivationHost();
+    const registry = ix.get(IAgentToolRegistryService);
+    const external = registry.register(new StubTool('Gamma'));
+
+    await ix.get(IAgentToolActivationService).activate();
+
+    expect(whenCalls).toBe(0);
+    expect(registry.resolve('Gamma')).toBeInstanceOf(StubTool);
+    expect(gammaConstructions).toBe(0);
+
+    external.dispose();
+  });
+
+  it('deactivates a contribution whose when predicate turns false after a runtime change', async () => {
+    let whenAllows = true;
+    registerAgentToolService(IGammaTool, GammaTool, {
+      name: 'Gamma',
+      when: () => whenAllows,
+    });
+    const ix = createActivationHost();
+    const registry = ix.get(IAgentToolRegistryService);
+    await ix.get(IAgentToolActivationService).activate();
+    expect(registry.resolve('Gamma')).toBeInstanceOf(GammaTool);
+
+    whenAllows = false;
+    runtimeChangeEmitter.fire();
+
+    expect(registry.resolve('Gamma')).toBeUndefined();
+    expect(registry.list().map((tool) => tool.name)).not.toContain('Gamma');
+  });
+
   it('honors the workspace tool-policy veto before the profile', async () => {
     gateData.disabledTools = ['Beta'];
     registerAgentToolService(IAlphaTool, AlphaTool, { name: 'Alpha' });
@@ -423,6 +463,43 @@ describe('AgentToolActivationService', () => {
 
     expect(registry.resolve('Alpha')).toBe(alpha);
     expect(registry.resolve('Beta')).toBeInstanceOf(BetaTool);
+  });
+
+  it('withdraws a tool the profile allowlist dropped on the next activation', async () => {
+    profileData.activeToolNames = ['Alpha', 'Beta'];
+    registerAgentToolService(IAlphaTool, AlphaTool, { name: 'Alpha' });
+    registerAgentToolService(IBetaTool, BetaTool, { name: 'Beta' });
+    const ix = createActivationHost();
+    const activation = ix.get(IAgentToolActivationService);
+    const registry = ix.get(IAgentToolRegistryService);
+
+    await activation.activate();
+    expect(registry.resolve('Beta')).toBeInstanceOf(BetaTool);
+
+    profileData.activeToolNames = ['Alpha'];
+    await activation.activate();
+
+    expect(registry.resolve('Alpha')).toBeInstanceOf(AlphaTool);
+    expect(registry.resolve('Beta')).toBeUndefined();
+    expect(registry.list().map((tool) => tool.name)).toEqual(['Alpha']);
+  });
+
+  it('leaves a tool it did not register alone when the allowlist drops that name', async () => {
+    profileData.activeToolNames = ['Alpha'];
+    registerAgentToolService(IAlphaTool, AlphaTool, { name: 'Alpha' });
+    const ix = createActivationHost();
+    const activation = ix.get(IAgentToolActivationService);
+    const registry = ix.get(IAgentToolRegistryService);
+    const external = registry.register(new BetaTool());
+
+    await activation.activate();
+    profileData.activeToolNames = [];
+    await activation.activate();
+
+    expect(registry.resolve('Alpha')).toBeUndefined();
+    expect(registry.resolve('Beta')).toBeInstanceOf(BetaTool);
+
+    external.dispose();
   });
 
   describe('select_tools disclosure carve-out', () => {

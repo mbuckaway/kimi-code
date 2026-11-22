@@ -336,6 +336,10 @@ export class SessionReplayRenderer {
       this.renderAgentMessage(context, message);
       return;
     }
+    if (message.origin?.kind === 'session_message') {
+      this.renderSessionMessage(context, message);
+      return;
+    }
     if (message.origin?.kind === 'hook_result') {
       this.renderHookResult(context, message);
       return;
@@ -661,6 +665,21 @@ export class SessionReplayRenderer {
     const sender = replyTo === undefined ? from : `${from} ("${replyTo}")`;
     this.host.appendTranscriptEntry({
       ...replayEntry(context, 'status', `Message from agent ${sender}`, 'notice', {
+        detail: extractAgentMessageBody(contentPartsToText(message.content)),
+      }),
+    });
+  }
+
+  private renderSessionMessage(context: ReplayRenderContext, message: ContextMessage): void {
+    if (message.origin?.kind !== 'session_message') return;
+    this.flushAssistant(context);
+    const { fromSessionId, fromSessionTitle } = message.origin;
+    const sender =
+      fromSessionTitle === undefined
+        ? fromSessionId
+        : `${fromSessionId} ("${fromSessionTitle}")`;
+    this.host.appendTranscriptEntry({
+      ...replayEntry(context, 'status', `Message from session ${sender}`, 'notice', {
         detail: extractAgentMessageBody(contentPartsToText(message.content)),
       }),
     });
