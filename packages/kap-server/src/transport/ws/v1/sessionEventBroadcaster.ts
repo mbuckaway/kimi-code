@@ -89,6 +89,7 @@ export type BroadcastDelivery = 'subscription' | 'immediate';
 
 export interface BroadcastTarget {
   send(envelope: EventEnvelope, delivery?: BroadcastDelivery): void;
+  sendSerialized?(wire: string, delivery?: BroadcastDelivery): void;
 }
 
 export type AgentFilter = ReadonlySet<string> | undefined;
@@ -1045,21 +1046,41 @@ export class SessionEventBroadcaster {
       const recipients = new Set<BroadcastTarget>(this.globalTargets);
       for (const target of this.allTargets()) recipients.add(target);
       const diGated = event.type.startsWith('event.di.');
+      const matching: BroadcastTarget[] = [];
       for (const target of recipients) {
         if (diGated && !this.diEventTargets.has(target)) continue;
-        try {
-          target.send(envelope, 'immediate');
-        } catch {
-        }
+        matching.push(target);
       }
+      this.deliver(matching, envelope, 'immediate');
     } else {
+      const matching: BroadcastTarget[] = [];
       for (const [target, sub] of targets) {
         if (!matchesAgentFilter(envelope, sub.agentFilter)) continue;
         if (suppressedByTranscript(envelope, sub.transcriptGrades)) continue;
-        try {
-          target.send(envelope);
-        } catch {
+        matching.push(target);
+      }
+      this.deliver(matching, envelope, 'subscription');
+    }
+  }
+
+  private deliver(
+    recipients: readonly BroadcastTarget[],
+    envelope: EventEnvelope,
+    delivery: BroadcastDelivery,
+  ): void {
+    if (recipients.length === 0) return;
+    const wire =
+      canShareWire(envelope) && recipients.some((target) => target.sendSerialized !== undefined)
+        ? serializeEnvelope(envelope)
+        : undefined;
+    for (const target of recipients) {
+      try {
+        if (wire !== undefined && target.sendSerialized !== undefined) {
+          target.sendSerialized(wire, delivery);
+          continue;
         }
+        target.send(envelope, delivery);
+      } catch {
       }
     }
   }
@@ -1125,6 +1146,19 @@ function isGlobalEvent(type: string): boolean {
     type.startsWith('event.capability.') ||
     type.startsWith('event.di.')
   );
+}
+
+function canShareWire(envelope: EventEnvelope): boolean {
+  if (envelope.volatile !== true) return true;
+  return envelope.type !== 'assistant.delta' && envelope.type !== 'thinking.delta';
+}
+
+function serializeEnvelope(envelope: EventEnvelope): string | undefined {
+  try {
+    return JSON.stringify(envelope);
+  } catch {
+    return undefined;
+  }
 }
 
 function isAgentLifecycleEvent(type: string): boolean {

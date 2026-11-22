@@ -68,7 +68,7 @@ export interface CrossSessionInboundMessage {
   readonly signal?: AbortSignal;
 }
 
-export type CrossSessionRefusalReason = 'policy' | 'duplicate' | 'self';
+export type CrossSessionRefusalReason = 'policy' | 'duplicate' | 'self' | 'queue_full';
 
 export interface CrossSessionDeliveredResult {
   readonly kind: 'delivered';

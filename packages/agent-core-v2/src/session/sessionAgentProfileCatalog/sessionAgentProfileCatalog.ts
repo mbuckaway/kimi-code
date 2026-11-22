@@ -21,6 +21,7 @@ export interface ISessionAgentProfileCatalog {
 
   readonly ready: Promise<void>;
   readonly onDidChange: Event<string>;
+  readonly revision: number;
   get(name: string): AgentProfile | undefined;
   getDefault(): AgentProfile;
   list(): readonly AgentProfile[];

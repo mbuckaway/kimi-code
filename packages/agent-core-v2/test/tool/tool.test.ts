@@ -669,6 +669,7 @@ function discoveredCatalog(): ISessionAgentProfileCatalog {
     _serviceBrand: undefined,
     ready: Promise.resolve(),
     onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+    revision: 0,
     get: (name) => profiles.find((profile) => profile.name === name),
     getDefault: () => agent,
     list: () => [...profiles],
@@ -683,6 +684,27 @@ function discoveredCatalog(): ISessionAgentProfileCatalog {
         suppressed: [],
       };
     },
+    load: async () => {},
+    reload: async () => {},
+  };
+}
+
+function revisionedCatalog(
+  profiles: readonly AgentProfile[],
+  revision: { value: number },
+): ISessionAgentProfileCatalog {
+  const defaultProfile = profiles.find((profile) => profile.name === 'agent') ?? profiles[0]!;
+  return {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+    get revision() {
+      return revision.value;
+    },
+    get: (name) => profiles.find((profile) => profile.name === name),
+    getDefault: () => defaultProfile,
+    list: () => [...profiles],
+    inspect: () => undefined,
     load: async () => {},
     reload: async () => {},
   };
@@ -1126,6 +1148,7 @@ describe('Agent tool description', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => restricted,
       list: () => profiles,
@@ -1165,6 +1188,7 @@ describe('Agent tool description', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [coder, explore],
@@ -1201,6 +1225,7 @@ describe('Agent tool description', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => [caller, coder, explore].find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [coder, explore],
@@ -1243,6 +1268,7 @@ describe('Agent tool description', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => [caller, ...profiles].find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [...profiles],
@@ -1288,6 +1314,7 @@ describe('Agent tool description', () => {
       _serviceBrand: undefined,
       ready,
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => [caller, ...profiles].find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [...profiles],
@@ -1519,6 +1546,7 @@ describe('Agent tool execution contract', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [coder, explore],
@@ -1560,6 +1588,7 @@ describe('Agent tool execution contract', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => agent,
       list: () => [...profiles],
@@ -1637,6 +1666,7 @@ describe('Agent tool execution contract', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+      revision: 0,
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => agent,
       list: () => [...profiles],
@@ -4602,6 +4632,360 @@ describe('Agent tools', () => {
       );
       expect(readFileSync(outputPath, 'utf8')).toBe(fullOutput);
     });
+  });
+});
+
+function toolSchemaProperties(
+  parameters: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const properties = parameters?.['properties'];
+  return properties !== null && typeof properties === 'object'
+    ? (properties as Record<string, unknown>)
+    : {};
+}
+
+function probeTool(name: string): ExecutableTool {
+  return {
+    name,
+    description: `${name} probe tool`,
+    parameters: { type: 'object', properties: {} },
+    resolveExecution: () => ({
+      approvalRule: name,
+      description: name,
+      execute: async () => ({ output: 'ok' }),
+    }),
+  };
+}
+
+function registryRevision(registry: IAgentToolRegistryService): number {
+  const revision = registry.revision;
+  expect(revision).toBeTypeOf('number');
+  return revision ?? -1;
+}
+
+describe('AgentToolRegistryService cached surface', () => {
+  let ctx: TestAgentContext;
+
+  afterEach(async () => {
+    await ctx.dispose();
+  });
+
+  it('lists tools in a stable locale-sorted order across reads', () => {
+    ctx = createTestAgent();
+    const registry = ctx.get(IAgentToolRegistryService);
+
+    const first = registry.list().map((tool) => tool.name);
+    const second = registry.list().map((tool) => tool.name);
+
+    expect(first.length).toBeGreaterThan(1);
+    expect(first).toEqual([...first].toSorted((a, b) => a.localeCompare(b)));
+    expect(second).toEqual(first);
+  });
+
+  it('keeps references ordered and consistent with the listed tools', () => {
+    ctx = createTestAgent();
+    const registry = ctx.get(IAgentToolRegistryService);
+
+    const references = registry.listReferences();
+
+    expect(references.map((reference) => reference.name)).toEqual(
+      registry.list().map((tool) => tool.name),
+    );
+  });
+
+  it('bumps the revision and re-sorts when a tool is registered and unregistered', () => {
+    ctx = createTestAgent();
+    const registry = ctx.get(IAgentToolRegistryService);
+    const before = registryRevision(registry);
+
+    const registration = registry.register(probeTool('AAAProbe'), { source: 'user' });
+
+    expect(registryRevision(registry)).toBeGreaterThan(before);
+    expect(registry.list()[0]).toMatchObject({ name: 'AAAProbe', source: 'user' });
+    expect(registry.resolve('AAAProbe')).toBeDefined();
+    const afterRegister = registryRevision(registry);
+
+    registration.dispose();
+
+    expect(registryRevision(registry)).toBeGreaterThan(afterRegister);
+    expect(registry.list().map((tool) => tool.name)).not.toContain('AAAProbe');
+    expect(registry.resolve('AAAProbe')).toBeUndefined();
+  });
+});
+
+describe('SubagentTool surface caching', () => {
+  let ctx: TestAgentContext;
+  let messaging: { enabled: boolean };
+
+  afterEach(async () => {
+    await ctx.dispose();
+  });
+
+  function createAgentWithMessagingFlag(): void {
+    messaging = { enabled: true };
+    ctx = createTestAgent(
+      appService(
+        IFlagService,
+        stubFlag((id) => messaging.enabled && id === AGENT_MESSAGING_FLAG_ID),
+      ),
+    );
+  }
+
+  it('reuses the same parameters object while the flags are unchanged', () => {
+    createAgentWithMessagingFlag();
+    const tool = agentTool(ctx);
+
+    const first = tool.parameters;
+    const second = tool.parameters;
+
+    expect(first).toBeDefined();
+    expect(second).toBe(first);
+  });
+
+  it('rebuilds the parameters object when a flag flips and strips the gated key', () => {
+    createAgentWithMessagingFlag();
+    const tool = agentTool(ctx);
+
+    const withMessaging = tool.parameters;
+    messaging.enabled = false;
+    const withoutMessaging = tool.parameters;
+
+    expect(toolSchemaProperties(withMessaging)).toHaveProperty('name');
+    expect(withoutMessaging).not.toBe(withMessaging);
+    expect(toolSchemaProperties(withoutMessaging)).not.toHaveProperty('name');
+    expect(tool.parameters).toBe(withoutMessaging);
+  });
+
+  function renderSpy(tool: ExecutableTool<SubagentToolInput>) {
+    return vi.spyOn(
+      tool as unknown as { renderDescription(): string },
+      'renderDescription',
+    );
+  }
+
+  it('reuses the rendered description while the inputs are unchanged', () => {
+    ctx = createTestAgent();
+    const tool = agentTool(ctx);
+    const spy = renderSpy(tool);
+
+    const first = tool.description;
+    const rendersAfterFirstRead = spy.mock.calls.length;
+    const second = tool.description;
+
+    expect(rendersAfterFirstRead).toBe(1);
+    expect(second).toBe(first);
+    expect(spy.mock.calls.length).toBe(rendersAfterFirstRead);
+  });
+
+  it('invalidates the rendered description when the registry revision changes', () => {
+    ctx = createTestAgent();
+    const tool = agentTool(ctx);
+    const registry = ctx.get(IAgentToolRegistryService);
+    const spy = renderSpy(tool);
+
+    const first = tool.description;
+    const rendersAfterFirstRead = spy.mock.calls.length;
+
+    registry.register(probeTool('CacheProbe'));
+
+    const second = tool.description;
+
+    expect(spy.mock.calls.length).toBeGreaterThan(rendersAfterFirstRead);
+    expect(second).toContain('Available agent types');
+  });
+
+  it('invalidates the rendered description when the profile model alias changes', () => {
+    ctx = createTestAgent(secondaryModelFlags(), {
+      initialConfig: {
+        secondaryModel: {
+          defaultModel: 'provider/fast',
+          models: {
+            'provider/fast': 'fast and cheap',
+            'mock-model': 'the main model',
+          },
+        },
+        models: POOL_MODEL_ENTRIES,
+      },
+    });
+    const tool = agentTool(ctx);
+    const spy = renderSpy(tool);
+
+    expect(tool.description).toContain('- mock-model [main model]');
+    const rendersAfterFirstRead = spy.mock.calls.length;
+
+    ctx.get(IAgentProfileService).update({ modelAlias: 'provider/fast' });
+    const second = tool.description;
+
+    expect(spy.mock.calls.length).toBeGreaterThan(rendersAfterFirstRead);
+    expect(second).toContain('- provider/fast [default] [main model]');
+  });
+
+  it('invalidates the rendered description when the active tool names change', () => {
+    ctx = createTestAgent();
+    const tool = agentTool(ctx);
+    const profile = ctx.get(IAgentProfileService);
+    const spy = renderSpy(tool);
+
+    void tool.description;
+    const rendersAfterFirstRead = spy.mock.calls.length;
+
+    profile.update({ activeToolNames: ['TaskList', 'TaskOutput', 'TaskStop'] });
+    void tool.description;
+    const rendersAfterNames = spy.mock.calls.length;
+
+    profile.update({ activeToolNames: ['Read'] });
+    void tool.description;
+
+    expect(rendersAfterNames).toBeGreaterThan(rendersAfterFirstRead);
+    expect(spy.mock.calls.length).toBeGreaterThan(rendersAfterNames);
+  });
+
+  it('stops consulting the catalog list once the catalog is ready', async () => {
+    const catalog = discoveredCatalog();
+    const listSpy = vi.spyOn(catalog, 'list');
+    ctx = createTestAgent(sessionService(ISessionAgentProfileCatalog, catalog));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const tool = agentTool(ctx);
+
+    void tool.description;
+    const callsAfterFirstRead = listSpy.mock.calls.length;
+    void tool.description;
+
+    expect(listSpy.mock.calls.length).toBe(callsAfterFirstRead);
+  });
+
+  it('re-renders the description when the catalog revision changes', async () => {
+    const defaultAgent = normalizeAgentProfile({
+      name: 'agent',
+      description: 'Default agent',
+      systemPrompt: () => 'agent',
+    });
+    const coder = normalizeAgentProfile({
+      name: 'coder',
+      description: 'Coder',
+      systemPrompt: () => 'coder',
+    });
+    const explore = normalizeAgentProfile({
+      name: 'explore',
+      description: 'Explorer',
+      systemPrompt: () => 'explore',
+    });
+    const profiles: AgentProfile[] = [defaultAgent, coder];
+    const revision = { value: 1 };
+    ctx = createTestAgent(
+      sessionService(
+        ISessionAgentProfileCatalog,
+        revisionedCatalog(profiles, revision),
+      ),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const tool = agentTool(ctx);
+    const spy = renderSpy(tool);
+
+    const first = tool.description;
+    const rendersAfterFirstRead = spy.mock.calls.length;
+
+    expect(first).toContain('- coder: Coder');
+    expect(first).not.toContain('- explore: Explorer');
+
+    profiles.push(explore);
+    revision.value += 1;
+    const second = tool.description;
+
+    expect(spy.mock.calls.length).toBeGreaterThan(rendersAfterFirstRead);
+    expect(second).not.toBe(first);
+    expect(second).toContain('- explore: Explorer');
+  });
+});
+
+describe('AgentSwarmTool surface caching', () => {
+  let ctx: TestAgentContext;
+  let messaging: { enabled: boolean };
+
+  afterEach(async () => {
+    await ctx.dispose();
+  });
+
+  function createSwarmWithMessagingFlag(): void {
+    messaging = { enabled: true };
+    ctx = createTestAgent(
+      appService(
+        IFlagService,
+        stubFlag((id) => messaging.enabled && id === AGENT_MESSAGING_FLAG_ID),
+      ),
+    );
+  }
+
+  it('reuses the same parameters object while the flags are unchanged', () => {
+    createSwarmWithMessagingFlag();
+    const tool = agentSwarmTool(ctx);
+
+    const first = tool.parameters;
+    const second = tool.parameters;
+
+    expect(first).toBeDefined();
+    expect(second).toBe(first);
+  });
+
+  it('rebuilds the parameters object when a flag flips and strips the gated key', () => {
+    createSwarmWithMessagingFlag();
+    const tool = agentSwarmTool(ctx);
+
+    const withMessaging = tool.parameters;
+    messaging.enabled = false;
+    const withoutMessaging = tool.parameters;
+
+    expect(toolSchemaProperties(withMessaging)).toHaveProperty('names');
+    expect(withoutMessaging).not.toBe(withMessaging);
+    expect(toolSchemaProperties(withoutMessaging)).not.toHaveProperty('names');
+    expect(tool.parameters).toBe(withoutMessaging);
+  });
+
+  function renderSpy(tool: ExecutableTool<AgentSwarmToolInput>) {
+    return vi.spyOn(
+      tool as unknown as { renderDescription(): string },
+      'renderDescription',
+    );
+  }
+
+  it('reuses the rendered description while the inputs are unchanged', () => {
+    ctx = createTestAgent();
+    const tool = agentSwarmTool(ctx);
+    const spy = renderSpy(tool);
+
+    const first = tool.description;
+    const rendersAfterFirstRead = spy.mock.calls.length;
+    const second = tool.description;
+
+    expect(rendersAfterFirstRead).toBe(1);
+    expect(second).toBe(first);
+    expect(spy.mock.calls.length).toBe(rendersAfterFirstRead);
+  });
+
+  it('re-renders the description when the catalog revision changes', () => {
+    const defaultAgent = normalizeAgentProfile({
+      name: 'agent',
+      description: 'Default agent',
+      systemPrompt: () => 'agent',
+    });
+    const revision = { value: 1 };
+    ctx = createTestAgent(
+      sessionService(
+        ISessionAgentProfileCatalog,
+        revisionedCatalog([defaultAgent], revision),
+      ),
+    );
+    const tool = agentSwarmTool(ctx);
+    const spy = renderSpy(tool);
+
+    const first = tool.description;
+    const rendersAfterFirstRead = spy.mock.calls.length;
+
+    revision.value += 1;
+    const second = tool.description;
+
+    expect(spy.mock.calls.length).toBeGreaterThan(rendersAfterFirstRead);
+    expect(second).toBe(first);
   });
 });
 

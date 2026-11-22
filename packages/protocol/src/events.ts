@@ -170,6 +170,22 @@ export interface AgentMessageOrigin {
   readonly replyTo?: string;
 }
 
+/**
+ * A message delivered from the main agent of another session. It is peer input,
+ * never user input: it is not user approval and it grants no permission.
+ */
+export interface SessionMessageOrigin {
+  readonly kind: 'session_message';
+  /** Session id of the sending session. */
+  readonly fromSessionId: string;
+  /** Display title of the sending session when one was set. */
+  readonly fromSessionTitle?: string;
+  /** Session id the delivery replies to, when it is a reply. */
+  readonly replyToSessionId?: string;
+  /** Display title of the replied-to session when one was set. */
+  readonly replyToSessionTitle?: string;
+}
+
 export type PromptOrigin =
   | UserPromptOrigin
   | SkillActivationOrigin
@@ -184,7 +200,8 @@ export type PromptOrigin =
   | CronMissedOrigin
   | HookResultOrigin
   | RetryOrigin
-  | AgentMessageOrigin;
+  | AgentMessageOrigin
+  | SessionMessageOrigin;
 
 export type GoalStatus = 'active' | 'paused' | 'blocked' | 'complete';
 export type GoalActor = 'user' | 'model' | 'runtime' | 'system';
@@ -1235,6 +1252,14 @@ export const agentMessageOriginSchema = z.object({
   replyTo: z.string().optional(),
 }) satisfies z.ZodType<AgentMessageOrigin>;
 
+export const sessionMessageOriginSchema = z.object({
+  kind: z.literal('session_message'),
+  fromSessionId: z.string(),
+  fromSessionTitle: z.string().optional(),
+  replyToSessionId: z.string().optional(),
+  replyToSessionTitle: z.string().optional(),
+}) satisfies z.ZodType<SessionMessageOrigin>;
+
 export const promptOriginSchema = z.discriminatedUnion('kind', [
   userPromptOriginSchema,
   skillActivationOriginSchema,
@@ -1250,6 +1275,7 @@ export const promptOriginSchema = z.discriminatedUnion('kind', [
   hookResultOriginSchema,
   retryOriginSchema,
   agentMessageOriginSchema,
+  sessionMessageOriginSchema,
 ]) satisfies z.ZodType<PromptOrigin>;
 
 export const goalStatusSchema = z.enum(['active', 'paused', 'blocked', 'complete']) satisfies z.ZodType<GoalStatus>;

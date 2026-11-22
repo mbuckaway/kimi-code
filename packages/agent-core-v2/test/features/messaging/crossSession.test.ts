@@ -1,11 +1,14 @@
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   rm,
+  stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,6 +21,10 @@ import { DisposableStore } from '#/_base/di/lifecycle';
 import type { ServiceIdentifier, ServicesAccessor } from '#/_base/di/instantiation';
 import type { ISessionScopeHandle } from '#/_base/di/scope';
 import { createScopedTestHost, type ScopedTestHost } from '#/_base/di/test';
+import {
+  resetUnexpectedErrorHandler,
+  setUnexpectedErrorHandler,
+} from '#/_base/errors/unexpectedError';
 import type { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import type { IFlagService } from '#/app/flag/flag';
 import { ISessionManager } from '#/app/sessionManager/sessionManager';
@@ -45,12 +52,15 @@ import {
   type CrossSessionRegistration,
 } from '#/features/messaging/crossSession/crossSessionRegistry';
 import {
+  CROSS_SESSION_IDLE_TIMEOUT_MS,
+  CROSS_SESSION_MAX_FRAME_BYTES,
   CROSS_SESSION_SOCKET_DIR_ENV,
   CrossSessionFrameDecoder,
   ackFromReceiveResult,
   encodeCrossSessionFrame,
   resolveCrossSessionSocketDir,
   resolveCrossSessionSocketPath,
+  resolveCrossSessionInboxSocketPath,
   sendCrossSessionFrame,
   startCrossSessionInbox,
   type CrossSessionAckFrame,
@@ -111,6 +121,8 @@ const netFake = vi.hoisted(() => {
   class FakeSocket extends FakeEmitter {
     peer: FakeSocket | undefined;
     destroyed = false;
+    unrefed = false;
+    timeoutMs: number | undefined;
 
     write(chunk: unknown): boolean {
       const text = String(chunk);
@@ -148,7 +160,13 @@ const netFake = vi.hoisted(() => {
       });
     }
 
-    setTimeout(): this {
+    setTimeout(ms: number): this {
+      this.timeoutMs = ms;
+      return this;
+    }
+
+    unref(): this {
+      this.unrefed = true;
       return this;
     }
   }
@@ -156,13 +174,22 @@ const netFake = vi.hoisted(() => {
   const servers = new Map<string, (socket: FakeSocket) => void>();
   const refused = new Set<string>();
   const serverSockets: FakeSocket[] = [];
+  let listenFailures = 0;
+  let serverCreates = 0;
+  let serverUnrefs = 0;
 
   function createServer(onConnection: (socket: FakeSocket) => void) {
+    serverCreates += 1;
     const server = new FakeEmitter() as FakeEmitter & {
       listen(path: string, cb?: () => void): void;
       close(cb?: () => void): void;
+      unref(): void;
     };
     server.listen = (path, cb) => {
+      if (listenFailures > 0) {
+        listenFailures -= 1;
+        throw new Error('listen EADDRINUSE: address already in use');
+      }
       servers.set(path, onConnection);
       cb?.();
     };
@@ -171,6 +198,9 @@ const netFake = vi.hoisted(() => {
         if (handler === onConnection) servers.delete(path);
       }
       cb?.();
+    };
+    server.unref = () => {
+      serverUnrefs += 1;
     };
     return server;
   }
@@ -202,10 +232,22 @@ const netFake = vi.hoisted(() => {
     servers,
     refused,
     serverSockets,
+    failNextListen(count = 1): void {
+      listenFailures = count;
+    },
+    serverCreateCount(): number {
+      return serverCreates;
+    },
+    serverUnrefCount(): number {
+      return serverUnrefs;
+    },
     reset(): void {
       servers.clear();
       refused.clear();
       serverSockets.length = 0;
+      listenFailures = 0;
+      serverCreates = 0;
+      serverUnrefs = 0;
     },
   };
 });
@@ -214,6 +256,24 @@ vi.mock('node:net', () => ({
   createServer: netFake.createServer,
   createConnection: netFake.createConnection,
 }));
+
+const fsReadHook = vi.hoisted(() => ({
+  afterRead: undefined as ((path: string) => Promise<void> | void) | undefined,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readFile: (async (...args: unknown[]) => {
+      const result = await (actual.readFile as (...inner: unknown[]) => Promise<unknown>)(
+        ...args,
+      );
+      await fsReadHook.afterRead?.(String(args[0]));
+      return result;
+    }) as typeof actual.readFile,
+  };
+});
 
 const realSetImmediate = setImmediate;
 
@@ -389,7 +449,8 @@ async function waitForAcks(socket: { on(event: string, handler: Handler): unknow
   const ack = await new Promise<CrossSessionAckFrame>((resolve) => {
     const decoder = new CrossSessionFrameDecoder();
     socket.on('data', (chunk: unknown) => {
-      for (const frame of decoder.push(String(chunk))) {
+      const frames = decoder.push(chunk instanceof Uint8Array ? chunk : String(chunk));
+      for (const frame of frames) {
         if (frame.type === 'ack') resolve(frame);
       }
     });
@@ -403,16 +464,24 @@ async function waitForAcks(socket: { on(event: string, handler: Handler): unknow
 async function startTestInbox(input: {
   readonly socketPath: string;
   readonly token: string;
-  readonly handle?: (frame: CrossSessionInboundFrame) => Promise<CrossSessionAckFrame>;
+  readonly handle?: (
+    sessionId: string,
+    frame: CrossSessionInboundFrame,
+  ) => Promise<CrossSessionAckFrame>;
+  readonly idleTimeoutMs?: number;
+  readonly maxFrameBytes?: number;
+  readonly maxConnections?: number;
 }): Promise<Awaited<ReturnType<typeof startCrossSessionInbox>>> {
   return startCrossSessionInbox({
-    sessionId: SESSION_A,
     socketPath: input.socketPath,
     token: input.token,
     handle:
       input.handle ??
-      (async (frame) =>
+      (async (_sessionId, frame) =>
         ackFromReceiveResult(frame.messageId, { kind: 'delivered', delivery: 'newTurn', truncated: false })),
+    idleTimeoutMs: input.idleTimeoutMs,
+    maxFrameBytes: input.maxFrameBytes,
+    maxConnections: input.maxConnections,
   });
 }
 
@@ -422,6 +491,7 @@ describe('crossSessionRegistry', () => {
 
   beforeEach(async () => {
     vi.useFakeTimers();
+    fsReadHook.afterRead = undefined;
     root = await mkdtemp(join(tmpdir(), 'cross-session-registry-'));
     now = 1_000;
   });
@@ -470,6 +540,19 @@ describe('crossSessionRegistry', () => {
       startedAt: 900,
     });
     expect(names.some((name) => name.includes('.tmp.'))).toBe(false);
+    await handle.release();
+  });
+
+  it('register_createsTheRegistryDirectoryAndFileWithOwnerOnlyPermissions', async () => {
+    const handle = await registry().register({
+      sessionId: SESSION_A,
+      socketPath: '/tmp/socket-a.sock',
+      token: 'token-a',
+    });
+
+    const dir = join(root, 'messaging', 'registry');
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(dir, `${SESSION_A}.json`))).mode & 0o777).toBe(0o600);
     await handle.release();
   });
 
@@ -541,6 +624,83 @@ describe('crossSessionRegistry', () => {
     expect(listed).toEqual([]);
     expect(await readdir(join(root, 'messaging', 'registry'))).toEqual([]);
     await first.release();
+  });
+
+  it('listLive_keepsAnEntryThatWasRefreshedDuringTheStaleScan', async () => {
+    const handle = await registry().register({
+      sessionId: SESSION_A,
+      socketPath: '/tmp/socket-a.sock',
+      token: 'token-a',
+    });
+    const dir = join(root, 'messaging', 'registry');
+    const filePath = join(dir, `${SESSION_A}.json`);
+    now = 1_000 + CROSS_SESSION_STALE_AFTER_MS + 1;
+
+    let fired = false;
+    fsReadHook.afterRead = async (path) => {
+      if (fired || path !== filePath) return;
+      fired = true;
+      const stored = JSON.parse(await readFile(filePath, 'utf8')) as CrossSessionRegistration;
+      await writeFile(
+        filePath,
+        JSON.stringify({ ...stored, heartbeatAt: now, socketPath: '/tmp/refreshed.sock' }),
+      );
+    };
+
+    expect(await registry().listLive()).toEqual([]);
+    expect(await readdir(dir)).toContain(`${SESSION_A}.json`);
+    const listed = await registry().listLive();
+    expect(listed.map((entry) => entry.sessionId)).toEqual([SESSION_A]);
+    expect(listed[0]?.socketPath).toBe('/tmp/refreshed.sock');
+    await handle.release();
+  });
+
+  it('sweepStale_keepsAnEntryThatWasRefreshedDuringTheStaleScan', async () => {
+    const handle = await registry().register({
+      sessionId: SESSION_A,
+      socketPath: '/tmp/socket-a.sock',
+      token: 'token-a',
+    });
+    const dir = join(root, 'messaging', 'registry');
+    const filePath = join(dir, `${SESSION_A}.json`);
+    now = 1_000 + CROSS_SESSION_STALE_AFTER_MS + 1;
+
+    let fired = false;
+    fsReadHook.afterRead = async (path) => {
+      if (fired || path !== filePath) return;
+      fired = true;
+      const stored = JSON.parse(await readFile(filePath, 'utf8')) as CrossSessionRegistration;
+      await writeFile(filePath, JSON.stringify({ ...stored, heartbeatAt: now }));
+    };
+
+    await registry().sweepStale();
+    expect(await readdir(dir)).toContain(`${SESSION_A}.json`);
+    expect((await registry().get(SESSION_A))?.heartbeatAt).toBe(now);
+    await handle.release();
+  });
+
+  it('get_keepsAnEntryThatWasRefreshedDuringTheStaleCheck', async () => {
+    const handle = await registry().register({
+      sessionId: SESSION_A,
+      socketPath: '/tmp/socket-a.sock',
+      token: 'token-a',
+    });
+    const dir = join(root, 'messaging', 'registry');
+    const filePath = join(dir, `${SESSION_A}.json`);
+    now = 1_000 + CROSS_SESSION_STALE_AFTER_MS + 1;
+
+    let fired = false;
+    fsReadHook.afterRead = async (path) => {
+      if (fired || path !== filePath) return;
+      fired = true;
+      const stored = JSON.parse(await readFile(filePath, 'utf8')) as CrossSessionRegistration;
+      await writeFile(filePath, JSON.stringify({ ...stored, heartbeatAt: now }));
+    };
+
+    expect(await registry().get(SESSION_A)).toBeUndefined();
+    expect(await readdir(dir)).toContain(`${SESSION_A}.json`);
+    expect((await registry().get(SESSION_A))?.heartbeatAt).toBe(now);
+    await handle.release();
   });
 
   it('listLive_keepsFreshEntriesEvenWhenThePidIsNotAlive', async () => {
@@ -688,15 +848,78 @@ describe('crossSessionRegistry', () => {
     await expect(registry().listLive()).rejects.toMatchObject({ code: 'EISDIR' });
   });
 
-  it('concurrentUpdatesKeepTheInflightCounterBalanced', async () => {
+  it('concurrentUpdates_serialiseSoTheLastUpdateWins', async () => {
     const handle = await registry().register({
       sessionId: SESSION_A,
       socketPath: '/tmp/socket-a.sock',
       token: 'token-a',
     });
-    await Promise.all([handle.update({ title: 'one' }), handle.update({ title: 'two' })]);
-    expect((await registry().get(SESSION_A))?.title).toBe('two');
+    await Promise.all([
+      handle.update({ title: 'one' }),
+      handle.update({ title: 'two' }),
+      handle.update({ title: 'three' }),
+    ]);
+    expect((await registry().get(SESSION_A))?.title).toBe('three');
+    const names = await readdir(join(root, 'messaging', 'registry'));
+    expect(names.filter((name) => name.includes('.json.tmp.'))).toEqual([]);
     await handle.release();
+  });
+
+  it('register_removesTheTempFileWhenTheRenameFails', async () => {
+    const dir = join(root, 'messaging', 'registry');
+    await mkdir(dir, { recursive: true });
+    await mkdir(join(dir, `${SESSION_A}.json`), { recursive: true });
+
+    await expect(
+      registry().register({
+        sessionId: SESSION_A,
+        socketPath: '/tmp/socket-a.sock',
+        token: 'token-a',
+      }),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/^(EISDIR|ENOTEMPTY|EPERM)$/) });
+
+    expect(await readdir(dir)).toEqual([`${SESSION_A}.json`]);
+  });
+
+  it('sweepStale_removesTempFilesOlderThanAMinute', async () => {
+    const dir = join(root, 'messaging', 'registry');
+    await mkdir(dir, { recursive: true });
+    const staleTemp = join(dir, `${SESSION_A}.json.tmp.1.abcd`);
+    const freshTemp = join(dir, `${SESSION_A}.json.tmp.1.fresh`);
+    await writeFile(staleTemp, '{}');
+    await writeFile(freshTemp, '{}');
+    await utimes(staleTemp, new Date(0), new Date(0));
+    now = 1_000 + 60_001;
+
+    await registry().sweepStale();
+
+    const remaining = await readdir(dir);
+    expect(remaining).not.toContain(`${SESSION_A}.json.tmp.1.abcd`);
+    expect(remaining).toContain(`${SESSION_A}.json.tmp.1.fresh`);
+  });
+
+  it('listLive_removesTempFilesOlderThanAMinute', async () => {
+    const dir = join(root, 'messaging', 'registry');
+    await mkdir(dir, { recursive: true });
+    const staleTemp = join(dir, `${SESSION_A}.json.tmp.2.abcd`);
+    await writeFile(staleTemp, '{}');
+    await utimes(staleTemp, new Date(0), new Date(0));
+    now = 1_000 + 60_001;
+
+    expect(await registry().listLive()).toEqual([]);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('get_removesTempFilesOlderThanAMinute', async () => {
+    const dir = join(root, 'messaging', 'registry');
+    await mkdir(dir, { recursive: true });
+    const staleTemp = join(dir, `${SESSION_A}.json.tmp.3.abcd`);
+    await writeFile(staleTemp, '{}');
+    await utimes(staleTemp, new Date(0), new Date(0));
+    now = 1_000 + 60_001;
+
+    expect(await registry().get(SESSION_B)).toBeUndefined();
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it('listLive_surfacesUnreadableDirectories', async () => {
@@ -745,12 +968,81 @@ describe('crossSessionTransport', () => {
     expect(resolveCrossSessionSocketDir({ uid: 77 })).toBe(join(tmpdir(), 'kimi-socks-77'));
   });
 
+  it('resolveCrossSessionInboxSocketPath_buildsTheSharedProcessSocketName', () => {
+    expect(resolveCrossSessionInboxSocketPath({ uid: 4321, tmpDir: '/temp', pid: 99 })).toBe(
+      join('/temp', 'kimi-socks-4321', 'inbox-99.sock'),
+    );
+    expect(
+      resolveCrossSessionInboxSocketPath({ uid: 4321, tmpDir: '/temp', pid: 99, suffix: 'abcd' }),
+    ).toBe(join('/temp', 'kimi-socks-4321', 'inbox-99-abcd.sock'));
+    expect(resolveCrossSessionInboxSocketPath({ uid: 77 })).toMatch(/inbox-\d+\.sock$/);
+  });
+
   it('frameDecoder_ignoresMalformedLines', () => {
     const decoder = new CrossSessionFrameDecoder();
     const frames = decoder.push(
       `${JSON.stringify({ type: 'auth', token: 't' })}\nnot json\n${JSON.stringify({ type: 'ack', messageId: 'm', kind: 'delivered', truncated: false })}\n`,
     );
     expect(frames.map((frame) => frame.type)).toEqual(['auth', 'ack']);
+  });
+
+  it('frameDecoder_dropsNonObjectAndUntypedLines', () => {
+    const decoder = new CrossSessionFrameDecoder();
+    const frames = decoder.push(
+      [
+        'null',
+        '[]',
+        '42',
+        '"text"',
+        JSON.stringify({ type: 5 }),
+        JSON.stringify([{ type: 'auth', token: 't' }]),
+        JSON.stringify({ type: 'auth', token: 't' }),
+        '',
+      ].join('\n') + '\n',
+    );
+    expect(frames).toEqual([{ type: 'auth', token: 't' }]);
+    expect(decoder.droppedLines).toBe(6);
+  });
+
+  it('frameDecoder_countsMalformedJsonLines', () => {
+    const decoder = new CrossSessionFrameDecoder();
+    expect(decoder.push('not json\n')).toEqual([]);
+    expect(decoder.droppedLines).toBe(1);
+  });
+
+  it('frameDecoder_preservesMultiByteCharactersAcrossChunks', () => {
+    const decoder = new CrossSessionFrameDecoder();
+    const line = Buffer.from(
+      encodeCrossSessionFrame({
+        type: 'message',
+        sessionId: SESSION_A,
+        messageId: 'm1',
+        from: { sessionId: SESSION_B },
+        message: 'こんにちは世界',
+      }),
+      'utf8',
+    );
+    const cut = line.indexOf(Buffer.from('こんにちは', 'utf8')) + 1;
+    expect(decoder.push(line.subarray(0, cut))).toEqual([]);
+    const frames = decoder.push(line.subarray(cut));
+    expect(frames).toHaveLength(1);
+    expect((frames[0] as CrossSessionInboundFrame).message).toBe('こんにちは世界');
+    expect(decoder.droppedLines).toBe(0);
+  });
+
+  it('frameDecoder_flagsLinesOverTheFrameLimit', () => {
+    const decoder = new CrossSessionFrameDecoder({ maxFrameBytes: 32 });
+    expect(decoder.push('x'.repeat(33))).toEqual([]);
+    expect(decoder.overflowed).toBe(true);
+    expect(decoder.push('x\n')).toEqual([]);
+  });
+
+  it('frameDecoder_acceptsALineAtTheFrameLimit', () => {
+    const decoder = new CrossSessionFrameDecoder({ maxFrameBytes: 32 });
+    const line = JSON.stringify({ type: 'ping' });
+    expect(line.length).toBeLessThanOrEqual(32);
+    expect(decoder.push(`${line}\n`)).toEqual([{ type: 'ping' }]);
+    expect(decoder.overflowed).toBe(false);
   });
 
   it('ackFromReceiveResult_mapsEveryReceiveVariant', () => {
@@ -786,8 +1078,9 @@ describe('crossSessionTransport', () => {
     socket.write(
       encodeCrossSessionFrame({
         type: 'message',
+        sessionId: SESSION_A,
         messageId: 'm1',
-        from: { sessionId: SESSION_A },
+        from: { sessionId: SESSION_B },
         message: 'hello',
       }),
     );
@@ -803,7 +1096,7 @@ describe('crossSessionTransport', () => {
     const server = await startTestInbox({
       socketPath,
       token: 'secret',
-      handle: async (frame) => {
+      handle: async (_sessionId, frame) => {
         received.push(frame);
         return ackFromReceiveResult(frame.messageId, {
           kind: 'delivered',
@@ -817,8 +1110,9 @@ describe('crossSessionTransport', () => {
     socket.write(
       encodeCrossSessionFrame({
         type: 'message',
+        sessionId: SESSION_A,
         messageId: 'm1',
-        from: { sessionId: SESSION_A, title: 'Alpha' },
+        from: { sessionId: SESSION_B, title: 'Beta' },
         message: 'hello',
         inReplyTo: 'prev',
       }),
@@ -827,8 +1121,9 @@ describe('crossSessionTransport', () => {
     expect(received).toEqual([
       {
         type: 'message',
+        sessionId: SESSION_A,
         messageId: 'm1',
-        from: { sessionId: SESSION_A, title: 'Alpha' },
+        from: { sessionId: SESSION_B, title: 'Beta' },
         message: 'hello',
         inReplyTo: 'prev',
       },
@@ -857,8 +1152,9 @@ describe('crossSessionTransport', () => {
     socket.write(
       encodeCrossSessionFrame({
         type: 'message',
+        sessionId: SESSION_A,
         messageId: 'm1',
-        from: { sessionId: SESSION_A },
+        from: { sessionId: SESSION_B },
         message: 'hello',
       }),
     );
@@ -891,6 +1187,214 @@ describe('crossSessionTransport', () => {
     await server.close();
   });
 
+  it('server_ignoresNonObjectLinesBeforeAndAfterAuthentication', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    const received: CrossSessionInboundFrame[] = [];
+    const server = await startTestInbox({
+      socketPath,
+      token: 'secret',
+      handle: async (_sessionId, frame) => {
+        received.push(frame);
+        return ackFromReceiveResult(frame.messageId, {
+          kind: 'delivered',
+          delivery: 'newTurn',
+          truncated: false,
+        });
+      },
+    });
+    const socket = netFake.createConnection(socketPath);
+    socket.write('null\n[]\n42\n"text"\n');
+    socket.write(encodeCrossSessionFrame({ type: 'auth', token: 'secret' }));
+    socket.write('null\n[]\n42\n"text"\n');
+    socket.write(
+      encodeCrossSessionFrame({
+        type: 'message',
+        sessionId: SESSION_A,
+        messageId: 'm1',
+        from: { sessionId: SESSION_B },
+        message: 'hello',
+      }),
+    );
+    const [ack] = await waitForAcks(socket);
+    expect(ack).toMatchObject({ messageId: 'm1', kind: 'delivered' });
+    expect(received).toHaveLength(1);
+    await server.close();
+  });
+
+  it('server_destroysTheConnectionWhenALineExceedsTheFrameLimit', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    const server = await startTestInbox({ socketPath, token: 'secret' });
+
+    const beforeAuth = netFake.createConnection(socketPath);
+    beforeAuth.write('x'.repeat(CROSS_SESSION_MAX_FRAME_BYTES + 1));
+    await tick();
+    expect(netFake.serverSockets[0]?.destroyed).toBe(true);
+
+    const afterAuth = netFake.createConnection(socketPath);
+    afterAuth.write(encodeCrossSessionFrame({ type: 'auth', token: 'secret' }));
+    afterAuth.write(`${'y'.repeat(CROSS_SESSION_MAX_FRAME_BYTES + 1)}\n`);
+    await tick();
+    expect(netFake.serverSockets[1]?.destroyed).toBe(true);
+    await server.close();
+  });
+
+  it('server_unrefsAcceptedSocketsAndArmsTheIdleTimeout', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    const server = await startTestInbox({ socketPath, token: 'secret' });
+    netFake.createConnection(socketPath);
+    await tick();
+    const accepted = netFake.serverSockets[0]!;
+    expect(accepted.unrefed).toBe(true);
+    expect(accepted.timeoutMs).toBe(CROSS_SESSION_IDLE_TIMEOUT_MS);
+    accepted.emit('timeout');
+    await tick();
+    expect(accepted.destroyed).toBe(true);
+    await server.close();
+  });
+
+  it('server_destroysIdleConnectionsThroughTheConfiguredTimeout', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    const server = await startTestInbox({ socketPath, token: 'secret', idleTimeoutMs: 0 });
+    netFake.createConnection(socketPath);
+    await tick();
+    expect(netFake.serverSockets[0]?.timeoutMs).toBeUndefined();
+    await server.close();
+  });
+
+  it('server_capsConcurrentConnections', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    const received: CrossSessionInboundFrame[] = [];
+    const server = await startTestInbox({
+      socketPath,
+      token: 'secret',
+      maxConnections: 1,
+      handle: async (_sessionId, frame) => {
+        received.push(frame);
+        return ackFromReceiveResult(frame.messageId, {
+          kind: 'delivered',
+          delivery: 'newTurn',
+          truncated: false,
+        });
+      },
+    });
+    const first = netFake.createConnection(socketPath);
+    await tick();
+    const second = netFake.createConnection(socketPath);
+    await tick();
+    expect(second.destroyed).toBe(true);
+
+    first.write(encodeCrossSessionFrame({ type: 'auth', token: 'secret' }));
+    first.write(
+      encodeCrossSessionFrame({
+        type: 'message',
+        sessionId: SESSION_A,
+        messageId: 'm1',
+        from: { sessionId: SESSION_B },
+        message: 'hello',
+      }),
+    );
+    const [ack] = await waitForAcks(first);
+    expect(ack).toMatchObject({ kind: 'delivered' });
+    expect(received).toHaveLength(1);
+    await server.close();
+  });
+
+  it('server_deliversMultiByteMessagesSplitAcrossSocketChunks', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    const received: CrossSessionInboundFrame[] = [];
+    const server = await startTestInbox({
+      socketPath,
+      token: 'secret',
+      handle: async (_sessionId, frame) => {
+        received.push(frame);
+        return ackFromReceiveResult(frame.messageId, {
+          kind: 'delivered',
+          delivery: 'newTurn',
+          truncated: false,
+        });
+      },
+    });
+    netFake.createConnection(socketPath);
+    await tick();
+    const accepted = netFake.serverSockets[0]!;
+    const wire = Buffer.from(
+      encodeCrossSessionFrame({ type: 'auth', token: 'secret' }) +
+        encodeCrossSessionFrame({
+          type: 'message',
+          sessionId: SESSION_A,
+          messageId: 'm1',
+          from: { sessionId: SESSION_B },
+          message: 'こんにちは世界',
+        }),
+      'utf8',
+    );
+    const cut = wire.indexOf(Buffer.from('こんにちは', 'utf8')) + 1;
+    accepted.emit('data', wire.subarray(0, cut));
+    accepted.emit('data', wire.subarray(cut));
+    await tick();
+    expect(received).toHaveLength(1);
+    expect(received[0]?.message).toBe('こんにちは世界');
+    await server.close();
+  });
+
+  it('close_waitsForInflightHandlersBeforeDestroyingConnections', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    let releaseHandler: () => void = () => {};
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    const server = await startTestInbox({
+      socketPath,
+      token: 'secret',
+      handle: async (_sessionId, frame) => {
+        await handlerGate;
+        return ackFromReceiveResult(frame.messageId, {
+          kind: 'delivered',
+          delivery: 'newTurn',
+          truncated: false,
+        });
+      },
+    });
+    const socket = netFake.createConnection(socketPath);
+    socket.write(encodeCrossSessionFrame({ type: 'auth', token: 'secret' }));
+    socket.write(
+      encodeCrossSessionFrame({
+        type: 'message',
+        sessionId: SESSION_A,
+        messageId: 'm1',
+        from: { sessionId: SESSION_B },
+        message: 'hello',
+      }),
+    );
+    await tick();
+    const acks = waitForAcks(socket);
+    const closing = server.close();
+    await tick();
+    expect(netFake.serverSockets[0]?.destroyed).toBe(false);
+    releaseHandler();
+    const [ack] = await acks;
+    expect(ack).toMatchObject({ messageId: 'm1', kind: 'delivered' });
+    await closing;
+    expect(netFake.serverSockets[0]?.destroyed).toBe(true);
+  });
+
+  it('start_repairsAPreexistingWorldWritableSocketDirectory', async () => {
+    const socketDir = join(root, 'sockets');
+    await mkdir(socketDir, { recursive: true });
+    await chmod(socketDir, 0o777);
+    const server = await startTestInbox({ socketPath: join(socketDir, 'inbox.sock'), token: 'secret' });
+    expect((await stat(socketDir)).mode & 0o777).toBe(0o700);
+    await server.close();
+  });
+
+  it('start_refusesToBindInsideANonDirectorySocketPath', async () => {
+    const blocker = join(root, 'sockets');
+    await writeFile(blocker, 'not a directory');
+    await expect(
+      startTestInbox({ socketPath: join(blocker, 'inbox.sock'), token: 'secret' }),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/^(EEXIST|ENOTDIR)$/) });
+  });
+
   it('start_removesAStaleSocketFileBeforeBinding', async () => {
     const socketDir = join(root, 'sockets');
     await mkdir(socketDir, { recursive: true });
@@ -919,18 +1423,28 @@ describe('crossSessionTransport', () => {
     await server.close();
   });
 
+  it('start_unrefsTheListeningServerAndStillCloses', async () => {
+    const socketPath = join(root, 'sockets', 'inbox.sock');
+    const server = await startTestInbox({ socketPath, token: 'secret' });
+    expect(netFake.serverUnrefCount()).toBe(1);
+    expect(netFake.servers.has(socketPath)).toBe(true);
+    await server.close();
+    expect(netFake.servers.has(socketPath)).toBe(false);
+  });
+
   it('send_authenticatesSendsAndReturnsTheAck', async () => {
     const socketPath = join(root, 'sockets', 'inbox.sock');
     const received: CrossSessionInboundFrame[] = [];
     const server = await startTestInbox({
       socketPath,
       token: 'secret',
-      handle: async (frame) => {
+      handle: async (_sessionId, frame) => {
         received.push(frame);
         return ackFromReceiveResult(frame.messageId, { kind: 'held', truncated: true });
       },
     });
     const ack = await sendCrossSessionFrame(socketPath, 'secret', {
+      sessionId: SESSION_B,
       messageId: 'm1',
       from: { sessionId: SESSION_A, title: 'Alpha' },
       message: 'hello',
@@ -943,6 +1457,7 @@ describe('crossSessionTransport', () => {
   it('send_rejectsWhenNoServerIsListening', async () => {
     await expect(
       sendCrossSessionFrame(join(root, 'sockets', 'missing.sock'), 'secret', {
+        sessionId: SESSION_B,
         messageId: 'm1',
         from: { sessionId: SESSION_A },
         message: 'hello',
@@ -957,7 +1472,7 @@ describe('crossSessionTransport', () => {
       sendCrossSessionFrame(
         join(root, 'sockets', 'missing.sock'),
         'secret',
-        { messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
+        { sessionId: SESSION_B, messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
         { signal: controller.signal },
       ),
     ).rejects.toThrow('cancelled');
@@ -970,6 +1485,7 @@ describe('crossSessionTransport', () => {
     await server.close();
     await expect(
       sendCrossSessionFrame(socketPath, 'secret', {
+        sessionId: SESSION_B,
         messageId: 'm1',
         from: { sessionId: SESSION_A },
         message: 'hello',
@@ -997,12 +1513,14 @@ describe('crossSessionTransport', () => {
   });
 
   it.each([
-    ['empty message id', { messageId: '', from: { sessionId: SESSION_A }, message: 'x' }],
-    ['non-string message', { messageId: 'm1', from: { sessionId: SESSION_A }, message: 1 }],
-    ['missing peer', { messageId: 'm1', from: null, message: 'x' }],
-    ['empty peer id', { messageId: 'm1', from: { sessionId: '' }, message: 'x' }],
-    ['non-string title', { messageId: 'm1', from: { sessionId: SESSION_A, title: 5 }, message: 'x' }],
-    ['non-string reply id', { messageId: 'm1', from: { sessionId: SESSION_A }, message: 'x', inReplyTo: 5 }],
+    ['empty message id', { sessionId: SESSION_A, messageId: '', from: { sessionId: SESSION_B }, message: 'x' }],
+    ['non-string message', { sessionId: SESSION_A, messageId: 'm1', from: { sessionId: SESSION_B }, message: 1 }],
+    ['missing peer', { sessionId: SESSION_A, messageId: 'm1', from: null, message: 'x' }],
+    ['empty peer id', { sessionId: SESSION_A, messageId: 'm1', from: { sessionId: '' }, message: 'x' }],
+    ['non-string title', { sessionId: SESSION_A, messageId: 'm1', from: { sessionId: SESSION_B, title: 5 }, message: 'x' }],
+    ['non-string reply id', { sessionId: SESSION_A, messageId: 'm1', from: { sessionId: SESSION_B }, message: 'x', inReplyTo: 5 }],
+    ['missing session id', { messageId: 'm1', from: { sessionId: SESSION_B }, message: 'x' }],
+    ['empty session id', { sessionId: '', messageId: 'm1', from: { sessionId: SESSION_B }, message: 'x' }],
   ])('server_rejectsFramesWith%s', async (_label, frame) => {
     const socketPath = join(root, 'sockets', 'inbox.sock');
     const server = await startTestInbox({ socketPath, token: 'secret' });
@@ -1020,12 +1538,13 @@ describe('crossSessionTransport', () => {
     const server = await startTestInbox({
       socketPath,
       token: 'secret',
-      handle: async (frame) => {
+      handle: async (_sessionId, frame) => {
         received = frame;
         return ackFromReceiveResult(frame.messageId, { kind: 'held', truncated: false });
       },
     });
     await sendCrossSessionFrame(socketPath, 'secret', {
+      sessionId: SESSION_B,
       messageId: 'm1',
       from: { sessionId: SESSION_A },
       message: 'hello',
@@ -1046,7 +1565,7 @@ describe('crossSessionTransport', () => {
       sendCrossSessionFrame(
         socketPath,
         'secret',
-        { messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
+        { sessionId: SESSION_B, messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
         { timeoutMs: 5 },
       ),
     ).rejects.toThrow(/timed out/);
@@ -1064,7 +1583,7 @@ describe('crossSessionTransport', () => {
     const pending = sendCrossSessionFrame(
       socketPath,
       'secret',
-      { messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
+      { sessionId: SESSION_B, messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
       { signal: controller.signal },
     );
     controller.abort(new Error('stop now'));
@@ -1111,7 +1630,7 @@ describe('crossSessionTransport', () => {
     const server = await startTestInbox({
       socketPath,
       token: 'secret',
-      handle: async (frame) => {
+      handle: async (_sessionId, frame) => {
         calls += 1;
         return ackFromReceiveResult(frame.messageId, {
           kind: 'delivered',
@@ -1125,16 +1644,18 @@ describe('crossSessionTransport', () => {
     socket.write(
       encodeCrossSessionFrame({
         type: 'message',
+        sessionId: SESSION_A,
         messageId: 'm1',
-        from: { sessionId: SESSION_A },
+        from: { sessionId: SESSION_B },
         message: 'one',
       }),
     );
     socket.write(
       encodeCrossSessionFrame({
         type: 'message',
+        sessionId: SESSION_A,
         messageId: 'm2',
-        from: { sessionId: SESSION_A },
+        from: { sessionId: SESSION_B },
         message: 'two',
       }),
     );
@@ -1151,7 +1672,7 @@ describe('crossSessionTransport', () => {
     const ack = await sendCrossSessionFrame(
       socketPath,
       'secret',
-      { messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
+      { sessionId: SESSION_B, messageId: 'm1', from: { sessionId: SESSION_A }, message: 'hello' },
       { timeoutMs: 0 },
     );
     expect(ack.kind).toBe('delivered');
@@ -1287,7 +1808,7 @@ describe('crossSessionMessaging', () => {
     const inbox = await startTestInbox({
       socketPath,
       token: 'token-b',
-      handle: async (frame) =>
+      handle: async (_sessionId, frame) =>
         ackFromReceiveResult(frame.messageId, {
           kind: 'delivered',
           delivery: 'resumed',
@@ -1316,6 +1837,110 @@ describe('crossSessionMessaging', () => {
     expect(
       await messaging.send(SESSION_A, SESSION_B, { messageId: 'm1', message: 'hello' }),
     ).toEqual({ kind: 'offline' });
+  });
+
+  it('send_deliversWhenThePeerRegistersDuringTheBindWindow', async () => {
+    const socketPath = join(root, 'sockets', 'b.sock');
+    const inbox = await startTestInbox({ socketPath, token: 'token-b' });
+    const registry = createCrossSessionRegistry({
+      registryDir: resolveCrossSessionRegistryDir(root),
+    });
+    const messaging = service(fakeSessions([]));
+    const pending = messaging.send(SESSION_A, SESSION_B, {
+      messageId: 'm1',
+      message: 'hello',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const handle = await registry.register({
+      sessionId: SESSION_B,
+      socketPath,
+      token: 'token-b',
+    });
+    await expect(pending).resolves.toEqual({
+      kind: 'delivered',
+      delivery: 'newTurn',
+      truncated: false,
+    });
+    await handle.release();
+    await inbox.close();
+  });
+
+  it('send_deliversInProcessWhenThePeerGoesLiveDuringTheBindWindow', async () => {
+    const live = new Map<string, ISessionScopeHandle>();
+    const sessions = {
+      ...fakeSessions([]),
+      get: (id: string) => live.get(id),
+      list: () => [...live.values()],
+    } as unknown as ISessionManager;
+    const target = fakeMessaging();
+    const messaging = service(sessions);
+    const pending = messaging.send(SESSION_A, SESSION_B, {
+      messageId: 'm1',
+      message: 'hello',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    live.set(SESSION_B, sessionHandle({ sessionId: SESSION_B, messaging: target }));
+    await expect(pending).resolves.toEqual({
+      kind: 'delivered',
+      delivery: 'newTurn',
+      truncated: false,
+    });
+    expect(target.received).toHaveLength(1);
+    expect(target.received[0]).toMatchObject({
+      fromSessionId: SESSION_A,
+      messageId: 'm1',
+      message: 'hello',
+    });
+  });
+
+  it('send_stopsTheBindWindowRetryOnAbort', async () => {
+    const messaging = service(fakeSessions([]));
+    const controller = new AbortController();
+    const pending = messaging.send(SESSION_A, SESSION_B, {
+      messageId: 'm1',
+      message: 'hello',
+      signal: controller.signal,
+    });
+    const rejection = expect(pending).rejects.toThrow('stopped');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    controller.abort(new Error('stopped'));
+    await rejection;
+  });
+
+  it('send_stopsTheBindWindowRetryWhenAbortedBeforeTheDelay', async () => {
+    const controller = new AbortController();
+    const sessions = {
+      ...fakeSessions([]),
+      get: () => {
+        controller.abort(new Error('stopped'));
+        return undefined;
+      },
+    } as unknown as ISessionManager;
+    const messaging = service(sessions);
+    await expect(
+      messaging.send(SESSION_A, SESSION_B, {
+        messageId: 'm1',
+        message: 'hello',
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('stopped');
+  });
+
+  it('send_reportsOfflineAfterTheBoundedBindWindow', async () => {
+    vi.useFakeTimers();
+    try {
+      const messaging = service(fakeSessions([]));
+      const pending = messaging.send(SESSION_A, SESSION_B, {
+        messageId: 'm1',
+        message: 'hello',
+      });
+      for (let step = 0; step < 14; step += 1) {
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      await expect(pending).resolves.toEqual({ kind: 'offline' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('send_mapsTransportFailuresToErrorResults', async () => {
@@ -1365,6 +1990,7 @@ describe('crossSessionMessaging', () => {
     const messaging = service(fakeSessions([sessionHandle({ sessionId: SESSION_B, messaging: target })]));
     const ack = await messaging.receive(SESSION_B, {
       type: 'message',
+      sessionId: SESSION_B,
       messageId: 'm1',
       from: { sessionId: SESSION_A, title: 'Alpha' },
       message: 'hello',
@@ -1384,6 +2010,7 @@ describe('crossSessionMessaging', () => {
     const messaging = service(fakeSessions([]));
     const ack = await messaging.receive(SESSION_B, {
       type: 'message',
+      sessionId: SESSION_B,
       messageId: 'm1',
       from: { sessionId: SESSION_A },
       message: 'hello',
@@ -1400,6 +2027,7 @@ describe('crossSessionMessaging', () => {
     const messaging = service(fakeSessions([sessionHandle({ sessionId: SESSION_B, messaging: target })]));
     const ack = await messaging.receive(SESSION_B, {
       type: 'message',
+      sessionId: SESSION_B,
       messageId: 'm1',
       from: { sessionId: SESSION_A },
       message: 'hello',
@@ -1412,7 +2040,7 @@ describe('crossSessionMessaging', () => {
     const inbox = await startTestInbox({
       socketPath,
       token: 'token-b',
-      handle: async (frame) => {
+      handle: async (_sessionId, frame) => {
         switch (frame.messageId) {
           case 'held':
             return { type: 'ack', messageId: 'held', kind: 'held', truncated: true };
@@ -1642,18 +2270,22 @@ function hostSessions(initial: readonly ISessionScopeHandle[] = []): {
 
 function fakeCrossSessionMessaging(): ICrossSessionMessagingService & {
   readonly received: CrossSessionInboundFrame[];
+  readonly targets: string[];
 } {
   const received: CrossSessionInboundFrame[] = [];
+  const targets: string[] = [];
   return {
     _serviceBrand: undefined,
     received,
+    targets,
     async listSessions(): Promise<readonly never[]> {
       return [];
     },
     async send(): Promise<CrossSessionSendResult> {
       return { kind: 'offline' };
     },
-    async receive(_sessionId: string, frame: CrossSessionInboundFrame): Promise<CrossSessionAckFrame> {
+    async receive(sessionId: string, frame: CrossSessionInboundFrame): Promise<CrossSessionAckFrame> {
+      targets.push(sessionId);
       received.push(frame);
       return ackFromReceiveResult(frame.messageId, {
         kind: 'delivered',
@@ -1661,7 +2293,10 @@ function fakeCrossSessionMessaging(): ICrossSessionMessagingService & {
         truncated: false,
       });
     },
-  } as unknown as ICrossSessionMessagingService & { readonly received: CrossSessionInboundFrame[] };
+  } as unknown as ICrossSessionMessagingService & {
+    readonly received: CrossSessionInboundFrame[];
+    readonly targets: string[];
+  };
 }
 
 describe('crossSessionInboxHost', () => {
@@ -1712,13 +2347,16 @@ describe('crossSessionInboxHost', () => {
       messaging,
     );
     sessions.events.fireCreate(SESSION_A, sessionHandle({ sessionId: SESSION_A, title: 'Alpha' }));
-    await Promise.all(sessions.events.waits);
+    await vi.waitFor(() => {
+      expect(host.boundSessions()).toEqual([SESSION_A]);
+    });
     const listed = await liveRegistry();
     expect(listed.map((entry) => entry.sessionId)).toEqual([SESSION_A]);
     expect(listed[0]?.title).toBe('Alpha');
     expect(host.boundSessions()).toEqual([SESSION_A]);
     const [entry] = listed;
     const ack = await sendCrossSessionFrame(entry!.socketPath, entry!.token, {
+      sessionId: SESSION_A,
       messageId: 'm1',
       from: { sessionId: SESSION_B, title: 'Beta' },
       message: 'hello',
@@ -1761,6 +2399,7 @@ describe('crossSessionInboxHost', () => {
     expect(await liveRegistry()).toEqual([]);
     await expect(
       sendCrossSessionFrame(entry!.socketPath, entry!.token, {
+        sessionId: SESSION_A,
         messageId: 'm1',
         from: { sessionId: SESSION_B },
         message: 'hello',
@@ -1800,10 +2439,149 @@ describe('crossSessionInboxHost', () => {
     const handle = sessionHandle({ sessionId: SESSION_A });
     sessions.events.fireCreate(SESSION_A, handle);
     sessions.events.fireCreate(SESSION_A, handle);
-    await Promise.all(sessions.events.waits);
+    await vi.waitFor(() => {
+      expect(host.boundSessions()).toEqual([SESSION_A]);
+    });
     await host.bindSession(SESSION_A, handle);
     expect(host.boundSessions()).toEqual([SESSION_A]);
     expect((await liveRegistry()).length).toBe(1);
+  });
+
+  it('twoBoundSessionsShareOneServerAndSocket', async () => {
+    const sessions = hostSessions([
+      sessionHandle({ sessionId: SESSION_A, title: 'Alpha' }),
+      sessionHandle({ sessionId: SESSION_B, title: 'Beta' }),
+    ]);
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(root),
+      stubFlag(enabledFlag),
+      fakeCrossSessionMessaging(),
+    );
+    await vi.waitFor(() => {
+      expect([...host.boundSessions()].toSorted()).toEqual([SESSION_A, SESSION_B].toSorted());
+    });
+    const listed = await liveRegistry();
+    expect(listed.map((entry) => entry.sessionId).toSorted()).toEqual(
+      [SESSION_A, SESSION_B].toSorted(),
+    );
+    expect(new Set(listed.map((entry) => entry.socketPath)).size).toBe(1);
+    expect(new Set(listed.map((entry) => entry.token)).size).toBe(1);
+    expect(netFake.servers.size).toBe(1);
+    expect(netFake.serverCreateCount()).toBe(1);
+    host.dispose();
+  });
+
+  it('routesFramesByTheSessionIdInTheFrame', async () => {
+    const sessions = hostSessions([
+      sessionHandle({ sessionId: SESSION_A }),
+      sessionHandle({ sessionId: SESSION_B }),
+    ]);
+    const messaging = fakeCrossSessionMessaging();
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(root),
+      stubFlag(enabledFlag),
+      messaging,
+    );
+    await vi.waitFor(() => {
+      expect([...host.boundSessions()].toSorted()).toEqual([SESSION_A, SESSION_B].toSorted());
+    });
+    const entry = (await liveRegistry()).find((row) => row.sessionId === SESSION_B)!;
+    const ack = await sendCrossSessionFrame(entry.socketPath, entry.token, {
+      sessionId: SESSION_B,
+      messageId: 'm-b',
+      from: { sessionId: SESSION_C },
+      message: 'for beta',
+    });
+    expect(ack).toMatchObject({ messageId: 'm-b', kind: 'delivered' });
+    expect(messaging.targets).toEqual([SESSION_B]);
+    expect(messaging.received[0]).toMatchObject({ sessionId: SESSION_B, message: 'for beta' });
+    host.dispose();
+  });
+
+  it('acksAnUnknownSessionIdWithAnError', async () => {
+    const sessions = hostSessions([sessionHandle({ sessionId: SESSION_A })]);
+    const messaging = fakeCrossSessionMessaging();
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(root),
+      stubFlag(enabledFlag),
+      messaging,
+    );
+    await vi.waitFor(() => {
+      expect(host.boundSessions()).toEqual([SESSION_A]);
+    });
+    const [entry] = await liveRegistry();
+    const ack = await sendCrossSessionFrame(entry!.socketPath, entry!.token, {
+      sessionId: SESSION_C,
+      messageId: 'm-c',
+      from: { sessionId: SESSION_B },
+      message: 'nobody',
+    });
+    expect(ack).toMatchObject({ messageId: 'm-c', kind: 'error', error: 'unknown session' });
+    expect(messaging.targets).toEqual([]);
+    host.dispose();
+  });
+
+  it('keepsTheSharedServerUntilTheLastSessionReleases', async () => {
+    const sessionHandles = new Map<string, ISessionScopeHandle>([
+      [SESSION_A, sessionHandle({ sessionId: SESSION_A })],
+      [SESSION_B, sessionHandle({ sessionId: SESSION_B })],
+    ]);
+    const sessions = hostSessions([...sessionHandles.values()]);
+    const messaging = fakeCrossSessionMessaging();
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(root),
+      stubFlag(enabledFlag),
+      messaging,
+    );
+    await vi.waitFor(() => {
+      expect([...host.boundSessions()].toSorted()).toEqual([SESSION_A, SESSION_B].toSorted());
+    });
+    expect(netFake.servers.size).toBe(1);
+    const originalToken = (await liveRegistry()).find(
+      (entry) => entry.sessionId === SESSION_B,
+    )!.token;
+
+    await host.releaseSession(SESSION_A);
+    expect(host.boundSessions()).toEqual([SESSION_B]);
+    expect(netFake.servers.size).toBe(1);
+    const [entryB] = await liveRegistry();
+    const ack = await sendCrossSessionFrame(entryB!.socketPath, entryB!.token, {
+      sessionId: SESSION_B,
+      messageId: 'm1',
+      from: { sessionId: SESSION_C },
+      message: 'still here',
+    });
+    expect(ack).toMatchObject({ kind: 'delivered' });
+    expect(messaging.targets).toEqual([SESSION_B]);
+
+    await host.releaseSession(SESSION_B);
+    expect(host.boundSessions()).toEqual([]);
+    expect(netFake.servers.size).toBe(0);
+    expect(await liveRegistry()).toEqual([]);
+
+    await host.bindSession(SESSION_A, sessionHandles.get(SESSION_A)!);
+    await host.bindSession(SESSION_B, sessionHandles.get(SESSION_B)!);
+    expect([...host.boundSessions()].toSorted()).toEqual([SESSION_A, SESSION_B].toSorted());
+    expect(netFake.servers.size).toBe(1);
+    const rebound = await liveRegistry();
+    expect(rebound.map((entry) => entry.sessionId).toSorted()).toEqual(
+      [SESSION_A, SESSION_B].toSorted(),
+    );
+    expect(rebound[0]?.token).not.toBe(originalToken);
+    const entryA = rebound.find((entry) => entry.sessionId === SESSION_A)!;
+    const reboundAck = await sendCrossSessionFrame(entryA.socketPath, entryA.token, {
+      sessionId: SESSION_A,
+      messageId: 'm2',
+      from: { sessionId: SESSION_C },
+      message: 'back again',
+    });
+    expect(reboundAck).toMatchObject({ kind: 'delivered' });
+    expect(messaging.targets).toEqual([SESSION_B, SESSION_A]);
+    host.dispose();
   });
 
   it('releaseSessionIsIdempotent', async () => {
@@ -1815,10 +2593,43 @@ describe('crossSessionInboxHost', () => {
       fakeCrossSessionMessaging(),
     );
     sessions.events.fireCreate(SESSION_A, sessionHandle({ sessionId: SESSION_A }));
-    await Promise.all(sessions.events.waits);
+    await vi.waitFor(() => {
+      expect(host.boundSessions()).toEqual([SESSION_A]);
+    });
     await Promise.all([host.releaseSession(SESSION_A), host.releaseSession(SESSION_A)]);
     await host.releaseSession(SESSION_A);
     expect(host.boundSessions()).toEqual([]);
+  });
+
+  it('releaseSessionReportsRegistrationReleaseFailures', async () => {
+    const unexpected: unknown[] = [];
+    setUnexpectedErrorHandler((error) => unexpected.push(error));
+    try {
+      const sessions = hostSessions([sessionHandle({ sessionId: SESSION_A })]);
+      const host = new CrossSessionInboxHost(
+        sessions.manager,
+        bootstrapStub(root),
+        stubFlag(enabledFlag),
+        fakeCrossSessionMessaging(),
+      );
+      await vi.waitFor(() => {
+        expect(host.boundSessions()).toEqual([SESSION_A]);
+      });
+      const registryFile = join(resolveCrossSessionRegistryDir(root), `${SESSION_A}.json`);
+      await rm(registryFile);
+      await mkdir(registryFile, { recursive: true });
+      await writeFile(join(registryFile, 'blocker'), 'x');
+
+      await host.releaseSession(SESSION_A);
+
+      expect(host.boundSessions()).toEqual([]);
+      expect(unexpected).toHaveLength(1);
+      expect((unexpected[0] as Error).message).toContain(SESSION_A);
+      expect((unexpected[0] as Error).cause).toBeDefined();
+      host.dispose();
+    } finally {
+      resetUnexpectedErrorHandler();
+    }
   });
 
   it('releaseSessionWaitsForAPendingBind', async () => {
@@ -1831,7 +2642,6 @@ describe('crossSessionInboxHost', () => {
     );
     sessions.events.fireCreate(SESSION_A, sessionHandle({ sessionId: SESSION_A }));
     await host.releaseSession(SESSION_A);
-    await Promise.all(sessions.events.waits);
     expect(host.boundSessions()).toEqual([]);
     expect(await liveRegistry()).toEqual([]);
   });
@@ -1867,8 +2677,9 @@ describe('crossSessionInboxHost', () => {
       dispose: () => {},
     } as unknown as ISessionScopeHandle;
     sessions.events.fireCreate(SESSION_A, handle);
-    await Promise.all(sessions.events.waits);
-    expect(host.boundSessions()).toEqual([SESSION_A]);
+    await vi.waitFor(() => {
+      expect(host.boundSessions()).toEqual([SESSION_A]);
+    });
     expect((await liveRegistry())[0]?.title).toBeUndefined();
   });
 
@@ -1885,6 +2696,102 @@ describe('crossSessionInboxHost', () => {
     );
     await expect(host.bindSession(SESSION_A, handle)).rejects.toMatchObject({ code: 'ENOTDIR' });
     expect(host.boundSessions()).toEqual([]);
+  });
+
+  it('bindSessionPrunesTheGenerationAfterAPermanentFailure', async () => {
+    const badHome = join(root, 'bad-home');
+    await writeFile(badHome, 'not a directory');
+    const sessions = hostSessions();
+    const handle = sessionHandle({ sessionId: SESSION_A });
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(badHome),
+      stubFlag(enabledFlag),
+      fakeCrossSessionMessaging(),
+    );
+
+    await expect(host.bindSession(SESSION_A, handle)).rejects.toMatchObject({ code: 'ENOTDIR' });
+
+    const generations = (host as unknown as { bindGenerations: Map<string, number> })
+      .bindGenerations;
+    expect(generations.has(SESSION_A)).toBe(false);
+  });
+
+  it('createBindsInTheBackgroundAndRetriesAFailedBindOnce', async () => {
+    const sessions = hostSessions();
+    const handle = sessionHandle({ sessionId: SESSION_A, title: 'Alpha' });
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(root),
+      stubFlag(enabledFlag),
+      fakeCrossSessionMessaging(),
+    );
+    netFake.failNextListen();
+    expect(() => {
+      sessions.events.fireCreate(SESSION_A, handle);
+    }).not.toThrow();
+    expect(sessions.events.waits).toEqual([]);
+    await vi.waitFor(() => {
+      expect(host.boundSessions()).toEqual([SESSION_A]);
+    });
+    expect(netFake.serverCreateCount()).toBe(2);
+    expect((await liveRegistry()).map((entry) => entry.sessionId)).toEqual([SESSION_A]);
+  });
+
+  it('releaseDuringAFailedBindCancelsTheRetry', async () => {
+    const sessions = hostSessions();
+    const handle = sessionHandle({ sessionId: SESSION_A });
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(root),
+      stubFlag(enabledFlag),
+      fakeCrossSessionMessaging(),
+    );
+    netFake.failNextListen();
+    vi.useFakeTimers();
+    try {
+      sessions.events.fireCreate(SESSION_A, handle);
+      const releasing = host.releaseSession(SESSION_A);
+      await vi.advanceTimersByTimeAsync(150);
+      await releasing;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(host.boundSessions()).toEqual([]);
+    expect(netFake.serverCreateCount()).toBe(1);
+    expect(await liveRegistry()).toEqual([]);
+  });
+
+  it('tearsDownABindThatCompletesAfterRelease', async () => {
+    const sessions = hostSessions();
+    let releaseTitle: () => void = () => {};
+    const titleReady = new Promise<void>((resolve) => {
+      releaseTitle = resolve;
+    });
+    const metadata = {
+      read: async () => {
+        await titleReady;
+        return { id: SESSION_A, createdAt: 0, updatedAt: 0, archived: false };
+      },
+    } as unknown as ISessionMetadata;
+    const handle = {
+      id: SESSION_A,
+      kind: 'session',
+      accessor: makeAccessor([[ISessionMetadata, metadata]]),
+      dispose: () => {},
+    } as unknown as ISessionScopeHandle;
+    const host = new CrossSessionInboxHost(
+      sessions.manager,
+      bootstrapStub(root),
+      stubFlag(enabledFlag),
+      fakeCrossSessionMessaging(),
+    );
+    sessions.events.fireCreate(SESSION_A, handle);
+    const releasing = host.releaseSession(SESSION_A);
+    releaseTitle();
+    await releasing;
+    expect(host.boundSessions()).toEqual([]);
+    expect(await liveRegistry()).toEqual([]);
   });
 
   it('handlesAManagerWithoutLifecycleEvents', async () => {

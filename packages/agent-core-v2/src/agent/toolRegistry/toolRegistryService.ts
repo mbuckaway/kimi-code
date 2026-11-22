@@ -24,12 +24,19 @@ interface ToolEntry {
 export class AgentToolRegistryService implements IAgentToolRegistryService {
   declare readonly _serviceBrand: undefined;
   private readonly tools = new Map<string, ToolEntry>();
+  private currentRevision = 0;
+  private cachedEntries: readonly ToolEntry[] | undefined;
+
+  get revision(): number {
+    return this.currentRevision;
+  }
 
   register(tool: ExecutableTool, options: ToolRegistrationOptions = {}): IDisposable {
     const source = options.source ?? 'builtin';
     const entry: ToolEntry = { tool, source, disclosure: options.disclosure };
-    this.unregisterTool(tool.name);
+    this.tools.delete(tool.name);
     this.tools.set(tool.name, entry);
+    this.invalidate();
 
     return toDisposable(() => {
       const current = this.tools.get(tool.name);
@@ -39,32 +46,39 @@ export class AgentToolRegistryService implements IAgentToolRegistryService {
   }
 
   list(): readonly ToolInfo[] {
-    return [...this.tools.values()]
-      .map(({ tool, source, disclosure }) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        source,
-        disclosure,
-      }))
-      .toSorted((a, b) => a.name.localeCompare(b.name));
+    return this.entries().map(({ tool, source, disclosure }) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      source,
+      disclosure,
+    }));
   }
 
   listReferences(): readonly ToolReference[] {
-    return [...this.tools.entries()]
-      .map(([name, { source }]) => ({ name, source }))
-      .toSorted((a, b) => a.name.localeCompare(b.name));
+    return this.entries().map(({ tool, source }) => ({ name: tool.name, source }));
   }
 
   resolve(name: string): ExecutableTool | undefined {
     return this.tools.get(name)?.tool;
   }
 
-  private unregisterTool(name: string): ToolEntry | undefined {
-    const entry = this.tools.get(name);
-    if (entry === undefined) return undefined;
+  private entries(): readonly ToolEntry[] {
+    this.cachedEntries ??= [...this.tools.values()].toSorted((a, b) =>
+      a.tool.name.localeCompare(b.tool.name),
+    );
+    return this.cachedEntries;
+  }
+
+  private invalidate(): void {
+    this.currentRevision += 1;
+    this.cachedEntries = undefined;
+  }
+
+  private unregisterTool(name: string): void {
+    if (!this.tools.has(name)) return;
     this.tools.delete(name);
-    return entry;
+    this.invalidate();
   }
 }
 

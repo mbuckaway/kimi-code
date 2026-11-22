@@ -1,9 +1,12 @@
+import { Readable } from 'node:stream';
+
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { Event } from '#/_base/event';
+import type { ILogger } from '#/_base/log/log';
 import { LifecycleScope } from '#/app/scopes';
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { IConfigService } from '#/app/config/config';
@@ -16,6 +19,9 @@ import {
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { AgentContext } from '#/agent/agentContext/agentContext';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
+import { IAgentPromptService } from '#/agent/prompt/prompt';
+import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
@@ -40,7 +46,20 @@ import { SECONDARY_MODEL_SECTION } from '#/session/subagent/configSection';
 import { AGENT_PERSONA_FLAG_ID, SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
 import { PERSONA_FILE_MAX_BYTES } from '#/session/subagent/persona';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
-import { SessionSubagentService } from '#/session/subagent/subagentService';
+import {
+  DEFAULT_FINISHED_SUBAGENT_LIMIT,
+  FINISHED_SUBAGENT_LIMIT_ENV,
+  FinishedSubagentRetention,
+  type FinishedAgentLifecycle,
+  resolveFinishedSubagentLimit,
+  SessionSubagentService,
+} from '#/session/subagent/subagentService';
+import {
+  clearGitContextCache,
+  collectGitContext,
+  scopeGitContextProcess,
+} from '#/session/agentLifecycle/profile/gitContext';
+import type { IHostProcess, IHostProcessService } from '#/os/interface/hostProcess';
 import {
   FORK_CONTEXT_NOTICE,
   PERSONA_EXPERIMENTAL_UNAVAILABLE,
@@ -128,7 +147,27 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     } as unknown as IAgentProfileService;
   }
 
-  function createdHandle(agentId: string): IAgentScopeHandle {
+  const idleLoopStatus: {
+    readonly state: 'idle' | 'running';
+    readonly pendingTurnIds: readonly number[];
+    readonly hasPendingRequests: boolean;
+  } = { state: 'idle', pendingTurnIds: [], hasPendingRequests: false };
+
+  function createdHandle(
+    agentId: string,
+    loopStatus: {
+      readonly state: 'idle' | 'running';
+      readonly pendingTurnIds: readonly number[];
+      readonly hasPendingRequests: boolean;
+    } = idleLoopStatus,
+  ): IAgentScopeHandle {
+    const turn = {
+      id: 1,
+      signal: new AbortController().signal,
+      ready: Promise.resolve(),
+      result: Promise.resolve({ type: 'completed' as const, steps: 0, truncated: false }),
+      cancel: () => true,
+    };
     return {
       id: agentId,
       kind: LifecycleScope.Agent,
@@ -141,6 +180,23 @@ describe('SessionSubagentService planSpawn and spawn', () => {
           if (serviceId === IAgentUserToolService) return createdUserTools;
           if (serviceId === IAgentScopeContext) {
             return makeAgentScopeContext({ agentId, agentScope: `agents/${agentId}` });
+          }
+          if (serviceId === IAgentPromptService) {
+            return {
+              _serviceBrand: undefined,
+              enqueue: vi.fn(async () => ({ launched: Promise.resolve(turn) })),
+              retry: vi.fn(async () => turn),
+            };
+          }
+          if (serviceId === IAgentLoopService) {
+            return {
+              _serviceBrand: undefined,
+              cancel: vi.fn(() => true),
+              status: () => loopStatus,
+            };
+          }
+          if (serviceId === IAgentContextMemoryService) {
+            return { _serviceBrand: undefined, get: () => [] };
           }
           return undefined;
         },
@@ -238,7 +294,10 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       get: (agentId: string) => (agentId === CALLER_ID ? stubAgentContext(CALLER_ID, 1) : undefined),
       handleOf: (agentId: string) =>
         agentId === CALLER_ID ? caller : createdHandles.get(agentId),
-      list: () => [stubAgentContext(CALLER_ID, 1)],
+      list: () => [
+        stubAgentContext(CALLER_ID, 1),
+        ...[...createdHandles.keys()].map((agentId) => stubAgentContext(agentId, 1)),
+      ],
       remove: removeAgent,
       broadcastPermissionMode: () => {},
     } as unknown as IAgentLifecycleService);
@@ -2021,6 +2080,83 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       });
     });
   });
+
+  describe('finished agent eviction', () => {
+    it('evicts the least recently finished subagent from the lifecycle list past the bound', async () => {
+      createdHandles.set('agent-a', createdHandle('agent-a'));
+      createdHandles.set('agent-b', createdHandle('agent-b'));
+      sessionAgents['agent-a'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      sessionAgents['agent-b'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      removeAgent.mockImplementation(async (context: AgentContext) => {
+        createdHandles.delete(context.agentId);
+      });
+      vi.stubEnv(FINISHED_SUBAGENT_LIMIT_ENV, '1');
+      try {
+        const svc = service();
+        const signal = new AbortController().signal;
+        await svc
+          .run(stubAgentContext('agent-a', 1), { kind: 'prompt', prompt: 'a' }, { signal })
+          .then((run) => run.completion);
+        await svc
+          .run(stubAgentContext('agent-b', 1), { kind: 'prompt', prompt: 'b' }, { signal })
+          .then((run) => run.completion);
+
+        await vi.waitFor(() => {
+          expect(createdHandles.has('agent-a')).toBe(false);
+        });
+        const listed = ix
+          .get(IAgentLifecycleService)
+          .list()
+          .map((agent) => agent.agentId);
+
+        expect(createdHandles.has('agent-b')).toBe(true);
+        expect(listed).toContain('agent-b');
+        expect(listed).not.toContain('agent-a');
+        expect(unregisterAgent).not.toHaveBeenCalledWith('agent-a');
+        expect(sessionAgents['agent-a']).toBeDefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('skips a finished agent that still has pending turns', async () => {
+      createdHandles.set(
+        'agent-busy',
+        createdHandle('agent-busy', {
+          state: 'idle',
+          pendingTurnIds: [7],
+          hasPendingRequests: false,
+        }),
+      );
+      createdHandles.set('agent-idle', createdHandle('agent-idle'));
+      sessionAgents['agent-busy'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      sessionAgents['agent-idle'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      removeAgent.mockImplementation(async (context: AgentContext) => {
+        createdHandles.delete(context.agentId);
+      });
+      vi.stubEnv(FINISHED_SUBAGENT_LIMIT_ENV, '1');
+      try {
+        const svc = service();
+        const signal = new AbortController().signal;
+        await svc
+          .run(stubAgentContext('agent-busy', 1), { kind: 'prompt', prompt: 'busy' }, { signal })
+          .then((run) => run.completion);
+        await svc
+          .run(stubAgentContext('agent-idle', 1), { kind: 'prompt', prompt: 'idle' }, { signal })
+          .then((run) => run.completion);
+
+        await vi.waitFor(() => {
+          expect(createdHandles.has('agent-idle')).toBe(false);
+        });
+        expect(createdHandles.has('agent-busy')).toBe(true);
+        expect(removeAgent).not.toHaveBeenCalledWith(
+          expect.objectContaining({ agentId: 'agent-busy' }),
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
 });
 
 describe('agent persona flag', () => {
@@ -2034,5 +2170,451 @@ describe('agent persona flag', () => {
       default: true,
       surface: 'core',
     });
+  });
+});
+
+function gitProcessFrom(out: {
+  stdout?: string;
+  exitCode?: number;
+  stderr?: string;
+}): IHostProcess {
+  const stdout = Readable.from([Buffer.from(out.stdout ?? '')]);
+  const stderr = Readable.from([Buffer.from(out.stderr ?? '')]);
+  const exitCode = out.exitCode ?? 0;
+  return {
+    _serviceBrand: undefined,
+    stdin: { end: vi.fn(), write: vi.fn() } as unknown as IHostProcess['stdin'],
+    stdout,
+    stderr,
+    pid: 1,
+    exitCode,
+    wait: vi.fn().mockResolvedValue(exitCode),
+    kill: vi.fn(async () => {}),
+    dispose: vi.fn(async () => {
+      stdout.destroy();
+      stderr.destroy();
+    }),
+  };
+}
+
+function gitProcessWith(
+  outputs: Readonly<Record<string, { stdout?: string; exitCode?: number; stderr?: string }>>,
+): { process: IHostProcessService; spawn: ReturnType<typeof vi.fn> } {
+  const spawn = vi.fn(async (_command: string, args: readonly string[]): Promise<IHostProcess> => {
+    const out = outputs[args.slice(2).join(' ')] ?? { exitCode: 1 };
+    return gitProcessFrom(out);
+  });
+  return { process: { _serviceBrand: undefined, spawn } as IHostProcessService, spawn };
+}
+
+function spyLogger(): {
+  logger: ILogger;
+  debug: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+} {
+  const debug = vi.fn();
+  const warn = vi.fn();
+  return {
+    debug,
+    warn,
+    logger: {
+      error: vi.fn(),
+      warn,
+      info: vi.fn(),
+      debug,
+      child: vi.fn(),
+    },
+  };
+}
+
+describe('git context session cache', () => {
+  const outputs: Record<string, { stdout?: string; exitCode?: number; stderr?: string }> = {
+    'rev-parse --is-inside-work-tree': { stdout: 'true' },
+    'remote get-url origin': { stdout: 'git@github.com:owner/repo.git' },
+    'symbolic-ref --short HEAD': { stdout: 'main' },
+    'status --porcelain': { stdout: ' M src/a.ts' },
+    'log -3 --format=%h %s': { stdout: 'abc123 Initial commit' },
+  };
+
+  afterEach(() => {
+    clearGitContextCache();
+  });
+
+  it('collects once per session logger and working directory', async () => {
+    expect.assertions(4);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    const first = await collectGitContext(process, '/repo', logger);
+    const second = await collectGitContext(process, '/repo', logger);
+
+    expect(first).toBe(second);
+    expect(first).toContain('Branch: main');
+    expect(spawn).toHaveBeenCalledTimes(5);
+    expect(spawn).toHaveBeenCalledWith('git', ['-C', '/repo', 'rev-parse', '--is-inside-work-tree'], {
+      cwd: '/repo',
+    });
+  });
+
+  it('shares a single in-flight collection between concurrent callers', async () => {
+    expect.assertions(2);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    const [first, second] = await Promise.all([
+      collectGitContext(process, '/repo', logger),
+      collectGitContext(process, '/repo', logger),
+    ]);
+
+    expect(first).toBe(second);
+    expect(spawn).toHaveBeenCalledTimes(5);
+  });
+
+  it('recollects for a different session logger or working directory', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith(outputs);
+    const first = spyLogger().logger;
+    const second = spyLogger().logger;
+
+    await collectGitContext(process, '/repo', first);
+    await collectGitContext(process, '/repo', second);
+    expect(spawn).toHaveBeenCalledTimes(10);
+
+    await collectGitContext(process, '/other', first);
+    expect(spawn).toHaveBeenCalledTimes(15);
+    expect(spawn).toHaveBeenCalledWith(
+      'git',
+      ['-C', '/other', 'rev-parse', '--is-inside-work-tree'],
+      { cwd: '/other' },
+    );
+  });
+
+  it('does not cache a failed collection and retries it', async () => {
+    expect.assertions(5);
+    const { process, spawn } = gitProcessWith({
+      'rev-parse --is-inside-work-tree': { exitCode: 1, stderr: 'fatal: some other git error' },
+    });
+    const { logger, debug } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe('');
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe('');
+
+    expect(debug).toHaveBeenCalledTimes(2);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(debug).toHaveBeenCalledWith(
+      'git context command failed',
+      expect.objectContaining({ command: 'git rev-parse --is-inside-work-tree' }),
+    );
+  });
+
+  it('does not cache the not-a-repo placeholder', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith({
+      'rev-parse --is-inside-work-tree': {
+        exitCode: 128,
+        stderr: 'fatal: not a git repository (or any of the parent directories): .git',
+      },
+    });
+    const { logger } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe(
+      '<git-context status="unavailable" reason="not-a-repo"/>',
+    );
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe(
+      '<git-context status="unavailable" reason="not-a-repo"/>',
+    );
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cache a degraded snapshot with failed git commands', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith({
+      'rev-parse --is-inside-work-tree': { stdout: 'true' },
+      'remote get-url origin': { stdout: 'git@github.com:owner/repo.git' },
+      'symbolic-ref --short HEAD': { stdout: 'main' },
+      'status --porcelain': { exitCode: 1, stderr: 'fatal: transient status failure' },
+      'log -3 --format=%h %s': { stdout: 'abc123 Initial commit' },
+    });
+    const { logger } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toContain('Branch: main');
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toContain('Branch: main');
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+  });
+
+  it('re-collects after a transient failure so the next spawn gets a snapshot', async () => {
+    expect.assertions(3);
+    let attempts = 0;
+    const spawn = vi.fn(async (_command: string, args: readonly string[]): Promise<IHostProcess> => {
+      const key = args.slice(2).join(' ');
+      attempts += 1;
+      if (key === 'rev-parse --is-inside-work-tree' && attempts === 1) {
+        return gitProcessFrom({ exitCode: 1, stderr: 'fatal: transient failure' });
+      }
+      return gitProcessFrom(outputs[key] ?? { exitCode: 1 });
+    });
+    const process = { _serviceBrand: undefined, spawn } as IHostProcessService;
+    const { logger } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe('');
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toContain('Branch: main');
+
+    expect(spawn).toHaveBeenCalledTimes(6);
+  });
+
+  it('scopes cached snapshots to the runtime identity on the same cwd', async () => {
+    expect.assertions(4);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+    const first = scopeGitContextProcess(process, 'w1\0local\0generation-1');
+    const second = scopeGitContextProcess(process, 'w1\0local\0generation-2');
+
+    const firstBlock = await collectGitContext(first, '/repo', logger);
+    const secondBlock = await collectGitContext(second, '/repo', logger);
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+    expect(firstBlock).toBe(secondBlock);
+    await expect(collectGitContext(first, '/repo', logger)).resolves.toBe(firstBlock);
+    expect(spawn).toHaveBeenCalledTimes(10);
+  });
+
+  it('reuses the snapshot for repeated collections through the same scoped process', async () => {
+    expect.assertions(2);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+    const scoped = scopeGitContextProcess(process, 'w1\0local\0generation-1');
+
+    await collectGitContext(scoped, '/repo', logger);
+    await collectGitContext(scoped, '/repo', logger);
+
+    expect(scopeGitContextProcess(process, 'w1\0local\0generation-1')).toBe(scoped);
+    expect(spawn).toHaveBeenCalledTimes(5);
+  });
+
+  it('bounds the per-session cache and evicts the least recently used directory', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    for (let index = 0; index < 32; index += 1) {
+      await collectGitContext(process, `/repo-${String(index)}`, logger);
+    }
+    expect(spawn).toHaveBeenCalledTimes(160);
+
+    await collectGitContext(process, '/repo-0', logger);
+    await collectGitContext(process, '/repo-32', logger);
+    expect(spawn).toHaveBeenCalledTimes(165);
+
+    await collectGitContext(process, '/repo-0', logger);
+    await collectGitContext(process, '/repo-1', logger);
+    expect(spawn).toHaveBeenCalledTimes(170);
+  });
+
+  it('bypasses the cache when no logger is supplied', async () => {
+    expect.assertions(1);
+    const { process, spawn } = gitProcessWith(outputs);
+
+    await collectGitContext(process, '/repo');
+    await collectGitContext(process, '/repo');
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+  });
+
+  it('drops a cached entry when cleared for its logger', async () => {
+    expect.assertions(2);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    await collectGitContext(process, '/repo', logger);
+    clearGitContextCache(logger);
+    await collectGitContext(process, '/repo', logger);
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+    expect(spawn).toHaveBeenCalledWith('git', ['-C', '/repo', 'status', '--porcelain'], {
+      cwd: '/repo',
+    });
+  });
+});
+
+describe('finished subagent retention', () => {
+  function retentionHost(ids: readonly string[]): {
+    lifecycle: FinishedAgentLifecycle;
+    list: () => readonly string[];
+    removed: string[];
+  } {
+    const roster = new Set(ids);
+    const removed: string[] = [];
+    return {
+      removed,
+      list: () => [...roster],
+      lifecycle: {
+        handleOf: (agentId) =>
+          roster.has(agentId) ? ({ id: agentId } as unknown as IAgentScopeHandle) : undefined,
+        remove: async (agentId) => {
+          removed.push(agentId);
+          roster.delete(agentId);
+        },
+      },
+    };
+  }
+
+  it('defaults the retention bound to 64', () => {
+    expect(resolveFinishedSubagentLimit({})).toBe(DEFAULT_FINISHED_SUBAGENT_LIMIT);
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '' })).toBe(
+      DEFAULT_FINISHED_SUBAGENT_LIMIT,
+    );
+  });
+
+  it('reads a positive integer bound from the environment', () => {
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '3' })).toBe(3);
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: ' 12 ' })).toBe(12);
+  });
+
+  it('treats zero and negative bounds as disabling finished-agent eviction', () => {
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '0' })).toBe(0);
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '-4' })).toBe(0);
+
+    const retention = new FinishedSubagentRetention(0);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+
+    expect(retention.size).toBe(0);
+  });
+
+  it('rejects a non-integer bound', () => {
+    for (const raw of ['2.5', 'abc']) {
+      expect(() =>
+        resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: raw }),
+      ).toThrow(/KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT.*must be an integer/);
+    }
+  });
+
+  it('never evicts when the configured bound disables eviction', async () => {
+    expect.assertions(2);
+    const retention = new FinishedSubagentRetention(0);
+    const host = retentionHost(['agent-1', 'agent-2']);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+
+    const evicted = await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(evicted).toEqual([]);
+    expect(host.removed).toEqual([]);
+  });
+
+  it('evicts least recently finished agents past the bound from the lifecycle roster', async () => {
+    expect.assertions(4);
+    const retention = new FinishedSubagentRetention(3);
+    for (const agentId of ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5']) {
+      retention.markFinished(agentId);
+    }
+    const host = retentionHost(['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5']);
+
+    const evicted = await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(evicted).toEqual(['agent-1', 'agent-2']);
+    expect(host.removed).toEqual(['agent-1', 'agent-2']);
+    expect(host.list()).toEqual(['agent-3', 'agent-4', 'agent-5']);
+    expect(retention.size).toBe(3);
+  });
+
+  it('moves a re-finished agent to the most recent position', async () => {
+    expect.assertions(1);
+    const retention = new FinishedSubagentRetention(1);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+    retention.markFinished('agent-1');
+    const host = retentionHost(['agent-1', 'agent-2']);
+
+    await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(host.removed).toEqual(['agent-2']);
+  });
+
+  it('keeps a finished agent that started running again', async () => {
+    expect.assertions(2);
+    const retention = new FinishedSubagentRetention(2);
+    for (const agentId of ['agent-1', 'agent-2', 'agent-3']) retention.markFinished(agentId);
+    const host = retentionHost(['agent-1', 'agent-2', 'agent-3']);
+
+    const evicted = await retention.evictExcess(
+      host.lifecycle,
+      (handle) => handle.id === 'agent-1',
+    );
+
+    expect(evicted).toEqual(['agent-2']);
+    expect(host.list()).toEqual(['agent-1', 'agent-3']);
+  });
+
+  it('drops bookkeeping for an agent whose live handle is already gone', async () => {
+    expect.assertions(2);
+    const retention = new FinishedSubagentRetention(1);
+    retention.markFinished('ghost');
+    retention.markFinished('agent-2');
+    const host = retentionHost(['agent-2']);
+
+    await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(host.removed).toEqual([]);
+    expect(retention.size).toBe(1);
+  });
+
+  it('keeps bookkeeping after a failed removal and retries it on the next eviction', async () => {
+    expect.assertions(5);
+    const retention = new FinishedSubagentRetention(1);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+    const removed: string[] = [];
+    let failures = 1;
+    const lifecycle: FinishedAgentLifecycle = {
+      handleOf: (agentId) => ({ id: agentId } as unknown as IAgentScopeHandle),
+      remove: async (agentId) => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error('remove failed');
+        }
+        removed.push(agentId);
+      },
+    };
+    const isBusy = (handle: IAgentScopeHandle) => handle.id === 'agent-2';
+
+    await expect(retention.evictExcess(lifecycle, isBusy)).rejects.toThrow('remove failed');
+    expect(retention.size).toBe(2);
+
+    const evicted = await retention.evictExcess(lifecycle, isBusy);
+
+    expect(evicted).toEqual(['agent-1']);
+    expect(removed).toEqual(['agent-1']);
+    expect(retention.size).toBe(1);
+  });
+
+  it('serializes concurrent evictions so removals never interleave', async () => {
+    expect.assertions(3);
+    const retention = new FinishedSubagentRetention(1);
+    for (const agentId of ['agent-1', 'agent-2', 'agent-3', 'agent-4']) {
+      retention.markFinished(agentId);
+    }
+    let active = 0;
+    let maxActive = 0;
+    const lifecycle: FinishedAgentLifecycle = {
+      handleOf: (agentId) => ({ id: agentId } as unknown as IAgentScopeHandle),
+      remove: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      retention.evictExcess(lifecycle, () => false),
+      retention.evictExcess(lifecycle, () => false),
+    ]);
+
+    expect(maxActive).toBe(1);
+    expect(first).toEqual(['agent-1', 'agent-2', 'agent-3']);
+    expect(second).toEqual([]);
   });
 });

@@ -312,6 +312,27 @@ describe('AgentLLMRequesterService measured anchors', () => {
   });
 });
 
+describe('AgentLLMRequesterService tool symbolisation', () => {
+  it('records one tools snapshot and the same toolsHash on every attempt of a request', async () => {
+    const calls = { value: 0 };
+    const { service, dispatcher, records } = createService(createRequester(calls), undefined);
+
+    await service.request();
+    await dispatcher.flush();
+
+    expect(calls.value).toBe(2);
+    const requests = records.filter((record) => record.type === 'llm.request');
+    const snapshots = records.filter((record) => record.type === 'llm.tools_snapshot');
+    expect(requests).toHaveLength(2);
+    expect(snapshots).toHaveLength(1);
+    const hash = snapshots[0]?.['hash'];
+    expect(hash).toBeTypeOf('string');
+    expect(requests[0]?.['toolsHash']).toBe(hash);
+    expect(requests[1]).toMatchObject({ toolsHash: hash, projection: 'strict' });
+    expect(snapshots[0]).toMatchObject({ tools: [] });
+  });
+});
+
 describe('AgentLLMRequesterService Anthropic effort diagnostics', () => {
   it('warns and sends when the effort is not listed by the model', async () => {
     const calls = { value: 0 };

@@ -22,15 +22,35 @@ export async function handleTowerCommand(host: SlashCommandHost, args: string): 
     return;
   }
   if (sub === '' || sub === 'status') {
-    host.sendNormalUserInput(TOWER_STATUS_PROMPT);
+    host.sendNormalUserInput(await towerToolPrompt(host, 'TowerStatus', TOWER_STATUS_PROMPT));
     return;
   }
   if (sub === 'teardown') {
-    host.sendNormalUserInput(TOWER_TEARDOWN_PROMPT);
+    host.sendNormalUserInput(await towerToolPrompt(host, 'TowerTeardown', TOWER_TEARDOWN_PROMPT));
     return;
   }
 
   await startTowerObjective(host, input);
+}
+
+async function towerToolPrompt(
+  host: SlashCommandHost,
+  toolName: string,
+  prompt: string,
+): Promise<string> {
+  if (await resolveTowerMode(host)) return prompt;
+  return `${prompt} Tower mode is not active, so ${toolName} is not loaded yet; call TowerInit first (it initializes the tower workspace and turns tower mode on), then call ${toolName}.`;
+}
+
+async function resolveTowerMode(host: SlashCommandHost): Promise<boolean> {
+  const session = host.session;
+  if (session === undefined) return host.state.appState.towerMode;
+  try {
+    const status = await session.getStatus();
+    return status.towerMode ?? host.state.appState.towerMode;
+  } catch {
+    return host.state.appState.towerMode;
+  }
 }
 
 async function startTowerObjective(host: SlashCommandHost, objective: string): Promise<void> {

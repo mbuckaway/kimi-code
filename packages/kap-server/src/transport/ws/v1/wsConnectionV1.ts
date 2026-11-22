@@ -148,6 +148,11 @@ export class WsConnectionV1 implements BroadcastTarget {
     else this.sendSubscribedFrame(envelope);
   }
 
+  sendSerialized(wire: string, delivery: BroadcastDelivery = 'subscription'): void {
+    if (delivery === 'immediate') this.sendImmediateFrame(wire);
+    else this.sendSubscribedFrame(wire);
+  }
+
   private onMessage(data: RawData): void {
     if (this.closed) return;
     let frame: InboundFrame;
@@ -497,7 +502,7 @@ export class WsConnectionV1 implements BroadcastTarget {
     for (const frame of frames) {
       if (this.closed || this.socket.readyState !== this.socket.OPEN) return;
       try {
-        this.socket.send(JSON.stringify(frame));
+        this.socket.send(typeof frame === 'string' ? frame : JSON.stringify(frame));
       } catch {
       }
     }

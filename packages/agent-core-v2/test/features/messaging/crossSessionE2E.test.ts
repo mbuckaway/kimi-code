@@ -1,4 +1,6 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { once } from 'node:events';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -9,7 +11,17 @@ import { logSeed, resolveLoggingConfig } from '#/_base/log/logConfig';
 import type { Scope } from '#/_base/di/scope';
 import { bootstrap } from '#/app/bootstrap/bootstrap';
 import { ISessionManager } from '#/app/sessionManager/sessionManager';
-import { CROSS_SESSION_SOCKET_DIR_ENV } from '#/features/messaging/crossSession/crossSessionTransport';
+import {
+  createCrossSessionRegistry,
+  type CrossSessionRegistration,
+} from '#/features/messaging/crossSession/crossSessionRegistry';
+import {
+  CROSS_SESSION_MAX_FRAME_BYTES,
+  CROSS_SESSION_SOCKET_DIR_ENV,
+  CrossSessionFrameDecoder,
+  encodeCrossSessionFrame,
+  type CrossSessionAckFrame,
+} from '#/features/messaging/crossSession/crossSessionTransport';
 import { ICrossSessionMessagingService } from '#/features/messaging/crossSession/crossSessionMessaging';
 import { ICrossSessionInboundService } from '#/features/messaging/crossSessionInboundService';
 import { ISessionMessagingService } from '#/features/messaging/messaging';
@@ -19,6 +31,17 @@ import { stubClientIdentity } from '../../app/bootstrap/stubs';
 
 const SESSION_A = 'session_11111111-1111-4111-8111-111111111111';
 const SESSION_B = 'session_22222222-2222-4222-8222-222222222222';
+
+function readAck(socket: Socket): Promise<CrossSessionAckFrame> {
+  return new Promise((resolve) => {
+    const decoder = new CrossSessionFrameDecoder();
+    socket.on('data', (chunk: Buffer) => {
+      for (const frame of decoder.push(chunk)) {
+        if (frame.type === 'ack') resolve(frame);
+      }
+    });
+  });
+}
 
 describe('cross-session messaging over Unix sockets', () => {
   let root: string;
@@ -45,7 +68,7 @@ describe('cross-session messaging over Unix sockets', () => {
     appB = undefined;
     if (previousSocketDir === undefined) delete process.env[CROSS_SESSION_SOCKET_DIR_ENV];
     else process.env[CROSS_SESSION_SOCKET_DIR_ENV] = previousSocketDir;
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   function bootEngine(): Scope {
@@ -75,16 +98,21 @@ describe('cross-session messaging over Unix sockets', () => {
     const inboxA = sessionA.accessor.get(ISessionMessagingService);
     const inboundB = sessionB.accessor.get(ICrossSessionInboundService);
 
+    await vi.waitFor(
+      async () => {
+        const sockets = await readdir(socketDir);
+        expect(sockets).toHaveLength(2);
+        expect(sockets.every((name) => /^inbox-.+\.sock$/.test(name))).toBe(true);
+        expect((await readdir(registryDir)).toSorted()).toEqual([
+          `${SESSION_A}.json`,
+          `${SESSION_B}.json`,
+        ]);
+      },
+      { timeout: 5_000 },
+    );
+
     const discovered = await messagingA.listSessions(SESSION_A);
     expect(discovered).toEqual([{ sessionId: SESSION_B, status: 'live' }]);
-    expect((await readdir(socketDir)).toSorted()).toEqual([
-      `${SESSION_A}.sock`,
-      `${SESSION_B}.sock`,
-    ]);
-    expect((await readdir(registryDir)).toSorted()).toEqual([
-      `${SESSION_A}.json`,
-      `${SESSION_B}.json`,
-    ]);
 
     const delivered = await messagingA.send(SESSION_A, SESSION_B, {
       messageId: 'message-1',
@@ -170,5 +198,117 @@ describe('cross-session messaging over Unix sockets', () => {
       },
       { timeout: 5_000 },
     );
+  }, 120_000);
+
+  it('delivers a message sent while the peer is still binding', async () => {
+    appA = bootEngine();
+    appB = bootEngine();
+    const sessionsA = appA.accessor.get(ISessionManager);
+    const sessionsB = appB.accessor.get(ISessionManager);
+
+    const sessionA = await sessionsA.create({ sessionId: SESSION_A, workDir: root });
+    await sessionA.accessor.get(IAgentLifecycleService).create({ agentId: MAIN_AGENT_ID });
+    const sessionB = await sessionsB.create({ sessionId: SESSION_B, workDir: root });
+    await sessionB.accessor.get(IAgentLifecycleService).create({ agentId: MAIN_AGENT_ID });
+
+    const registryFile = join(registryDir, `${SESSION_B}.json`);
+    await vi.waitFor(
+      async () => {
+        expect(await readdir(registryDir)).toContain(`${SESSION_B}.json`);
+      },
+      { timeout: 5_000 },
+    );
+    const bound = JSON.parse(await readFile(registryFile, 'utf8')) as CrossSessionRegistration;
+    await rm(registryFile);
+
+    const messagingA = appA.accessor.get(ICrossSessionMessagingService);
+    const inboxB = sessionB.accessor.get(ISessionMessagingService);
+    const pending = messagingA.send(SESSION_A, SESSION_B, {
+      messageId: 'message-bind-window',
+      message: 'hello before the bind',
+      fromSessionTitle: 'Alpha',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const registry = createCrossSessionRegistry({ registryDir });
+    const handle = await registry.register({
+      sessionId: SESSION_B,
+      socketPath: bound.socketPath,
+      token: bound.token,
+    });
+
+    await expect(pending).resolves.toEqual({
+      kind: 'delivered',
+      delivery: 'newTurn',
+      truncated: false,
+    });
+    await vi.waitFor(
+      async () => {
+        expect((await inboxB.listMessages(MAIN_AGENT_ID)).messages).toEqual([
+          expect.objectContaining({
+            fromSessionId: SESSION_A,
+            fromSessionLabel: 'Alpha',
+            message: 'hello before the bind',
+          }),
+        ]);
+      },
+      { timeout: 5_000 },
+    );
+    await handle.release();
+  }, 120_000);
+
+  it('ignores malformed lines and drops oversized frames without killing the inbox', async () => {
+    appA = bootEngine();
+    appB = bootEngine();
+    const sessionsA = appA.accessor.get(ISessionManager);
+    const sessionsB = appB.accessor.get(ISessionManager);
+
+    const sessionA = await sessionsA.create({ sessionId: SESSION_A, workDir: root });
+    const sessionB = await sessionsB.create({ sessionId: SESSION_B, workDir: root });
+    await sessionA.accessor.get(IAgentLifecycleService).create({ agentId: MAIN_AGENT_ID });
+    await sessionB.accessor.get(IAgentLifecycleService).create({ agentId: MAIN_AGENT_ID });
+
+    const registryFile = join(registryDir, `${SESSION_B}.json`);
+    await vi.waitFor(
+      async () => {
+        expect(await readdir(registryDir)).toContain(`${SESSION_B}.json`);
+      },
+      { timeout: 5_000 },
+    );
+    const registration = JSON.parse(
+      await readFile(registryFile, 'utf8'),
+    ) as CrossSessionRegistration;
+
+    const raw = createConnection(registration.socketPath);
+    await once(raw, 'connect');
+    const ackPromise = readAck(raw);
+    raw.write('null\n[]\n42\n"text"\n');
+    raw.write(encodeCrossSessionFrame({ type: 'auth', token: registration.token }));
+    raw.write('null\n[]\n42\n"text"\n');
+    raw.write(
+      encodeCrossSessionFrame({
+        type: 'message',
+        sessionId: SESSION_B,
+        messageId: 'raw-1',
+        from: { sessionId: SESSION_A },
+        message: 'raw hello',
+      }),
+    );
+    const ack = await ackPromise;
+    expect(ack).toMatchObject({ messageId: 'raw-1', kind: 'delivered' });
+    raw.destroy();
+
+    const oversized = createConnection(registration.socketPath);
+    oversized.on('error', () => {});
+    await once(oversized, 'connect');
+    oversized.write('x'.repeat(CROSS_SESSION_MAX_FRAME_BYTES + 1));
+    await once(oversized, 'close');
+
+    const messagingA = appA.accessor.get(ICrossSessionMessagingService);
+    await expect(
+      messagingA.send(SESSION_A, SESSION_B, {
+        messageId: 'after-oversized',
+        message: 'still alive',
+      }),
+    ).resolves.toEqual({ kind: 'delivered', delivery: 'newTurn', truncated: false });
   }, 120_000);
 });

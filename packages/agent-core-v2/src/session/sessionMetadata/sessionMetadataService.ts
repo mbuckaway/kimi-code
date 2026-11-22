@@ -22,11 +22,39 @@ import {
 
 const META_KEY = 'state.json';
 
+const MAX_DRAIN_ITERATIONS = 100;
+
 const pendingWrites = new Set<Promise<void>>();
 
 export async function drainSessionMetadataWrites(): Promise<void> {
+  for (let iteration = 0; iteration < MAX_DRAIN_ITERATIONS; iteration += 1) {
+    if (pendingWrites.size === 0) return;
+    await Promise.all(pendingWrites);
+  }
   await Promise.all(pendingWrites);
 }
+
+type AgentsIntent =
+  | { readonly op: 'set'; readonly agentId: string; readonly meta: AgentMeta }
+  | { readonly op: 'remove'; readonly agentId: string };
+
+interface QueueSettlement {
+  readonly resolve: () => void;
+  readonly reject: (error: unknown) => void;
+}
+
+interface WorkTask {
+  readonly kind: 'work';
+  readonly run: () => Promise<void>;
+}
+
+interface AgentsTask {
+  readonly kind: 'agents';
+  readonly intents: AgentsIntent[];
+  readonly settlements: QueueSettlement[];
+}
+
+type QueueTask = WorkTask | AgentsTask;
 
 export const sessionMetadataDataKey = defineState<SessionMeta | undefined>(
   'sessionMetadata.data',
@@ -44,7 +72,9 @@ export class SessionMetadata extends Service implements ISessionMetadata {
     new Emitter<SessionMetadataChangedEvent>(),
   );
   private readonly scope: string;
-  private updateQueue: Promise<void> = Promise.resolve();
+  private readonly tasks: QueueTask[] = [];
+  private draining = false;
+  private drainScheduled = false;
 
   constructor(
     @ISessionStateService private readonly states: ISessionStateService,
@@ -95,8 +125,16 @@ export class SessionMetadata extends Service implements ISessionMetadata {
     if (this.disposed) return false;
     const updatedAt =
       patch.updatedAt ?? (opts?.touchUpdatedAt === false ? this.data.updatedAt : Date.now());
-    this.data = { ...this.data, ...patch, updatedAt };
-    await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
+    const previous = this.data;
+    const next: SessionMeta = { ...previous, ...patch, updatedAt };
+    if (metadataValueEquals(previous, next)) return false;
+    this.data = next;
+    try {
+      await this.persist();
+    } catch (error) {
+      this.data = previous;
+      throw error;
+    }
     if (this.disposed) return false;
     this.mirrorToReadModel();
     this._onDidChangeMetadata.fire({
@@ -116,47 +154,151 @@ export class SessionMetadata extends Service implements ISessionMetadata {
     return this.enqueueUpdate(async () => {
       await this.ready;
       if (opts?.force !== true && this.data.titleKind === 'custom') return false;
+      if (this.data.title === title && this.data.titleKind === 'generated') return true;
       return this.applyUpdate({ title, titleKind: 'generated' }, { touchUpdatedAt: false });
     });
   }
 
   async setArchived(archived: boolean): Promise<void> {
-    await this.update(
-      archived ? { archived: true, archivedAt: Date.now() } : { archived: false, archivedAt: undefined },
-      { touchUpdatedAt: false },
-    );
-  }
-
-  async registerAgent(agentId: string, meta: AgentMeta): Promise<void> {
-    return this.enqueueUpdate(async () => {
+    await this.enqueueUpdate(async () => {
       await this.ready;
-      const existing = this.data.agents?.[agentId];
-      if (existing !== undefined && agentMetaEquals(existing, meta)) return;
-      const agents = { ...this.data.agents, [agentId]: meta };
-      await this.applyUpdate({ agents }, { touchUpdatedAt: false });
+      const archivedAt = archived ? (this.data.archivedAt ?? Date.now()) : undefined;
+      await this.applyUpdate({ archived, archivedAt }, { touchUpdatedAt: false });
     });
   }
 
-  async unregisterAgent(agentId: string): Promise<void> {
-    return this.enqueueUpdate(async () => {
-      await this.ready;
-      if (this.data.agents === undefined || !Object.hasOwn(this.data.agents, agentId)) return;
-      const agents = { ...this.data.agents };
-      delete agents[agentId];
-      await this.applyUpdate({ agents }, { touchUpdatedAt: false });
-    });
+  registerAgent(agentId: string, meta: AgentMeta): Promise<void> {
+    return this.enqueueAgentsTask({ op: 'set', agentId, meta });
+  }
+
+  unregisterAgent(agentId: string): Promise<void> {
+    return this.enqueueAgentsTask({ op: 'remove', agentId });
   }
 
   private enqueueUpdate<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.updateQueue.then(work, work);
-    const tracked: Promise<void> = run.then(
+    const result = new Promise<T>((resolve, reject) => {
+      this.tasks.push({
+        kind: 'work',
+        run: async () => {
+          try {
+            resolve(await work());
+          } catch (error) {
+            reject(error);
+          }
+        },
+      });
+    });
+    this.trackPending(result);
+    this.scheduleDrain();
+    return result;
+  }
+
+  private enqueueAgentsTask(intent: AgentsIntent): Promise<void> {
+    const last = this.tasks[this.tasks.length - 1];
+    let task: AgentsTask;
+    if (last !== undefined && last.kind === 'agents') {
+      task = last;
+    } else {
+      task = { kind: 'agents', intents: [], settlements: [] };
+      this.tasks.push(task);
+    }
+    task.intents.push(intent);
+    const result = new Promise<void>((resolve, reject) => {
+      task.settlements.push({ resolve, reject });
+    });
+    this.trackPending(result);
+    this.scheduleDrain();
+    return result;
+  }
+
+  private trackPending(result: Promise<unknown>): void {
+    const tracked: Promise<void> = result.then(
       () => undefined,
       () => undefined,
     );
-    this.updateQueue = tracked;
     pendingWrites.add(tracked);
     void tracked.finally(() => pendingWrites.delete(tracked));
-    return run;
+  }
+
+  private scheduleDrain(): void {
+    if (this.draining || this.drainScheduled) return;
+    this.drainScheduled = true;
+    void Promise.resolve()
+      .then(() => {
+        this.drainScheduled = false;
+        return this.drainTasks();
+      })
+      .catch((error: unknown) => {
+        this.drainScheduled = false;
+        this.draining = false;
+        this.log.warn('session metadata drain failed; rescheduling the queued writes', {
+          sessionId: this.ctx.sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (this.tasks.length > 0) this.scheduleDrain();
+      });
+  }
+
+  private async drainTasks(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      let task = this.tasks.shift();
+      while (task !== undefined) {
+        await this.runTask(task);
+        task = this.tasks.shift();
+      }
+    } finally {
+      this.draining = false;
+    }
+  }
+
+  private async runTask(task: QueueTask): Promise<void> {
+    if (task.kind === 'work') {
+      await task.run();
+      return;
+    }
+    let failure: { readonly error: unknown } | undefined;
+    try {
+      await this.applyAgentsIntents(task.intents);
+    } catch (error) {
+      failure = { error };
+    }
+    for (const settlement of task.settlements) {
+      if (failure === undefined) settlement.resolve();
+      else settlement.reject(failure.error);
+    }
+  }
+
+  private async applyAgentsIntents(intents: readonly AgentsIntent[]): Promise<void> {
+    await this.ready;
+    if (this.disposed) return;
+    const previous = this.data;
+    const agents: Record<string, AgentMeta> = { ...previous.agents };
+    for (const intent of intents) {
+      if (intent.op === 'set') {
+        agents[intent.agentId] = intent.meta;
+      } else {
+        delete agents[intent.agentId];
+      }
+    }
+    if (agentMapsEqual(previous.agents, agents)) return;
+    this.data = { ...previous, agents };
+    try {
+      await this.persist();
+    } catch (error) {
+      this.data = previous;
+      throw error;
+    }
+    if (this.disposed) return;
+    this.mirrorToReadModel();
+    this._onDidChangeMetadata.fire({ changed: ['agents'] });
+  }
+
+  private async persist(): Promise<void> {
+    const write = this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
+    this.trackPending(write);
+    await write;
   }
 
   private mirrorToReadModel(): void {
@@ -198,7 +340,7 @@ export class SessionMetadata extends Service implements ISessionMetadata {
           agents: this.data.agents ?? {},
           custom: this.data.custom ?? {},
         };
-        await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
+        await this.persist();
       }
       return;
     }
@@ -213,10 +355,30 @@ export class SessionMetadata extends Service implements ISessionMetadata {
       agents: {},
       custom: {},
     };
-    await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
+    await this.persist();
     this.mirrorToReadModel();
     this.log.debug('session metadata created', { sessionId: this.ctx.sessionId });
   }
+}
+
+function metadataValueEquals(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, index) => metadataValueEquals(item, b[index]));
+  }
+  if (!isPlainRecord(a) || !isPlainRecord(b)) return false;
+  const aEntries = Object.entries(a).filter(([, value]) => value !== undefined);
+  const bEntries = Object.entries(b).filter(([, value]) => value !== undefined);
+  if (aEntries.length !== bEntries.length) return false;
+  return aEntries.every(([key, value]) => metadataValueEquals(value, b[key]));
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function agentMetaEquals(a: AgentMeta, b: AgentMeta): boolean {
@@ -228,6 +390,19 @@ function agentMetaEquals(a: AgentMeta, b: AgentMeta): boolean {
     a.swarmItem === b.swarmItem &&
     recordEquals(a.labels, b.labels)
   );
+}
+
+function agentMapsEqual(
+  previous: Readonly<Record<string, AgentMeta>> | undefined,
+  next: Readonly<Record<string, AgentMeta>>,
+): boolean {
+  const previousEntries = Object.entries(previous ?? {});
+  const nextEntries = Object.entries(next);
+  if (previousEntries.length !== nextEntries.length) return false;
+  return previousEntries.every(([agentId, meta]) => {
+    const nextMeta = next[agentId];
+    return nextMeta !== undefined && agentMetaEquals(meta, nextMeta);
+  });
 }
 
 function recordEquals(a: AgentMeta['labels'], b: AgentMeta['labels']): boolean {

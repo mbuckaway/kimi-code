@@ -46,7 +46,6 @@ import {
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { SUBAGENT_SECTION } from '#/session/subagent/configSection';
 import {
-  AGENT_MESSAGING_ROSTER_CHANGE_VARIANT,
   CROSS_SESSION_INBOUND_HOLD_VARIANT,
   DEFAULT_INBOX_LIMIT,
   MAX_AGENT_MESSAGE_CHARS,
@@ -57,7 +56,6 @@ import {
   MESSAGING_INSTRUCTIONS,
   AGENT_MESSAGING_VARIANT,
   formatAgentRoster,
-  formatRosterChangeNotice,
   neutralizeAgentMessageBody,
   recordRecentSend,
   truncateAgentMessage,
@@ -2831,60 +2829,17 @@ describe('agent message reply marker', () => {
   });
 });
 
-describe('roster change notice', () => {
-  const previous = [
-    'Addressable agents (use SendMessage with the id):',
-    '- main (id: main)',
-    '- scout (id: agent-2)',
-  ].join('\n');
-  const added = [
-    'Addressable agents (use SendMessage with the id):',
-    '- main (id: main)',
-    '- scout (id: agent-2)',
-    '- builder (id: agent-3)',
-  ].join('\n');
-  const removed = [
-    'Addressable agents (use SendMessage with the id):',
-    '- main (id: main)',
-  ].join('\n');
-
-  it('reports added roster lines', () => {
-    expect(formatRosterChangeNotice(previous, added)).toBe(
-      'The agent roster changed.\nAdded:\n- builder (id: agent-3)',
-    );
-  });
-
-  it('reports removed roster lines', () => {
-    expect(formatRosterChangeNotice(previous, removed)).toBe(
-      'The agent roster changed.\nRemoved:\n- scout (id: agent-2)',
-    );
-  });
-
-  it('reports a rename as removed and added lines', () => {
-    const renamed = [
-      'Addressable agents (use SendMessage with the id):',
-      '- main (id: main)',
-      '- explorer (id: agent-2)',
-    ].join('\n');
-
-    expect(formatRosterChangeNotice(previous, renamed)).toBe(
-      'The agent roster changed.\nAdded:\n- explorer (id: agent-2)\nRemoved:\n- scout (id: agent-2)',
-    );
-  });
-
-  it('points at ListAgents when the roster lines are unchanged', () => {
-    expect(formatRosterChangeNotice(previous, previous)).toBe(
-      'The agent roster changed.\nCall ListAgents to see the current roster.',
-    );
-  });
-});
-
 describe('messaging instructions', () => {
-  it('documents the inbox, reply, broadcast, and roster-change tools', () => {
+  it('documents the inbox, reply, and broadcast tools', () => {
     expect(MESSAGING_INSTRUCTIONS).toContain('ListMessages');
     expect(MESSAGING_INSTRUCTIONS).toContain('ReplyMessage');
     expect(MESSAGING_INSTRUCTIONS).toContain('BroadcastMessage');
-    expect(MESSAGING_INSTRUCTIONS).toContain('agent_messaging_roster_change');
+  });
+
+  it('says the roster refreshes automatically instead of promising a reminder', () => {
+    expect(MESSAGING_INSTRUCTIONS).toContain('refreshed automatically');
+    expect(MESSAGING_INSTRUCTIONS).toContain('ListAgents shows the current list');
+    expect(MESSAGING_INSTRUCTIONS).not.toContain('agent_messaging_roster_change');
   });
 
   it('documents the destructive lifecycle tools', () => {
@@ -3437,10 +3392,9 @@ describe('SessionMessagingService broadcastMessage', () => {
   });
 });
 
-describe('SessionMessagingService roster sync', () => {
-  function seedRoster(flagEnabled = true): Harness {
+describe('SessionMessagingService agent lifecycle events', () => {
+  function seedRoster(): Harness {
     const harness = createHarness({
-      flagEnabled,
       seedAgents: [
         { id: MAIN_AGENT_ID, profileName: 'agent' },
         { id: 'agent-2', profileName: 'coder' },
@@ -3454,191 +3408,63 @@ describe('SessionMessagingService roster sync', () => {
     return harness;
   }
 
-  async function settleRoster(harness: Harness, agentIds: readonly string[]): Promise<void> {
-    for (const agentId of agentIds) await harness.service.syncRoster(agentId);
+  async function flushAsync(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  it('seeds a baseline on the first sync without notifying', async () => {
-    expect.assertions(1);
-    const harness = seedRoster();
-
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-
-    expect(harness.reminderNotify).not.toHaveBeenCalled();
-  });
-
-  it('notifies existing live agents when a new descendant appears', async () => {
+  it('does not append a roster message when an agent is created', async () => {
     expect.assertions(2);
     const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.reminderNotify.mockClear();
+
     harness.addAgent('agent-3', { profileName: 'explore' });
-    harness.metadata['agent-3'] = {
-      type: 'sub',
-      labels: { parentAgentId: 'agent-2', name: 'builder' },
-    };
+    await flushAsync();
 
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2', 'agent-3']);
-
-    expect(harness.reminderNotify).toHaveBeenCalledTimes(2);
-    expect(harness.reminderNotify).toHaveBeenCalledWith(
-      expect.stringContaining('Added:\n- builder (id: agent-3)'),
-      { variant: AGENT_MESSAGING_ROSTER_CHANGE_VARIANT },
-    );
+    expect(harness.reminderNotify).not.toHaveBeenCalled();
+    expect(harness.sessionMetadata.read).not.toHaveBeenCalled();
   });
 
-  it('notifies the remaining agents when an agent closes and prunes its inbox and baseline', async () => {
-    expect.assertions(3);
+  it('does not append a roster message when the agents metadata changes', async () => {
+    expect.assertions(2);
     const harness = seedRoster();
-    const closing = harness.agents.get('agent-2')!;
-    closing.loop.status.mockReturnValue({
+
+    harness.metadata['agent-2'] = {
+      type: 'sub',
+      labels: { parentAgentId: 'main', name: 'explorer' },
+    };
+    harness.onDidChangeMetadata.fire({ changed: ['agents'] });
+    await flushAsync();
+
+    expect(harness.reminderNotify).not.toHaveBeenCalled();
+    expect(harness.sessionMetadata.read).not.toHaveBeenCalled();
+  });
+
+  it('does not append a roster message when an agent closes', async () => {
+    expect.assertions(2);
+    const harness = seedRoster();
+    delete harness.metadata['agent-2'];
+    harness.agents.delete('agent-2');
+
+    harness.onDidClose.fire({ agentId: 'agent-2' });
+    await flushAsync();
+
+    expect(harness.reminderNotify).not.toHaveBeenCalled();
+    expect(harness.sessionMetadata.read).not.toHaveBeenCalled();
+  });
+
+  it('prunes the inbox entry of a closing agent', async () => {
+    expect.assertions(2);
+    const harness = seedRoster();
+    harness.agents.get('agent-2')!.loop.status.mockReturnValue({
       state: 'running',
       pendingTurnIds: [],
       hasPendingRequests: false,
     });
     await harness.service.sendMessage(MAIN_AGENT_ID, 'agent-2', 'hello', signal);
     expect((await harness.service.listMessages('agent-2')).messages).toHaveLength(1);
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.reminderNotify.mockClear();
-    delete harness.metadata['agent-2'];
-    harness.agents.delete('agent-2');
 
     harness.onDidClose.fire({ agentId: 'agent-2' });
-    await settleRoster(harness, [MAIN_AGENT_ID]);
 
-    expect(harness.reminderNotify).toHaveBeenCalledWith(
-      expect.stringContaining('Removed:\n- scout (id: agent-2)'),
-      { variant: AGENT_MESSAGING_ROSTER_CHANGE_VARIANT },
-    );
     expect((await harness.service.listMessages('agent-2')).messages).toEqual([]);
-  });
-
-  it('notifies on an agents metadata change', async () => {
-    expect.assertions(2);
-    const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.reminderNotify.mockClear();
-    harness.metadata['agent-2'] = {
-      type: 'sub',
-      labels: { parentAgentId: 'main', name: 'explorer' },
-    };
-
-    harness.onDidChangeMetadata.fire({ changed: ['agents'] });
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-
-    expect(harness.reminderNotify).toHaveBeenCalledWith(
-      expect.stringContaining('Added:\n- explorer (id: agent-2)'),
-      { variant: AGENT_MESSAGING_ROSTER_CHANGE_VARIANT },
-    );
-    expect(harness.reminderNotify).toHaveBeenCalledWith(
-      expect.stringContaining('Removed:\n- scout (id: agent-2)'),
-      { variant: AGENT_MESSAGING_ROSTER_CHANGE_VARIANT },
-    );
-  });
-
-  it('ignores a metadata change that does not touch agents', async () => {
-    expect.assertions(1);
-    const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.reminderNotify.mockClear();
-
-    harness.onDidChangeMetadata.fire({ changed: ['title'] });
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-
-    expect(harness.reminderNotify).not.toHaveBeenCalled();
-  });
-
-  it('does nothing while the flag is off', async () => {
-    expect.assertions(1);
-    const harness = seedRoster(false);
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.reminderNotify.mockClear();
-    harness.addAgent('agent-3', { profileName: 'explore' });
-    harness.metadata['agent-3'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'builder' } };
-
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-
-    expect(harness.reminderNotify).not.toHaveBeenCalled();
-  });
-
-  it('skips an agent without a live context', async () => {
-    expect.assertions(2);
-    const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.liveContexts.delete(MAIN_AGENT_ID);
-    harness.liveContexts.delete('agent-2');
-    harness.reminderNotify.mockClear();
-    harness.metadata['agent-2'] = {
-      type: 'sub',
-      labels: { parentAgentId: 'main', name: 'explorer' },
-    };
-
-    await expect(settleRoster(harness, [MAIN_AGENT_ID, 'agent-2'])).resolves.toBeUndefined();
-
-    expect(harness.reminderNotify).not.toHaveBeenCalled();
-  });
-
-  it('skips an agent whose reminder runtime is unavailable', async () => {
-    expect.assertions(2);
-    const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.setRuntimeUnavailable(true);
-    harness.reminderNotify.mockClear();
-    harness.metadata['agent-2'] = {
-      type: 'sub',
-      labels: { parentAgentId: 'main', name: 'explorer' },
-    };
-
-    await expect(settleRoster(harness, [MAIN_AGENT_ID, 'agent-2'])).resolves.toBeUndefined();
-
-    expect(harness.reminderNotify).not.toHaveBeenCalled();
-  });
-
-  it('clears the baseline when roster instructions are unavailable', async () => {
-    expect.assertions(2);
-    const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    harness.reminderNotify.mockClear();
-    const answers = [true, false];
-    harness.flags.enabled = stubFlag(() => answers.shift() ?? false).enabled;
-
-    await expect(harness.service.syncRoster(MAIN_AGENT_ID)).resolves.toBeUndefined();
-
-    expect(harness.reminderNotify).not.toHaveBeenCalled();
-  });
-
-  it('keeps the sync chain usable after a failed roster read', async () => {
-    expect.assertions(2);
-    const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    setUnexpectedErrorHandler(() => {});
-    try {
-      harness.sessionMetadata.read.mockRejectedValueOnce(new Error('roster read failed'));
-
-      await expect(harness.service.syncRoster(MAIN_AGENT_ID)).rejects.toThrow('roster read failed');
-    } finally {
-      resetUnexpectedErrorHandler();
-    }
-
-    await expect(harness.service.syncRoster(MAIN_AGENT_ID)).resolves.toBeUndefined();
-  });
-
-  it('reports a background roster sync failure and still rejects the caller', async () => {
-    expect.assertions(3);
-    const harness = seedRoster();
-    await settleRoster(harness, [MAIN_AGENT_ID, 'agent-2']);
-    const reported: unknown[] = [];
-    setUnexpectedErrorHandler((error) => reported.push(error));
-    try {
-      harness.sessionMetadata.read.mockRejectedValueOnce(new Error('roster read failed'));
-
-      await expect(harness.service.syncRoster(MAIN_AGENT_ID)).rejects.toThrow('roster read failed');
-
-      expect(reported).toHaveLength(1);
-      expect((reported[0] as Error).message).toBe('roster read failed');
-    } finally {
-      resetUnexpectedErrorHandler();
-    }
   });
 });
 
@@ -5412,6 +5238,29 @@ describe('SessionMessagingService cross-session inbound', () => {
     expect(textOf(deliveredMessageOf(request))).toContain('[re: message-9]');
   });
 
+  it('receiveCrossSession_acceptStampsTheReplySessionOnTheOrigin', async () => {
+    expect.assertions(1);
+    harness.sessionMetadata.read.mockResolvedValue({
+      id: 'session-local',
+      title: 'Local',
+      createdAt: 0,
+      updatedAt: 0,
+      archived: false,
+      agents: { ...harness.metadata },
+    } as SessionMeta);
+
+    await harness.service.receiveCrossSession(inboundMessage({ inReplyTo: 'message-9' }));
+
+    const request = harness.agents.get(MAIN_AGENT_ID)!.loop.turns[0]?.request;
+    expect(seedOf(request)?.origin).toEqual({
+      kind: 'session_message',
+      fromSessionId: 'session-a',
+      fromSessionTitle: 'Alpha',
+      replyToSessionId: 'session-local',
+      replyToSessionTitle: 'Local',
+    });
+  });
+
   it('receiveCrossSession_refuseDropsTheMessage', async () => {
     expect.assertions(4);
     harness.inbound.set('refuse');
@@ -5591,44 +5440,122 @@ describe('SessionMessagingService cross-session inbound', () => {
     expect(harness.agents.get(MAIN_AGENT_ID)!.loop.enqueue).toHaveBeenCalledTimes(1);
   });
 
-  it('receiveCrossSession_boundsTheHeldQueue', async () => {
-    expect.assertions(3);
+  it('receiveCrossSession_holdAtCapacityRefusesTheNewMessageLosslessly', async () => {
     harness.inbound.set('hold');
-    const ids = Array.from(
-      { length: MAX_HELD_CROSS_SESSION_MESSAGES + 1 },
-      (_unused, index) => `message-${index}`,
+    for (let index = 0; index < MAX_HELD_CROSS_SESSION_MESSAGES; index += 1) {
+      await harness.service.receiveCrossSession(
+        inboundMessage({ messageId: `message-${index}`, message: `body-${index}` }),
+      );
+    }
+
+    const overflow = await harness.service.receiveCrossSession(
+      inboundMessage({ messageId: 'message-overflow', message: 'overflow from alpha' }),
     );
 
-    await Promise.all(
-      ids.map((messageId) => harness.service.receiveCrossSession(inboundMessage({ messageId }))),
-    );
-
+    expect(overflow).toEqual({ kind: 'refused', reason: 'queue_full', truncated: false });
     const held = harness.service.listHeldCrossSessionMessages();
     expect(held).toHaveLength(MAX_HELD_CROSS_SESSION_MESSAGES);
-    expect(held[0]?.messageId).toBe('message-1');
-    expect(held.at(-1)?.messageId).toBe(`message-${MAX_HELD_CROSS_SESSION_MESSAGES}`);
+    expect(held[0]?.messageId).toBe('message-0');
+    expect(held.at(-1)?.messageId).toBe(`message-${MAX_HELD_CROSS_SESSION_MESSAGES - 1}`);
+    expect(held.some((message) => message.messageId === 'message-overflow')).toBe(false);
+  });
+
+  it('receiveCrossSession_holdAtCapacityStillDeliversTheOldestOnAccept', async () => {
+    const draining = drainingHarness();
+    draining.inbound.set('hold');
+    for (let index = 0; index < MAX_HELD_CROSS_SESSION_MESSAGES; index += 1) {
+      await draining.service.receiveCrossSession(
+        inboundMessage({ messageId: `message-${index}`, message: `body-${index}` }),
+      );
+    }
+    const overflow = await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: 'message-overflow', message: 'overflow from alpha' }),
+    );
+
+    materializeSteeredMessages(draining);
+    draining.inbound.set('accept');
+    await vi.waitFor(async () => {
+      expect(
+        (await draining.service.listMessages(MAIN_AGENT_ID, { limit: MAX_INBOX_MESSAGES }))
+          .messages,
+      ).toHaveLength(MAX_HELD_CROSS_SESSION_MESSAGES);
+    });
+
+    const inbox = await draining.service.listMessages(MAIN_AGENT_ID, {
+      limit: MAX_INBOX_MESSAGES,
+    });
+    const bodies = inbox.messages.map((entry) => entry.message);
+    expect(overflow).toEqual({ kind: 'refused', reason: 'queue_full', truncated: false });
+    expect(bodies).toContain('body-0');
+    expect(bodies).not.toContain('overflow from alpha');
+    expect(draining.agents.get(MAIN_AGENT_ID)!.loop.enqueue).toHaveBeenCalledTimes(
+      MAX_HELD_CROSS_SESSION_MESSAGES,
+    );
+    expect(draining.service.listHeldCrossSessionMessages()).toEqual([]);
+  });
+
+  it('receiveCrossSession_holdRefusalDoesNotRecordTheDedupeKey', async () => {
+    const draining = drainingHarness();
+    draining.inbound.set('hold');
+    for (let index = 0; index < MAX_HELD_CROSS_SESSION_MESSAGES; index += 1) {
+      await draining.service.receiveCrossSession(
+        inboundMessage({ messageId: `message-${index}` }),
+      );
+    }
+
+    const firstAttempt = await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: 'message-overflow' }),
+    );
+    const stillFull = await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: 'message-overflow' }),
+    );
+
+    expect(firstAttempt).toEqual({ kind: 'refused', reason: 'queue_full', truncated: false });
+    expect(stillFull).toEqual({ kind: 'refused', reason: 'queue_full', truncated: false });
+
+    materializeSteeredMessages(draining);
+    draining.inbound.set('accept');
+    await vi.waitFor(async () => {
+      expect(
+        (await draining.service.listMessages(MAIN_AGENT_ID, { limit: MAX_INBOX_MESSAGES }))
+          .messages,
+      ).toHaveLength(MAX_HELD_CROSS_SESSION_MESSAGES);
+    });
+    const retried = await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: 'message-overflow' }),
+    );
+
+    expect(retried).toEqual({ kind: 'delivered', delivery: 'steered', truncated: false });
   });
 
   it('receiveCrossSession_boundsTheRecentMessageIds', async () => {
-    expect.assertions(2);
-    harness.inbound.set('hold');
-    const ids = Array.from(
-      { length: MAX_RECENT_CROSS_SESSION_MESSAGE_IDS + 1 },
-      (_unused, index) => `message-${index}`,
-    );
-    await Promise.all(
-      ids.map((messageId) => harness.service.receiveCrossSession(inboundMessage({ messageId }))),
-    );
-    harness.inbound.set('accept');
-
-    const retried = await harness.service.receiveCrossSession(
-      inboundMessage({ messageId: 'message-0' }),
-    );
-    const stillRecent = await harness.service.receiveCrossSession(
+    const draining = drainingHarness();
+    draining.inbound.set('hold');
+    for (let index = 0; index < MAX_RECENT_CROSS_SESSION_MESSAGE_IDS; index += 1) {
+      await draining.service.receiveCrossSession(
+        inboundMessage({ messageId: `message-${index}` }),
+      );
+    }
+    materializeSteeredMessages(draining);
+    draining.inbound.set('accept');
+    await vi.waitFor(async () => {
+      expect(
+        (await draining.service.listMessages(MAIN_AGENT_ID, { limit: MAX_INBOX_MESSAGES }))
+          .messages,
+      ).toHaveLength(MAX_RECENT_CROSS_SESSION_MESSAGE_IDS);
+    });
+    await draining.service.receiveCrossSession(
       inboundMessage({ messageId: `message-${MAX_RECENT_CROSS_SESSION_MESSAGE_IDS}` }),
     );
 
-    expect(retried).toEqual({ kind: 'delivered', delivery: 'newTurn', truncated: false });
+    const retried = await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: 'message-0' }),
+    );
+    const stillRecent = await draining.service.receiveCrossSession(
+      inboundMessage({ messageId: `message-${MAX_RECENT_CROSS_SESSION_MESSAGE_IDS}` }),
+    );
+
+    expect(retried).toEqual({ kind: 'delivered', delivery: 'steered', truncated: false });
     expect(stillRecent).toEqual({ kind: 'refused', reason: 'duplicate', truncated: false });
   });
 
@@ -5667,6 +5594,16 @@ describe('SessionMessagingService cross-session inbound', () => {
     created.addAgent(MAIN_AGENT_ID, { profileName: 'agent' });
     created.markLive(MAIN_AGENT_ID);
     return created;
+  }
+
+  function materializeSteeredMessages(draining: Harness): void {
+    const loop = draining.agents.get(MAIN_AGENT_ID)!.loop;
+    const enqueue = loop.enqueue.getMockImplementation() as (request: StepRequest) => unknown;
+    loop.enqueue.mockImplementation((request: StepRequest) => {
+      const receipt = enqueue(request);
+      request.markMaterialized();
+      return receipt;
+    });
   }
 
   it('receiveCrossSession_acceptDrainsHeldMessagesOnPolicyChange', async () => {
@@ -5966,6 +5903,14 @@ describe('cross-session send result formatting', () => {
       output: 'Cannot send a cross-session message to your own session.',
       isError: false,
       truncated: false,
+    });
+  });
+
+  it('formatCrossSessionSendResult_refusedQueueFull_namesTheFullHoldQueue', () => {
+    expect(format({ kind: 'refused', reason: 'queue_full', truncated: true })).toEqual({
+      output: `The message to ${PEER_LABEL} was refused because the receiving session's cross-session hold queue is full. Retry later.`,
+      isError: false,
+      truncated: true,
     });
   });
 

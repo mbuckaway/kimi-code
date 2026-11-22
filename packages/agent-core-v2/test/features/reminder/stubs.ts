@@ -48,15 +48,23 @@ export function createReminderHarness(
   loop.hooks.onWillBeginStep.register('test-reminder', async ({ firstStepOfTurn }, next) => {
     const isNewTurn = firstStepOfTurn || rearm;
     rearm = false;
+    const history = context.get();
+    const positionsByVariant = new Map<string, number[]>();
+    history.forEach((message, index) => {
+      if (message.origin?.kind !== 'injection') return;
+      const variant = message.origin.variant;
+      const recorded = positionsByVariant.get(variant);
+      if (recorded === undefined) positionsByVariant.set(variant, [index]);
+      else recorded.push(index);
+    });
     for (const [variant, provider] of entries) {
-      const history = context.get();
-      const positions = history.flatMap((message, index) =>
-        message.origin?.kind === 'injection' && message.origin.variant === variant ? [index] : [],
-      );
-      const lastInjectedAt = positions.at(-1) ?? null;
+      const recorded = positionsByVariant.get(variant) ?? [];
+      const historyLength = recorded.length === 0 ? history.length : context.get().length;
+      const injectedPositions = recorded.filter((position) => position < historyLength);
+      const lastInjectedAt = injectedPositions.at(-1) ?? null;
       const lastInjection = lastInjectedAt === null ? undefined : history[lastInjectedAt];
       const value = await provider({
-        injectedPositions: positions,
+        injectedPositions,
         lastInjectedAt,
         lastInjection,
         lastDisclosure: lastInjection?.origin?.kind === 'injection'

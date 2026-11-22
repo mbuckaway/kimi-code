@@ -184,6 +184,34 @@ describe('AgentTranscriptProjector', () => {
     expect(turn.prompt).toBeUndefined();
   });
 
+  it('projects a titled cross-session message turn to the existing other origin and displays its reply', () => {
+    const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
+    const tx = new AgentTranscript('main');
+    const feed = (event: ProjectorBusEvent): void => {
+      tx.apply(projector.map(event));
+    };
+    const origin = {
+      kind: 'session_message',
+      fromSessionId: 'session-b',
+      fromSessionTitle: 'Beta',
+      replyToSessionId: 'session-a',
+      replyToSessionTitle: 'Alpha',
+    };
+
+    feed(ev({ type: 'turn.started', turnId: 0, origin }));
+    feed(ev({ type: 'assistant.delta', turnId: 0, delta: 'ack from session' }));
+    feed(ev({ type: 'turn.ended', turnId: 0, reason: 'completed' }));
+
+    const turn = turnOps('t0', tx.getItems());
+    expect(turn.origin).toEqual({ kind: 'other', payload: origin });
+    expect(turn.prompt).toBeUndefined();
+    expect(turn.state).toBe('completed');
+    expect(turn.steps).toHaveLength(1);
+    expect(turn.steps[0]!.frames).toEqual([
+      { kind: 'text', frameId: 't0.1.f1', role: 'assistant', text: 'ack from session' },
+    ]);
+  });
+
   it('projects the live prompt from turn.started and keeps it through turn.ended', () => {
     const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
     const tx = new AgentTranscript('main');

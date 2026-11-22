@@ -104,8 +104,10 @@ const INTERNAL_ORIGINS = new Set<PromptOrigin['kind']>([
   'cron_job',
   'cron_missed',
   // Peer agent messages are model-facing `<agent-message ...>` records, never
-  // user-typed turns, so they stay out of the user-facing export.
+  // user-typed turns, so they stay out of the user-facing export. Messages from
+  // another session's main agent use the same envelope and must stay out too.
   'agent_message',
+  'session_message',
 ]);
 
 export function isInternalMessage(msg: ContextMessage): boolean {

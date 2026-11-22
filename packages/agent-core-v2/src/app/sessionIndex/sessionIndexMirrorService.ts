@@ -22,6 +22,7 @@ const FLUSH_INTERVAL_MS = 100;
 const FLUSH_BATCH_SIZE = 500;
 const MAX_PENDING = 10_000;
 const MAX_CONSECUTIVE_FAILURES = 5;
+const DRAIN_DEADLINE_MS = 5_000;
 
 const pendingDrains = new Set<Promise<void>>();
 
@@ -87,16 +88,22 @@ export class SessionIndexMirror extends Disposable implements ISessionIndexMirro
 
   async drain(): Promise<void> {
     this.timer.cancel();
+    const deadline = Date.now() + DRAIN_DEADLINE_MS;
     while (this.pendingMap.size > 0) {
-      const before = this.pendingMap.size;
       await this.flush();
-      if (this.pendingMap.size >= before) {
-        this.log.warn('session index mirror drain made no progress; leaving the rest dirty', {
+      if (this.pendingMap.size === 0) break;
+      if (Date.now() >= deadline || this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        this.log.warn('session index mirror drain left records dirty', {
           pending: this.pendingMap.size,
+          failures: this.consecutiveFailures,
         });
-        return;
+        break;
       }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
     }
+    this.timer.cancel();
   }
 
   private flush(): Promise<void> {

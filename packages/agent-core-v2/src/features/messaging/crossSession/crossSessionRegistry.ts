@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readdir, readFile, rename, unlink } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -58,6 +59,19 @@ const ENGINE_SESSION_ID = /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 const REGISTRY_FILE_SUFFIX = '.json';
 
+const TEMP_FILE_MARKER = `${REGISTRY_FILE_SUFFIX}.tmp.`;
+
+const TEMP_FILE_MAX_AGE_MS = 60_000;
+
+const REGISTRY_DIR_MODE = 0o700;
+
+const REGISTRY_FILE_MODE = 0o600;
+
+interface RegistryFileSnapshot {
+  readonly entry: CrossSessionRegistration | undefined;
+  readonly mtimeMs: number;
+}
+
 export function resolveCrossSessionRegistryDir(homeDir: string): string {
   return join(homeDir, 'messaging', 'registry');
 }
@@ -78,6 +92,10 @@ function filePathFor(registryDir: string, sessionId: string): string {
 
 function isRegistryFile(name: string): boolean {
   return name.endsWith(REGISTRY_FILE_SUFFIX);
+}
+
+function isTempRegistryFile(name: string): boolean {
+  return name.includes(TEMP_FILE_MARKER);
 }
 
 function encode(info: CrossSessionRegistration): string {
@@ -123,6 +141,33 @@ async function readRegistrationFile(
   }
 }
 
+async function statOrUndefined(filePath: string): Promise<Stats | undefined> {
+  try {
+    return await stat(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+async function snapshotRegistryFile(
+  filePath: string,
+): Promise<RegistryFileSnapshot | undefined> {
+  const info = await statOrUndefined(filePath);
+  if (info === undefined) return undefined;
+  return { entry: await readRegistrationFile(filePath), mtimeMs: info.mtimeMs };
+}
+
+async function removeStaleIfUnchanged(
+  filePath: string,
+  snapshot: RegistryFileSnapshot,
+): Promise<void> {
+  const current = await statOrUndefined(filePath);
+  if (current === undefined || current.mtimeMs !== snapshot.mtimeMs) return;
+  const entry = await readRegistrationFile(filePath);
+  if (entry?.heartbeatAt !== snapshot.entry?.heartbeatAt) return;
+  await unlinkIfPresent(filePath);
+}
+
 async function unlinkIfPresent(filePath: string): Promise<void> {
   try {
     await unlink(filePath);
@@ -133,20 +178,17 @@ async function unlinkIfPresent(filePath: string): Promise<void> {
 
 async function writeFileAtomic(filePath: string, content: string): Promise<void> {
   const tmpPath = `${filePath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
-  let renamed = false;
   try {
-    const handle = await open(tmpPath, 'w');
+    const handle = await open(tmpPath, 'w', REGISTRY_FILE_MODE);
     try {
       await handle.writeFile(content);
     } finally {
       await handle.close();
     }
     await rename(tmpPath, filePath);
-    renamed = true;
-  } finally {
-    if (!renamed) {
-      await unlinkIfPresent(tmpPath);
-    }
+  } catch (error) {
+    await unlinkIfPresent(tmpPath);
+    throw error;
   }
 }
 
@@ -176,15 +218,46 @@ export function createCrossSessionRegistry(
   const statusOf = (entry: CrossSessionRegistration): 'live' | 'offline' =>
     now() - entry.heartbeatAt > offlineAfterMs ? 'offline' : 'live';
 
-  const removeStale = async (filePath: string): Promise<void> => {
-    await unlinkIfPresent(filePath);
+  const removeStaleTempFiles = async (names: readonly string[]): Promise<void> => {
+    await Promise.all(
+      names.filter(isTempRegistryFile).map(async (name) => {
+        const filePath = join(registryDir, name);
+        let info: Stats;
+        try {
+          info = await stat(filePath);
+        } catch {
+          return;
+        }
+        if (!info.isFile() || now() - info.mtimeMs <= TEMP_FILE_MAX_AGE_MS) return;
+        await unlinkIfPresent(filePath);
+      }),
+    );
+  };
+
+  const collectStaleOrLive = async (
+    names: readonly string[],
+    onLive: (entry: CrossSessionRegistration) => void,
+  ): Promise<void> => {
+    await Promise.all(
+      names.filter(isRegistryFile).map(async (name) => {
+        const filePath = join(registryDir, name);
+        const snapshot = await snapshotRegistryFile(filePath);
+        if (snapshot === undefined) return;
+        const entry = snapshot.entry;
+        if (entry === undefined || isStale(entry)) {
+          await removeStaleIfUnchanged(filePath, snapshot);
+          return;
+        }
+        onLive(entry);
+      }),
+    );
   };
 
   return {
     statusOf,
 
     async register(input) {
-      await mkdir(registryDir, { recursive: true });
+      await mkdir(registryDir, { recursive: true, mode: REGISTRY_DIR_MODE });
       const filePath = filePathFor(registryDir, input.sessionId);
       const state = {
         title: input.title,
@@ -192,35 +265,34 @@ export function createCrossSessionRegistry(
         token: input.token,
         released: false,
       };
-      let inflightWrites = 0;
-      let onWritesDrained: (() => void) | undefined;
+      let writeChain: Promise<void> = Promise.resolve();
 
       const write = async (): Promise<void> => {
         if (state.released) return;
-        inflightWrites += 1;
-        try {
-          await writeFileAtomic(
-            filePath,
-            encode({
-              sessionId: input.sessionId,
-              socketPath: state.socketPath,
-              token: state.token,
-              pid: input.pid ?? process.pid,
-              heartbeatAt: now(),
-              startedAt: input.startedAt ?? now(),
-              ...(state.title !== undefined ? { title: state.title } : {}),
-            }),
-          );
-        } finally {
-          inflightWrites -= 1;
-          if (inflightWrites === 0) onWritesDrained?.();
-        }
+        await writeFileAtomic(
+          filePath,
+          encode({
+            sessionId: input.sessionId,
+            socketPath: state.socketPath,
+            token: state.token,
+            pid: input.pid ?? process.pid,
+            heartbeatAt: now(),
+            startedAt: input.startedAt ?? now(),
+            ...(state.title !== undefined ? { title: state.title } : {}),
+          }),
+        );
       };
 
-      await write();
+      const enqueueWrite = (): Promise<void> => {
+        const next = writeChain.then(write);
+        writeChain = next.catch(() => {});
+        return next;
+      };
+
+      await enqueueWrite();
 
       const timer = setInterval(() => {
-        void write().catch(() => {});
+        void enqueueWrite().catch(() => {});
       }, heartbeatIntervalMs);
       timer.unref();
 
@@ -231,17 +303,13 @@ export function createCrossSessionRegistry(
           if (patch.title !== undefined) state.title = patch.title;
           if (patch.socketPath !== undefined) state.socketPath = patch.socketPath;
           if (patch.token !== undefined) state.token = patch.token;
-          await write();
+          await enqueueWrite();
         },
         async release() {
           if (state.released) return;
           state.released = true;
           clearInterval(timer);
-          if (inflightWrites > 0) {
-            await new Promise<void>((resolve) => {
-              onWritesDrained = resolve;
-            });
-          }
+          await writeChain;
           await unlinkIfPresent(filePath);
         },
       };
@@ -249,28 +317,25 @@ export function createCrossSessionRegistry(
 
     async listLive() {
       const names = await registryNames(registryDir);
+      await removeStaleTempFiles(names);
       const live: CrossSessionRegistration[] = [];
-      await Promise.all(
-        names.filter(isRegistryFile).map(async (name) => {
-          const filePath = join(registryDir, name);
-          const entry = await readRegistrationFile(filePath);
-          if (entry === undefined || isStale(entry)) {
-            await removeStale(filePath);
-            return;
-          }
-          live.push(entry);
-        }),
-      );
+      await collectStaleOrLive(names, (entry) => {
+        live.push(entry);
+      });
       live.sort((a, b) => a.startedAt - b.startedAt);
       return live;
     },
 
     async get(sessionId) {
+      const names = await registryNames(registryDir).catch(() => []);
+      await removeStaleTempFiles(names);
       const filePath = filePathFor(registryDir, sessionId);
-      const entry = await readRegistrationFile(filePath);
+      const snapshot = await snapshotRegistryFile(filePath);
+      if (snapshot === undefined) return undefined;
+      const entry = snapshot.entry;
       if (entry === undefined) return undefined;
       if (entry.sessionId !== sessionId || isStale(entry)) {
-        await removeStale(filePath);
+        await removeStaleIfUnchanged(filePath, snapshot);
         return undefined;
       }
       return entry;
@@ -278,15 +343,8 @@ export function createCrossSessionRegistry(
 
     async sweepStale() {
       const names = await registryNames(registryDir);
-      await Promise.all(
-        names.filter(isRegistryFile).map(async (name) => {
-          const filePath = join(registryDir, name);
-          const entry = await readRegistrationFile(filePath);
-          if (entry === undefined || isStale(entry)) {
-            await removeStale(filePath);
-          }
-        }),
-      );
+      await removeStaleTempFiles(names);
+      await collectStaleOrLive(names, () => {});
     },
   };
 }

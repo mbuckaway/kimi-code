@@ -25,13 +25,17 @@ import type { Runtime } from '#/runtime/runtime';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
+import { isProviderRateLimitError } from '#/kosong/contract/errors';
+import { isProviderUsageLimitError } from '#/kosong/protocol/errors';
 import { ILogService } from '#/_base/log/log';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { type IHostProcessService } from '#/os/interface/hostProcess';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { RuntimeWorkspaceView } from '#/runtime/runtimeWorkspaceView';
 import { createHooks } from '#/hooks';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
+import { scopeGitContextProcess } from '#/session/agentLifecycle/profile/gitContext';
 import {
   isSubagentMeta,
   ownMeta,
@@ -40,6 +44,7 @@ import {
   tagsOf,
 } from '#/session/agentLifecycle/subagentMetadata';
 import { agentContextOf } from '#/agent/scopeContext/scopeContext';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { agentNameOf, normalizeAgentName } from './agentNames';
 import { AGENT_PERSONA_FLAG_ID } from './flag';
@@ -84,6 +89,100 @@ interface AgentTreeIndex {
   readonly children: ReadonlyMap<string, readonly string[]>;
 }
 
+export const FINISHED_SUBAGENT_LIMIT_ENV = 'KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT';
+export const DEFAULT_FINISHED_SUBAGENT_LIMIT = 64;
+export const DISABLED_FINISHED_SUBAGENT_LIMIT = 0;
+
+const UNAVAILABLE_GIT_PROCESS: IHostProcessService = {
+  _serviceBrand: undefined,
+  spawn: () => Promise.reject(new Error('git context requires a process-capable runtime')),
+};
+
+export interface FinishedAgentLifecycle {
+  handleOf(agentId: string): IAgentScopeHandle | undefined;
+  remove(agentId: string): Promise<void>;
+}
+
+export class FinishedSubagentRetention {
+  private readonly finished = new Map<string, number>();
+  private evictionChain: Promise<void> = Promise.resolve();
+  private sequence = 0;
+
+  constructor(private readonly limit: number = DEFAULT_FINISHED_SUBAGENT_LIMIT) {}
+
+  get size(): number {
+    return this.finished.size;
+  }
+
+  markFinished(agentId: string): void {
+    if (this.limit <= DISABLED_FINISHED_SUBAGENT_LIMIT) return;
+    this.finished.delete(agentId);
+    this.finished.set(agentId, ++this.sequence);
+  }
+
+  forget(agentId: string): void {
+    this.finished.delete(agentId);
+  }
+
+  evictExcess(
+    lifecycle: FinishedAgentLifecycle,
+    isBusy: (handle: IAgentScopeHandle) => boolean,
+  ): Promise<readonly string[]> {
+    const eviction = this.evictionChain.then(() => this.evictExcessNow(lifecycle, isBusy));
+    this.evictionChain = eviction.then(
+      () => undefined,
+      () => undefined,
+    );
+    return eviction;
+  }
+
+  private async evictExcessNow(
+    lifecycle: FinishedAgentLifecycle,
+    isBusy: (handle: IAgentScopeHandle) => boolean,
+  ): Promise<readonly string[]> {
+    const evicted: string[] = [];
+    if (this.limit <= DISABLED_FINISHED_SUBAGENT_LIMIT) return evicted;
+
+    let failure: { readonly error: unknown } | undefined;
+    for (const [agentId, sequence] of Array.from(this.finished.entries())) {
+      if (this.finished.size <= this.limit) break;
+      if (this.finished.get(agentId) !== sequence) continue;
+      const handle = lifecycle.handleOf(agentId);
+      if (handle === undefined) {
+        this.finished.delete(agentId);
+        continue;
+      }
+      if (isBusy(handle)) continue;
+      try {
+        await lifecycle.remove(agentId);
+      } catch (error) {
+        failure ??= { error };
+        continue;
+      }
+      if (this.finished.get(agentId) === sequence) this.finished.delete(agentId);
+      evicted.push(agentId);
+    }
+    if (failure !== undefined) throw failure.error;
+    return evicted;
+  }
+}
+
+export function resolveFinishedSubagentLimit(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = env[FINISHED_SUBAGENT_LIMIT_ENV];
+  if (raw === undefined || raw.trim() === '') return DEFAULT_FINISHED_SUBAGENT_LIMIT;
+  const value = Number(raw);
+  if (!Number.isInteger(value)) {
+    throw new Error2(
+      ErrorCodes.VALIDATION_FAILED,
+      `${FINISHED_SUBAGENT_LIMIT_ENV} must be an integer, got ${JSON.stringify(raw)}.`,
+      { details: { value: raw } },
+    );
+  }
+  return value < 1 ? DISABLED_FINISHED_SUBAGENT_LIMIT : value;
+}
+
 export class SessionSubagentService extends Service implements ISessionSubagentService {
   declare readonly _serviceBrand: undefined;
 
@@ -92,6 +191,9 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     new Emitter<AgentTaskStopHookContext>(),
   );
   private readonly reservedAgentNames = new Map<string, symbol>();
+  private readonly finishedRetention = new FinishedSubagentRetention(
+    resolveFinishedSubagentLimit(),
+  );
 
   get onDidStopAgentTask() {
     return this.onDidStopAgentTaskEmitter.event;
@@ -119,11 +221,53 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
         details: { agentId: agent.agentId },
       });
     }
-    return runAgentTurn(handle, request, {
+    const run = runAgentTurn(handle, request, {
       summaryPolicy: opts.summaryPolicy ?? this.summaryPolicyFor(handle),
       signal: opts.signal,
       onReady: opts.onReady,
     });
+    void run.then(
+      (started) => {
+        this.trackFinishedRun(agent.agentId, started.completion);
+      },
+      () => {
+        this.onAgentRunFinished(agent.agentId);
+      },
+    );
+    return run;
+  }
+
+  private trackFinishedRun(agentId: string, completion: Promise<unknown>): void {
+    void completion.then(
+      () => {
+        this.onAgentRunFinished(agentId);
+      },
+      (error: unknown) => {
+        if (isProviderUsageLimitError(error) || !isProviderRateLimitError(error)) {
+          this.onAgentRunFinished(agentId);
+        }
+      },
+    );
+  }
+
+  private onAgentRunFinished(agentId: string): void {
+    if (agentId === MAIN_AGENT_ID) return;
+    this.finishedRetention.markFinished(agentId);
+    void this.finishedRetention
+      .evictExcess(
+        {
+          handleOf: (targetId) => this.agentLifecycle.handleOf(targetId),
+          remove: async (targetId) => {
+            const target = this.agentLifecycle.handleOf(targetId);
+            if (target === undefined) return;
+            await this.agentLifecycle.remove(agentContextOf(target));
+          },
+        },
+        (target) => isFinishedAgentBusy(target),
+      )
+      .catch((error: unknown) => {
+        this.log.warn('finished subagent eviction failed', { agentId, error });
+      });
   }
 
   async planSpawn(input: SubagentSpawnPlanInput): Promise<SubagentSpawnPlan> {
@@ -233,6 +377,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     const resolved = await this.resolveDismissTargets(callerAgentId, targets);
     const dismissed: DismissedAgent[] = [];
     for (const { agentId, meta } of resolved) {
+      this.finishedRetention.forget(agentId);
       const handle = this.agentLifecycle.handleOf(agentId);
       if (handle !== undefined) await this.agentLifecycle.remove(agentContextOf(handle));
       await this.sessionMetadata.unregisterAgent(agentId);
@@ -512,6 +657,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
   }
 
   private async discardAgent(created: IAgentScopeHandle): Promise<void> {
+    this.finishedRetention.forget(created.id);
     await this.agentLifecycle.remove(agentContextOf(created));
     await this.sessionMetadata.unregisterAgent(created.id);
   }
@@ -534,9 +680,17 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     const view = new RuntimeWorkspaceView(runtime, {
       workDir: this.sessionContext.cwd,
     });
+    const identity = runtime.identity;
+    const process = runtime.process;
     return applyProfilePromptPrefix(profile, prompt, {
       cwd: view.workDir,
-      process: runtime.process!,
+      process:
+        process === undefined
+          ? UNAVAILABLE_GIT_PROCESS
+          : scopeGitContextProcess(
+              process,
+              `${identity.workspaceId}\0${identity.runtimeId}\0${identity.generation}`,
+            ),
       log: this.log,
     });
   }
@@ -560,6 +714,11 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
 
 function normalizeAgentTags(tags: readonly string[]): readonly string[] {
   return [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0))];
+}
+
+function isFinishedAgentBusy(handle: IAgentScopeHandle): boolean {
+  const status = handle.accessor.get(IAgentLoopService).status();
+  return status.state !== 'idle' || status.pendingTurnIds.length > 0 || status.hasPendingRequests;
 }
 
 registerScopedService(

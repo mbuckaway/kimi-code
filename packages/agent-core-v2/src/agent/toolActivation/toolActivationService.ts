@@ -20,6 +20,7 @@ export class AgentToolActivationService extends Service implements IAgentToolAct
   declare readonly _serviceBrand: undefined;
 
   private readonly registrations = new Map<AgentToolContribution, IDisposable>();
+  private activatedNames = new Set<string>();
 
   constructor(
     @IInstantiationService private readonly instantiationService: IInstantiationService,
@@ -48,12 +49,14 @@ export class AgentToolActivationService extends Service implements IAgentToolAct
   }
 
   activate(): Promise<void> {
-    this.activateRecords(this.contributions.items);
+    this.activatedNames = this.activateRecords(this.contributions.items);
+    this.deactivateInactive();
     return Promise.resolve();
   }
 
-  private activateRecords(records: readonly AgentToolContribution[]): void {
-    if (records.length === 0) return;
+  private activateRecords(records: readonly AgentToolContribution[]): Set<string> {
+    const activeNames = new Set<string>();
+    if (records.length === 0) return activeNames;
     const data = this.profile.data();
     const policy = { tools: data.activeToolNames, disallowedTools: data.disallowedTools };
     const workspaceVeto = { disallowedTools: this.toolPolicyGate.disabledTools };
@@ -61,7 +64,6 @@ export class AgentToolActivationService extends Service implements IAgentToolAct
       for (const record of records) {
         const { id, options } = record;
         const source = options.source ?? 'builtin';
-        if (this.toolRegistry.resolve(options.name) !== undefined) continue;
         if (!this.runtimeAllows(record)) continue;
         if (!isToolActive(workspaceVeto, options.name, source)) continue;
         const profilePolicy: ToolActivationPolicy =
@@ -69,7 +71,14 @@ export class AgentToolActivationService extends Service implements IAgentToolAct
             ? { disallowedTools: policy.disallowedTools }
             : policy;
         if (!isToolActive(profilePolicy, options.name, source)) continue;
+        const registered = this.toolRegistry.resolve(options.name) !== undefined;
+        if (registered && !this.registrations.has(record)) {
+          activeNames.add(options.name);
+          continue;
+        }
         if (options.when !== undefined && !options.when(accessor)) continue;
+        activeNames.add(options.name);
+        if (registered) continue;
         const tool = accessor.get(id);
         const registration = this.toolRegistry.register(tool, {
           source: options.source,
@@ -79,13 +88,23 @@ export class AgentToolActivationService extends Service implements IAgentToolAct
         this._register(registration);
       }
     });
+    return activeNames;
+  }
+
+  private deactivateInactive(): void {
+    for (const [record, registration] of this.registrations) {
+      if (this.activatedNames.has(record.options.name)) continue;
+      this.registrations.delete(record);
+      registration.dispose();
+    }
   }
 
   private refreshRuntimeRecords(): void {
     for (const record of this.contributions.items) {
       if (!this.runtimeAllows(record)) this.deactivateRecord(record);
     }
-    this.activateRecords(this.contributions.items);
+    this.activatedNames = this.activateRecords(this.contributions.items);
+    this.deactivateInactive();
   }
 
   private runtimeAllows(record: AgentToolContribution): boolean {
