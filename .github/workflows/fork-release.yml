@@ -262,21 +262,45 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          # Publish as a SINGLE-COMMIT orphan branch: every release appends
+          # ~292 MiB of platform zips, so a merge-on-top-of-tip publish grew the
+          # branch to 5 GiB of history for a 2 GiB tree. The tree keeps only the
+          # current version and the immediately previous one, so a client holding
+          # a `latest` cached from the prior release never hits a 404.
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           WORK=$(mktemp -d)
-          if git ls-remote --exit-code origin gh-pages >/dev/null 2>&1; then
-            git clone --depth 1 --branch gh-pages "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORK"
-          else
-            git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORK"
-            git -C "$WORK" checkout --orphan gh-pages
-            git -C "$WORK" rm -rf .
-          fi
-          cp -R dist-channel/. "$WORK"/
+          OLD=$(mktemp -d)
+          git -C "$WORK" init -q
+          git -C "$WORK" symbolic-ref HEAD refs/heads/gh-pages
+          git -C "$WORK" remote add origin "$URL"
           git -C "$WORK" config user.name "fork-release[bot]"
           git -C "$WORK" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp -R dist-channel/. "$WORK"/
+
+          OLD_SHA=""
+          OLD_TREE=""
+          if git ls-remote --exit-code origin gh-pages >/dev/null 2>&1; then
+            git clone -q --depth 1 --branch gh-pages "$URL" "$OLD"
+            OLD_SHA=$(git -C "$OLD" rev-parse HEAD)
+            OLD_TREE=$(git -C "$OLD" rev-parse 'HEAD^{tree}')
+            if [ -d "$OLD/binaries" ]; then
+              PREV=$(find "$OLD/binaries" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+                | grep -vx "$VERSION" | sort -V | tail -n 1) || PREV=""
+              if [ -n "$PREV" ] && [ -d "$OLD/binaries/$PREV" ]; then
+                cp -R "$OLD/binaries/$PREV" "$WORK/binaries/"
+              fi
+            fi
+          fi
+
           git -C "$WORK" add -A
-          if git -C "$WORK" diff --cached --quiet; then
+          NEW_TREE=$(git -C "$WORK" write-tree)
+          if [ "$NEW_TREE" = "$OLD_TREE" ]; then
             echo "Update channel already current"
             exit 0
           fi
-          git -C "$WORK" commit -m "chore: update channel $VERSION"
-          git -C "$WORK" push origin gh-pages
+          git -C "$WORK" commit -q -m "chore: update channel $VERSION"
+          if [ -n "$OLD_SHA" ]; then
+            git -C "$WORK" push --force-with-lease=refs/heads/gh-pages:"$OLD_SHA" origin HEAD:gh-pages
+          else
+            git -C "$WORK" push origin HEAD:gh-pages
+          fi
