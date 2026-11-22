@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   IAgentTaskService,
   type AgentTask,
+  type AgentTaskCapacity,
   type AgentTaskInfo,
   type AgentTaskOutputSnapshot,
   type AgentTaskStatus,
@@ -565,6 +566,10 @@ function createFakeTaskService(
         result.push(info);
       }
       return result;
+    },
+
+    capacity(): AgentTaskCapacity {
+      return { running: activeDetachedCount(), max: options.maxRunningTasks };
     },
 
     persistOutput(taskId: string): void {

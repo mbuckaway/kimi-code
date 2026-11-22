@@ -74,6 +74,8 @@ function makeStartupInput(): KimiTUIStartupInput {
   };
 }
 
+type ReplayMessageOrigin = Extract<AgentReplayRecord, { type: 'message' }>['message']['origin'];
+
 function message(
   role: Role,
   content: readonly ContentPart[],
@@ -92,7 +94,7 @@ function message(
       content: [...content],
       toolCalls: [...(extra.toolCalls ?? [])],
       toolCallId: extra.toolCallId,
-      origin: extra.origin as PromptOrigin | undefined,
+      origin: extra.origin as ReplayMessageOrigin,
       isError: extra.isError,
     },
   };

@@ -173,6 +173,8 @@ describe('default agent profiles', () => {
         'Edit',
         'Bash',
         'Agent',
+        'ListAgents',
+        'SendMessage',
         'Skill',
         'TaskList',
         'TaskOutput',
@@ -180,7 +182,10 @@ describe('default agent profiles', () => {
       ]),
     );
     expect(DEFAULT_AGENT_PROFILES['coder']?.tools).toEqual([
+      'AgentHealth',
+      'AgentResult',
       'Bash',
+      'BroadcastMessage',
       'CronCreate',
       'CronDelete',
       'CronList',
@@ -191,20 +196,37 @@ describe('default agent profiles', () => {
       'ExitSupermoonMode',
       'Glob',
       'Grep',
+      'ListAgents',
+      'ListMessages',
       'Read',
       'ReadMediaFile',
+      'ReplyMessage',
+      'SendMessage',
+      'StopAgent',
+      'StopAgents',
+      'InterruptAgent',
+      'DismissAgents',
+      'RenameAgent',
+      'TagAgent',
       'Skill',
       'TaskList',
       'TaskOutput',
       'TaskStop',
       'TodoList',
+      'WaitForAll',
       'WebSearch',
       'FetchURL',
       'Write',
       'mcp__*',
     ]);
     expect(DEFAULT_AGENT_PROFILES['explore']?.tools).not.toContain('Write');
+    expect(DEFAULT_AGENT_PROFILES['explore']?.tools).toEqual(
+      expect.arrayContaining(['ListAgents', 'SendMessage']),
+    );
     expect(DEFAULT_AGENT_PROFILES['plan']?.tools).not.toContain('Bash');
+    expect(DEFAULT_AGENT_PROFILES['plan']?.tools).toEqual(
+      expect.arrayContaining(['ListAgents', 'SendMessage']),
+    );
   });
 
   it('renders the model-invocable skill listing for bundled prompts', () => {

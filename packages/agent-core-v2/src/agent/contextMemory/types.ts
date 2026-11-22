@@ -103,6 +103,20 @@ export interface RetryOrigin {
   readonly trigger?: string;
 }
 
+export interface AgentMessageOrigin {
+  readonly kind: 'agent_message';
+  readonly from: string;
+  readonly replyTo?: string;
+}
+
+export interface SessionMessageOrigin {
+  readonly kind: 'session_message';
+  readonly fromSessionId: string;
+  readonly fromSessionTitle?: string;
+  readonly replyToSessionId?: string;
+  readonly replyToSessionTitle?: string;
+}
+
 export type PromptOrigin =
   | UserPromptOrigin
   | SkillActivationOrigin
@@ -115,7 +129,9 @@ export type PromptOrigin =
   | CronJobOrigin
   | CronMissedOrigin
   | HookResultOrigin
-  | RetryOrigin;
+  | RetryOrigin
+  | AgentMessageOrigin
+  | SessionMessageOrigin;
 
 export type ContextMessage = Message & {
   readonly id?: string;

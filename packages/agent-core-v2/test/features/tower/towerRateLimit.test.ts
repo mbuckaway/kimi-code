@@ -9,7 +9,7 @@ import {
 } from '#/features/tower/towerRateLimit';
 import {
   RATE_LIMIT_CAPACITY_RECOVERY_INTERVAL_MS,
-  TOWER_MAX_BUDGET,
+  TOWER_DEFAULT_MAX_RUNNING_AGENTS,
   TOWER_SPAWN_PAUSE_MS,
   TowerRateLimitService,
 } from '#/features/tower/towerRateLimitService';
@@ -31,8 +31,16 @@ describe('TowerRateLimitService', () => {
     return ix.get(ITowerRateLimitService).snapshot();
   }
 
+  it('defaults the running-agent ceiling to 256', () => {
+    expect(TOWER_DEFAULT_MAX_RUNNING_AGENTS).toBe(256);
+  });
+
   it('starts uncapped at the tower max budget with no pause', () => {
-    expect(snapshot()).toEqual({ budget: TOWER_MAX_BUDGET, inflight: 0, blockedUntil: null });
+    expect(snapshot()).toEqual({
+      budget: TOWER_DEFAULT_MAX_RUNNING_AGENTS,
+      inflight: 0,
+      blockedUntil: null,
+    });
   });
 
   it('acquire / release track inflight agents', () => {
@@ -124,12 +132,12 @@ describe('TowerRateLimitService', () => {
     expect(limiter.acquire().ok).toBe(true);
     limiter.reportRateLimited();
 
-    for (let i = 0; i < TOWER_MAX_BUDGET + 4; i += 1) {
+    for (let i = 0; i < TOWER_DEFAULT_MAX_RUNNING_AGENTS + 4; i += 1) {
       now += RATE_LIMIT_CAPACITY_RECOVERY_INTERVAL_MS;
       limiter.budget();
     }
 
-    expect(snapshot().budget).toBe(TOWER_MAX_BUDGET);
+    expect(snapshot().budget).toBe(TOWER_DEFAULT_MAX_RUNNING_AGENTS);
   });
 
   it('reset restores the pristine state', () => {
@@ -139,6 +147,10 @@ describe('TowerRateLimitService', () => {
 
     limiter.reset();
 
-    expect(snapshot()).toEqual({ budget: TOWER_MAX_BUDGET, inflight: 0, blockedUntil: null });
+    expect(snapshot()).toEqual({
+      budget: TOWER_DEFAULT_MAX_RUNNING_AGENTS,
+      inflight: 0,
+      blockedUntil: null,
+    });
   });
 });

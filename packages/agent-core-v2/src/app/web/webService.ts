@@ -11,7 +11,13 @@ import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { IProviderService } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
+import {
+  DEEPSEEK_PROVIDER,
+  IModelService,
+  activeModelProvidesWebSearch,
+} from '#/kosong/model/model';
 
+import { DeepseekFetchURLProvider } from './providers/deepseek-fetch-url';
 import { LocalFetchURLProvider } from './providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from './providers/moonshot-fetch-url';
 import type { UrlFetcher } from './tools/fetch-url-types';
@@ -27,12 +33,29 @@ export class WebFetchService implements IWebFetchService {
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IConfigService private readonly config: IConfigService,
     @IAgentIdentity private readonly identity: IAgentIdentity,
+    @IModelService private readonly models: IModelService,
   ) {
     this.localFetcher = new LocalFetchURLProvider();
   }
 
   getUrlFetcher(): UrlFetcher {
-    return this.fromServicesConfig() ?? this.fromManagedOAuth() ?? this.localFetcher;
+    return (
+      this.fromServicesConfig() ??
+      this.deepseekFetcher() ??
+      this.fromManagedOAuth() ??
+      this.localFetcher
+    );
+  }
+
+  private deepseekFetcher(): UrlFetcher | undefined {
+    const provider = this.providers.get(DEEPSEEK_PROVIDER);
+    const apiKey = nonEmptyString(provider?.apiKey);
+    if (apiKey === undefined || !activeModelProvidesWebSearch(this.models)) return undefined;
+    return new DeepseekFetchURLProvider({
+      apiKey,
+      baseUrl: nonEmptyString(provider?.baseUrl),
+      localFallback: this.localFetcher,
+    });
   }
 
   private fromServicesConfig(): UrlFetcher | undefined {

@@ -20,6 +20,7 @@ export interface ToolReference {
 export interface IAgentToolRegistryService {
   readonly _serviceBrand: undefined;
 
+  readonly revision?: number;
   register(tool: ExecutableTool, options?: ToolRegistrationOptions): IDisposable;
   list(): readonly ToolInfo[];
   listReferences(): readonly ToolReference[];

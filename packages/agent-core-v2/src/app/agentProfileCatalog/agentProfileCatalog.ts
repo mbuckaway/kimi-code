@@ -28,6 +28,8 @@ export interface AgentProfileContext {
   readonly pluginSections?: string;
   readonly productName?: string;
   readonly replyStyleGuide?: string;
+  readonly persona?: string;
+  readonly personaSkills?: readonly string[];
   readonly [key: string]: unknown;
 }
 
@@ -40,11 +42,26 @@ export interface SystemPromptRenderResult {
   readonly environment: EnvironmentDisclosureSnapshot;
 }
 
+export type AgentProfileMode = 'overlay' | 'replace';
+
+export interface PersonaBinding {
+  readonly mode: AgentProfileMode;
+  readonly text: string;
+  readonly skills?: readonly string[];
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly subagents?: readonly string[];
+}
+
 export interface AgentProfile {
   readonly name: string;
   readonly description?: string;
   readonly whenToUse?: string;
   readonly override?: boolean;
+  readonly mode?: AgentProfileMode;
+  readonly extends?: string;
+  readonly persona?: string;
+  readonly skills?: readonly string[];
   readonly tools?: readonly string[];
   readonly disallowedTools?: readonly string[];
   readonly subagents?: readonly string[];

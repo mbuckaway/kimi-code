@@ -1,37 +1,69 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Readable } from 'node:stream';
+
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { Event } from '#/_base/event';
+import type { ILogger } from '#/_base/log/log';
 import { LifecycleScope } from '#/app/scopes';
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
+import { getContributedFlags } from '#/app/flag/flagRegistry';
 import { ILogService } from '#/_base/log/log';
 import {
   normalizeAgentProfile,
   type AgentProfile,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import type { AgentContext } from '#/agent/agentContext/agentContext';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
+import { IAgentPromptService } from '#/agent/prompt/prompt';
+import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
-import { Error2, ErrorCodes, isError2 } from '#/errors';
+import { Error2, ErrorCodes, errorInfo, isError2 } from '#/errors';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
+import { IHostFileSystem, type HostFileStat } from '#/os/interface/hostFileSystem';
+import { HostFsError, OsFsErrors } from '#/os/interface/hostFsErrors';
 import { FakeRuntime } from '#/runtime/fakeRuntime';
 import type { RuntimeLease } from '#/runtime/runtime';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
-import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionMetadata,
+  type AgentMeta,
+  type SessionMeta,
+} from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { SECONDARY_MODEL_SECTION } from '#/session/subagent/configSection';
-import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { AGENT_PERSONA_FLAG_ID, SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { PERSONA_FILE_MAX_BYTES } from '#/session/subagent/persona';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
-import { SessionSubagentService } from '#/session/subagent/subagentService';
+import {
+  DEFAULT_FINISHED_SUBAGENT_LIMIT,
+  FINISHED_SUBAGENT_LIMIT_ENV,
+  FinishedSubagentRetention,
+  type FinishedAgentLifecycle,
+  resolveFinishedSubagentLimit,
+  SessionSubagentService,
+} from '#/session/subagent/subagentService';
+import {
+  clearGitContextCache,
+  collectGitContext,
+  scopeGitContextProcess,
+} from '#/session/agentLifecycle/profile/gitContext';
+import type { IHostProcess, IHostProcessService } from '#/os/interface/hostProcess';
 import {
   FORK_CONTEXT_NOTICE,
+  PERSONA_EXPERIMENTAL_UNAVAILABLE,
+  PERSONA_WITH_FORK_UNAVAILABLE,
   type SpawnedSubagent,
   type SpawnSubagentOptions,
   type SubagentSpawnPlan,
@@ -45,6 +77,25 @@ import { stubAgentContext } from '../../agent/agentContext/stubs';
 
 const CALLER_ID = 'main';
 
+const PATH_PERSONA_TEXT = [
+  '---',
+  'name: security-review',
+  'description: Security review persona',
+  'extends: coder',
+  'tools: Read, Grep',
+  'disallowedTools: Bash',
+  'subagents: explore',
+  '---',
+  'You audit code for security issues.',
+].join('\n');
+
+const REGULAR_FILE_STAT: HostFileStat = {
+  isFile: true,
+  isDirectory: false,
+  isSymbolicLink: false,
+  size: 128,
+};
+
 describe('SessionSubagentService planSpawn and spawn', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -54,7 +105,9 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   let modelMeta: Map<string, Partial<Model>>;
   let caller: IAgentScopeHandle;
   let createdHandles: Map<string, IAgentScopeHandle>;
-  let createAgent: ReturnType<typeof vi.fn>;
+  let createAgent: Mock<
+    (input?: { readonly agentId?: string }) => Promise<ReturnType<typeof stubAgentContext>>
+  >;
   let forkAgent: ReturnType<typeof vi.fn>;
   let acquireRuntime: ReturnType<typeof vi.fn>;
   let callerPermissionMode: { mode: string; setMode: ReturnType<typeof vi.fn> };
@@ -62,6 +115,19 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   let callerUserTools: IAgentUserToolService;
   let createdUserTools: IAgentUserToolService;
   let lease: RuntimeLease;
+  let sessionAgents: Record<string, AgentMeta>;
+  let removeAgent: Mock<(context: AgentContext) => Promise<void>>;
+  let unregisterAgent: Mock<(agentId: string) => Promise<void>>;
+  let registerAgent: ReturnType<typeof vi.fn>;
+  let hostFs: {
+    lstat: Mock<(path: string) => Promise<HostFileStat>>;
+    readText: Mock<(path: string) => Promise<string>>;
+    realpath: Mock<(path: string) => Promise<string>>;
+  };
+  let workspaceContext: {
+    resolve: Mock<(rel: string) => string>;
+    assertAllowed: Mock<(path: string, op: string) => string>;
+  };
 
   function userToolsStub(): IAgentUserToolService {
     return {
@@ -81,7 +147,27 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     } as unknown as IAgentProfileService;
   }
 
-  function createdHandle(agentId: string): IAgentScopeHandle {
+  const idleLoopStatus: {
+    readonly state: 'idle' | 'running';
+    readonly pendingTurnIds: readonly number[];
+    readonly hasPendingRequests: boolean;
+  } = { state: 'idle', pendingTurnIds: [], hasPendingRequests: false };
+
+  function createdHandle(
+    agentId: string,
+    loopStatus: {
+      readonly state: 'idle' | 'running';
+      readonly pendingTurnIds: readonly number[];
+      readonly hasPendingRequests: boolean;
+    } = idleLoopStatus,
+  ): IAgentScopeHandle {
+    const turn = {
+      id: 1,
+      signal: new AbortController().signal,
+      ready: Promise.resolve(),
+      result: Promise.resolve({ type: 'completed' as const, steps: 0, truncated: false }),
+      cancel: () => true,
+    };
     return {
       id: agentId,
       kind: LifecycleScope.Agent,
@@ -92,6 +178,26 @@ describe('SessionSubagentService planSpawn and spawn', () => {
           }
           if (serviceId === IAgentPermissionModeService) return createdPermissionMode;
           if (serviceId === IAgentUserToolService) return createdUserTools;
+          if (serviceId === IAgentScopeContext) {
+            return makeAgentScopeContext({ agentId, agentScope: `agents/${agentId}` });
+          }
+          if (serviceId === IAgentPromptService) {
+            return {
+              _serviceBrand: undefined,
+              enqueue: vi.fn(async () => ({ launched: Promise.resolve(turn) })),
+              retry: vi.fn(async () => turn),
+            };
+          }
+          if (serviceId === IAgentLoopService) {
+            return {
+              _serviceBrand: undefined,
+              cancel: vi.fn(() => true),
+              status: () => loopStatus,
+            };
+          }
+          if (serviceId === IAgentContextMemoryService) {
+            return { _serviceBrand: undefined, get: () => [] };
+          }
           return undefined;
         },
       } as IAgentScopeHandle['accessor'],
@@ -102,6 +208,12 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   beforeEach(() => {
     disposables = new DisposableStore();
     ix = disposables.add(new TestInstantiationService());
+    sessionAgents = { main: { type: 'main' } };
+    removeAgent = vi.fn(async () => {});
+    unregisterAgent = vi.fn(async () => {});
+    registerAgent = vi.fn(async (agentId: string, meta: AgentMeta) => {
+      sessionAgents[agentId] = meta;
+    });
     callerData = {
       profileName: 'orchestrator',
       modelAlias: 'main-model',
@@ -164,6 +276,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     createAgent = vi.fn(async (input: { readonly agentId?: string } = {}) => {
       const agentId = input.agentId ?? 'agent-child';
       createdHandles.set(agentId, createdHandle(agentId));
+      sessionAgents[agentId] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
       return stubAgentContext(agentId, 1);
     });
     forkAgent = vi.fn(async () => {
@@ -181,8 +294,11 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       get: (agentId: string) => (agentId === CALLER_ID ? stubAgentContext(CALLER_ID, 1) : undefined),
       handleOf: (agentId: string) =>
         agentId === CALLER_ID ? caller : createdHandles.get(agentId),
-      list: () => [stubAgentContext(CALLER_ID, 1)],
-      remove: async () => {},
+      list: () => [
+        stubAgentContext(CALLER_ID, 1),
+        ...[...createdHandles.keys()].map((agentId) => stubAgentContext(agentId, 1)),
+      ],
+      remove: removeAgent,
       broadcastPermissionMode: () => {},
     } as unknown as IAgentLifecycleService);
     ix.stub(ISessionAgentProfileCatalog, {
@@ -209,7 +325,51 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       },
     } as unknown as IModelCatalog);
     ix.stub(ISessionContext, { _serviceBrand: undefined, cwd: '/repo' } as unknown as ISessionContext);
+    ix.stub(ISessionMetadata, {
+      _serviceBrand: undefined,
+      ready: Promise.resolve(),
+      onDidChangeMetadata: Event.None,
+      read: vi.fn(
+        async () =>
+          ({
+            id: 'session-1',
+            createdAt: 0,
+            updatedAt: 0,
+            archived: false,
+            agents: { ...sessionAgents },
+          }) as SessionMeta,
+      ),
+      update: async () => {},
+      setTitle: async () => {},
+      setGeneratedTitleIfUncustomized: async () => false,
+      setArchived: async () => {},
+      registerAgent,
+      unregisterAgent,
+    } as ISessionMetadata);
     ix.stub(ILogService, stubLog());
+    hostFs = {
+      lstat: vi.fn(async () => REGULAR_FILE_STAT),
+      readText: vi.fn(async () => PATH_PERSONA_TEXT),
+      realpath: vi.fn(async (path: string) => path),
+    };
+    workspaceContext = {
+      resolve: vi.fn((rel: string) => `/repo/${rel}`),
+      assertAllowed: vi.fn((path: string) => path),
+    };
+    ix.stub(IHostFileSystem, {
+      _serviceBrand: undefined,
+      lstat: hostFs.lstat,
+      readText: hostFs.readText,
+      realpath: hostFs.realpath,
+    } as unknown as IHostFileSystem);
+    ix.stub(ISessionWorkspaceContext, {
+      _serviceBrand: undefined,
+      workDir: '/repo',
+      additionalDirs: [],
+      isWithin: () => true,
+      resolve: workspaceContext.resolve,
+      assertAllowed: workspaceContext.assertAllowed,
+    } as unknown as ISessionWorkspaceContext);
   });
 
   afterEach(() => {
@@ -219,11 +379,16 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   function service(
     configValues: Record<string, unknown> = {},
     secondaryModelEnabled = false,
+    agentPersonaEnabled = false,
   ): ISessionSubagentService {
     ix.stub(IConfigService, new StubConfigService(configValues));
     ix.stub(
       IFlagService,
-      stubFlag((id) => secondaryModelEnabled && id === SECONDARY_MODEL_FLAG_ID),
+      stubFlag(
+        (id) =>
+          (secondaryModelEnabled && id === SECONDARY_MODEL_FLAG_ID) ||
+          (agentPersonaEnabled && id === AGENT_PERSONA_FLAG_ID),
+      ),
     );
     ix.set(ISessionSubagentService, new SyncDescriptor(SessionSubagentService));
     return ix.get(ISessionSubagentService);
@@ -669,5 +834,1787 @@ describe('SessionSubagentService planSpawn and spawn', () => {
 
     expect(createAgent).not.toHaveBeenCalled();
     expect(forkAgent).not.toHaveBeenCalled();
+  });
+
+  function spawnNamed(svc: ISessionSubagentService, name: string): Promise<SpawnedSubagent> {
+    return svc.spawn({
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      labels: { parentAgentId: 'main' },
+      prompt: 'Review the file',
+      name,
+    });
+  }
+
+  it('rejects the reserved root name case-insensitively', async () => {
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'MAIN',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_RESERVED);
+    expect(error.message).toBe('The name "main" is reserved for the root agent.');
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a name that looks like an agent id', async () => {
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'agent-12',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_INVALID);
+    expect(error.message).toBe('Agent names must not look like an agent id ("agent-12").');
+  });
+
+  it.each(['has space', 'emoji🚀', 'slash/name', ''])(
+    'rejects the invalid agent name %j',
+    async (name) => {
+      const svc = service();
+
+      const error = await spawnError(svc, {
+        callerAgentId: CALLER_ID,
+        plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+        prompt: 'Review the file',
+        name,
+      });
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NAME_INVALID);
+      expect(error.message).toContain('must be 1-64 characters of letters, digits, ".", "_" or "-"');
+    },
+  );
+
+  it('accepts a 64-character name and rejects 65', async () => {
+    const svc = service();
+
+    await expect(spawnNamed(svc, 'a'.repeat(64))).resolves.toMatchObject({ profileName: 'coder' });
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'a'.repeat(65),
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_INVALID);
+  });
+
+  it('stores the addressable name as a label on the created agent', async () => {
+    const svc = service();
+
+    await spawnNamed(svc, ' scout ');
+
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ labels: { parentAgentId: 'main', name: 'scout' } }),
+    );
+  });
+
+  it('rejects a name already held by another subagent', async () => {
+    sessionAgents['agent-4'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'scout',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_TAKEN);
+    expect(error.message).toBe('An agent named "scout" already exists (agent-4).');
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a name held by a parallel in-flight spawn', async () => {
+    createAgent.mockImplementationOnce(() => new Promise<never>(() => {}));
+    const svc = service();
+    void spawnNamed(svc, 'scout');
+    await vi.waitFor(() => {
+      expect(createAgent).toHaveBeenCalledTimes(1);
+    });
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'scout',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_TAKEN);
+    expect(error.message).toBe(
+      'An agent named "scout" is already reserved by an in-flight spawn.',
+    );
+  });
+
+  it('reserves a name before the persisted-metadata uniqueness read', async () => {
+    let releaseRead: (() => void) | undefined;
+    const metadata = ix.get(ISessionMetadata) as unknown as {
+      read: Mock<() => Promise<SessionMeta>>;
+    };
+    metadata.read.mockImplementation(
+      () =>
+        new Promise<SessionMeta>((resolve) => {
+          releaseRead = () => {
+            resolve({
+              id: 'session-1',
+              createdAt: 0,
+              updatedAt: 0,
+              archived: false,
+              agents: { ...sessionAgents },
+            });
+          };
+        }),
+    );
+    createAgent.mockImplementationOnce(() => new Promise<never>(() => {}));
+    const svc = service();
+    void spawnNamed(svc, 'scout');
+    await Promise.resolve();
+
+    const outcome = await Promise.race([
+      spawnError(svc, {
+        callerAgentId: CALLER_ID,
+        plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+        prompt: 'Review the file',
+        name: 'scout',
+      }).then((error) => error.message),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 100)),
+    ]);
+    releaseRead?.();
+
+    expect(outcome).toBe('An agent named "scout" is already reserved by an in-flight spawn.');
+  });
+
+  it('describes the agent name error codes', () => {
+    expect(errorInfo(ErrorCodes.AGENT_NAME_INVALID)).toMatchObject({
+      title: 'Invalid agent name',
+      retryable: false,
+    });
+    expect(errorInfo(ErrorCodes.AGENT_NAME_RESERVED)).toMatchObject({
+      title: 'That agent name is reserved',
+      retryable: false,
+    });
+    expect(errorInfo(ErrorCodes.AGENT_NAME_TAKEN)).toMatchObject({
+      title: 'That agent name is already in use',
+      retryable: false,
+    });
+  });
+
+  it('tears down a spawn that loses the name race to an earlier agent id', async () => {
+    createAgent.mockImplementationOnce(async () => {
+      sessionAgents['agent-8'] = {
+        type: 'sub',
+        labels: { parentAgentId: 'main', name: 'scout' },
+      };
+      createdHandles.set('agent-9', createdHandle('agent-9'));
+      sessionAgents['agent-9'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+      return stubAgentContext('agent-9', 1);
+    });
+    const svc = service();
+
+    const error = await spawnError(svc, {
+      callerAgentId: CALLER_ID,
+      plan: { profileName: 'coder', model: 'provider/fast', thinking: 'low', fork: false },
+      prompt: 'Review the file',
+      name: 'scout',
+    });
+
+    expect(error.code).toBe(ErrorCodes.AGENT_NAME_TAKEN);
+    expect(error.message).toBe('An agent named "scout" already exists (agent-8).');
+    expect(removeAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'agent-9' }),
+    );
+    expect(unregisterAgent).toHaveBeenCalledWith('agent-9');
+  });
+
+  it('keeps a spawn that wins the name race against a later agent id', async () => {
+    createAgent.mockImplementationOnce(async () => {
+      createdHandles.set('agent-2', createdHandle('agent-2'));
+      sessionAgents['agent-2'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+      sessionAgents['agent-9'] = { type: 'sub', labels: { parentAgentId: 'main', name: 'scout' } };
+      return stubAgentContext('agent-2', 1);
+    });
+    const svc = service();
+
+    await expect(spawnNamed(svc, 'scout')).resolves.toMatchObject({ agentId: 'agent-2' });
+
+    expect(removeAgent).not.toHaveBeenCalled();
+    expect(unregisterAgent).not.toHaveBeenCalled();
+  });
+
+  describe('SessionSubagentService agent mutations', () => {
+    function addSubagent(agentId: string, labels: Record<string, string> = {}): void {
+      sessionAgents[agentId] = { type: 'sub', labels: { parentAgentId: CALLER_ID, ...labels } };
+    }
+
+    function attachHandle(agentId: string): void {
+      createdHandles.set(agentId, createdHandle(agentId));
+    }
+
+    async function failure(action: Promise<unknown>): Promise<Error2> {
+      try {
+        await action;
+      } catch (error) {
+        if (!isError2(error)) throw error;
+        return error;
+      }
+      throw new Error('expected the call to throw');
+    }
+
+    it('dismisses a child by id, removing the handle before unregistering metadata', async () => {
+      expect.assertions(4);
+      const order: string[] = [];
+      removeAgent.mockImplementation(async () => {
+        order.push('remove');
+      });
+      unregisterAgent.mockImplementation(async () => {
+        order.push('unregister');
+      });
+      addSubagent('agent-2');
+      attachHandle('agent-2');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { ids: ['agent-2'] });
+
+      expect(result.dismissed).toEqual([{ agentId: 'agent-2', ghost: false }]);
+      expect(order).toEqual(['remove', 'unregister']);
+      expect(removeAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: 'agent-2' }),
+      );
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-2');
+    });
+
+    it('dismisses a ghost child by only unregistering its metadata', async () => {
+      expect.assertions(3);
+      addSubagent('agent-2');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { ids: ['agent-2'] });
+
+      expect(result.dismissed).toEqual([{ agentId: 'agent-2', ghost: true }]);
+      expect(removeAgent).not.toHaveBeenCalled();
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-2');
+    });
+
+    it('dismisses every directly owned child and never main or a sibling', async () => {
+      expect.assertions(7);
+      addSubagent('agent-1');
+      addSubagent('agent-2', { parentAgentId: 'agent-1' });
+      addSubagent('agent-3', { parentAgentId: 'agent-1' });
+      addSubagent('agent-4');
+      attachHandle('agent-2');
+      attachHandle('agent-3');
+      attachHandle('agent-4');
+      const svc = service();
+
+      const result = await svc.dismissAgents('agent-1', { all: true });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual(['agent-2', 'agent-3']);
+      expect(removeAgent).toHaveBeenCalledTimes(2);
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-2');
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-3');
+      expect(unregisterAgent).not.toHaveBeenCalledWith('main');
+      expect(unregisterAgent).not.toHaveBeenCalledWith('agent-4');
+      expect(removeAgent).not.toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: 'main' }),
+      );
+    });
+
+    it('dismissAgents_parentWithGrandchildren_dismissesTheWholeSubtreeChildFirst', async () => {
+      expect.assertions(5);
+      const order: string[] = [];
+      removeAgent.mockImplementation(async (context) => {
+        order.push(`remove:${context.agentId}`);
+      });
+      unregisterAgent.mockImplementation(async (agentId) => {
+        order.push(`unregister:${agentId}`);
+        delete sessionAgents[agentId];
+      });
+      addSubagent('agent-2');
+      addSubagent('agent-4', { parentAgentId: 'agent-2' });
+      addSubagent('agent-5', { parentAgentId: 'agent-4' });
+      attachHandle('agent-2');
+      attachHandle('agent-4');
+      attachHandle('agent-5');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { ids: ['agent-2'] });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual([
+        'agent-5',
+        'agent-4',
+        'agent-2',
+      ]);
+      expect(order).toEqual([
+        'remove:agent-5',
+        'unregister:agent-5',
+        'remove:agent-4',
+        'unregister:agent-4',
+        'remove:agent-2',
+        'unregister:agent-2',
+      ]);
+      expect(removeAgent).toHaveBeenCalledTimes(3);
+      expect(unregisterAgent).toHaveBeenCalledTimes(3);
+      expect(Object.keys(sessionAgents).filter((agentId) => agentId !== 'main')).toEqual([]);
+    });
+
+    it('dismissAgents_allInCallerSubtree_clearsEveryGeneration', async () => {
+      expect.assertions(4);
+      addSubagent('agent-1');
+      addSubagent('agent-2', { parentAgentId: 'agent-1' });
+      addSubagent('agent-3', { parentAgentId: 'agent-1' });
+      addSubagent('agent-4', { parentAgentId: 'agent-2' });
+      addSubagent('agent-5');
+      attachHandle('agent-2');
+      attachHandle('agent-3');
+      attachHandle('agent-4');
+      attachHandle('agent-5');
+      const svc = service();
+
+      const result = await svc.dismissAgents('agent-1', { all: true });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual([
+        'agent-4',
+        'agent-2',
+        'agent-3',
+      ]);
+      expect(unregisterAgent).toHaveBeenCalledTimes(3);
+      expect(unregisterAgent).not.toHaveBeenCalledWith('agent-5');
+      expect(unregisterAgent).not.toHaveBeenCalledWith('main');
+    });
+
+    it('dismissAgents_all_sweepsALiveForkedSideQuestionChild', async () => {
+      expect.assertions(3);
+      addSubagent('agent-2');
+      sessionAgents['agent-7'] = { type: 'sub', parentAgentId: CALLER_ID, forkedFrom: CALLER_ID };
+      attachHandle('agent-2');
+      attachHandle('agent-7');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { all: true });
+
+      expect(result.dismissed.map((entry) => [entry.agentId, entry.ghost])).toEqual([
+        ['agent-2', false],
+        ['agent-7', false],
+      ]);
+      expect(removeAgent).toHaveBeenCalledTimes(2);
+      expect(removeAgent).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-7' }));
+    });
+
+    it('dismissAgents_grandchildByDeepestName_dismissesThatSubtree', async () => {
+      expect.assertions(4);
+      addSubagent('agent-2');
+      addSubagent('agent-4', { parentAgentId: 'agent-2' });
+      addSubagent('agent-5', { parentAgentId: 'agent-4', name: 'deep' });
+      addSubagent('agent-6', { parentAgentId: 'agent-5' });
+      attachHandle('agent-5');
+      attachHandle('agent-6');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { names: ['deep'] });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual(['agent-6', 'agent-5']);
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-6');
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-5');
+      expect(unregisterAgent).not.toHaveBeenCalledWith('agent-4');
+    });
+
+    it('dismissAgents_targetOutsideCallerSubtree_rejectsAndLeavesTheTreeIntact', async () => {
+      expect.assertions(4);
+      addSubagent('agent-1');
+      addSubagent('agent-2', { parentAgentId: 'agent-1' });
+      addSubagent('agent-4');
+      addSubagent('agent-5', { parentAgentId: 'agent-4', name: 'cousin' });
+      attachHandle('agent-2');
+      attachHandle('agent-5');
+      const svc = service();
+
+      const error = await failure(svc.dismissAgents('agent-1', { ids: ['agent-5'] }));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_OWNED);
+      expect(error.message).toBe('Agent "agent-5" is not owned by "agent-1".');
+      expect(removeAgent).not.toHaveBeenCalled();
+      expect(unregisterAgent).not.toHaveBeenCalled();
+    });
+
+    it('dismisses a child addressed by its name', async () => {
+      expect.assertions(2);
+      addSubagent('agent-2', { name: 'scout' });
+      attachHandle('agent-2');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { names: [' scout '] });
+
+      expect(result.dismissed).toEqual([{ agentId: 'agent-2', name: 'scout', ghost: false }]);
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-2');
+    });
+
+    it('returns the dismissals in ids-then-names order', async () => {
+      expect.assertions(1);
+      addSubagent('agent-2', { name: 'scout' });
+      addSubagent('agent-3', { name: 'reviewer' });
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, {
+        ids: ['agent-3'],
+        names: ['scout'],
+      });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual(['agent-3', 'agent-2']);
+    });
+
+    it('de-duplicates a target requested by both id and name', async () => {
+      expect.assertions(3);
+      addSubagent('agent-2', { name: 'scout' });
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, {
+        ids: ['agent-2'],
+        names: ['scout'],
+      });
+
+      expect(result.dismissed).toHaveLength(1);
+      expect(unregisterAgent).toHaveBeenCalledTimes(1);
+      expect(unregisterAgent).toHaveBeenCalledWith('agent-2');
+    });
+
+    it('validates every target before mutating anything when one id is not owned', async () => {
+      expect.assertions(4);
+      addSubagent('agent-2');
+      attachHandle('agent-2');
+      sessionAgents['agent-5'] = { type: 'sub', labels: { parentAgentId: 'agent-9' } };
+      const svc = service();
+
+      const error = await failure(
+        svc.dismissAgents(CALLER_ID, { ids: ['agent-2', 'agent-5'] }),
+      );
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_OWNED);
+      expect(error.message).toBe('Agent "agent-5" is not owned by "main".');
+      expect(removeAgent).not.toHaveBeenCalled();
+      expect(unregisterAgent).not.toHaveBeenCalled();
+    });
+
+    it('validates every target before mutating anything when one id is unknown', async () => {
+      expect.assertions(4);
+      addSubagent('agent-2');
+      attachHandle('agent-2');
+      const svc = service();
+
+      const error = await failure(
+        svc.dismissAgents(CALLER_ID, { ids: ['agent-2', 'agent-404'] }),
+      );
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_FOUND);
+      expect(error.details).toEqual({ agentId: 'agent-404' });
+      expect(removeAgent).not.toHaveBeenCalled();
+      expect(unregisterAgent).not.toHaveBeenCalled();
+    });
+
+    it('rejects dismissing the caller itself', async () => {
+      expect.assertions(2);
+      addSubagent('agent-1');
+      const svc = service();
+
+      const error = await failure(svc.dismissAgents('agent-1', { ids: ['agent-1'] }));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_OWNED);
+      expect(error.message).toBe('An agent cannot target itself.');
+    });
+
+    it('rejects dismissing the root agent', async () => {
+      expect.assertions(3);
+      const svc = service();
+
+      const error = await failure(svc.dismissAgents(CALLER_ID, { ids: ['main'] }));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_A_SUBAGENT);
+      expect(error.message).toBe('The root agent "main" is not a subagent.');
+      expect(removeAgent).not.toHaveBeenCalled();
+    });
+
+    it('rejects dismissing an unknown agent id', async () => {
+      expect.assertions(3);
+      const svc = service();
+
+      const error = await failure(svc.dismissAgents(CALLER_ID, { ids: ['agent-404'] }));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_FOUND);
+      expect(error.message).toBe('Agent "agent-404" does not exist.');
+      expect(error.details).toEqual({ agentId: 'agent-404' });
+    });
+
+    it('returns no dismissals when no target is requested', async () => {
+      expect.assertions(3);
+      addSubagent('agent-2');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, {});
+
+      expect(result).toEqual({ dismissed: [] });
+      expect(removeAgent).not.toHaveBeenCalled();
+      expect(unregisterAgent).not.toHaveBeenCalled();
+    });
+
+    it('writes normalized tags to the agent labels', async () => {
+      expect.assertions(2);
+      addSubagent('agent-2', { name: 'scout' });
+      const svc = service();
+
+      const result = await svc.setAgentTags(CALLER_ID, 'agent-2', [
+        ' a ',
+        'b',
+        '',
+        'a',
+        ' b ',
+      ]);
+
+      expect(result).toEqual({ agentId: 'agent-2', name: 'scout', tags: ['a', 'b'] });
+      expect(registerAgent).toHaveBeenCalledWith('agent-2', {
+        type: 'sub',
+        labels: { parentAgentId: 'main', name: 'scout', tags: 'a,b' },
+      });
+    });
+
+    it('writes a single tag', async () => {
+      expect.assertions(2);
+      addSubagent('agent-2');
+      const svc = service();
+
+      const result = await svc.setAgentTags(CALLER_ID, 'agent-2', ['solo']);
+
+      expect(result.tags).toEqual(['solo']);
+      expect(registerAgent).toHaveBeenCalledWith('agent-2', {
+        type: 'sub',
+        labels: { parentAgentId: 'main', tags: 'solo' },
+      });
+    });
+
+    it('removes the tags key when the new tag list is empty', async () => {
+      expect.assertions(3);
+      addSubagent('agent-2', { tags: 'old' });
+      const svc = service();
+
+      const result = await svc.setAgentTags(CALLER_ID, 'agent-2', []);
+
+      expect(result.name).toBeUndefined();
+      expect(result.tags).toEqual([]);
+      expect(registerAgent).toHaveBeenCalledWith('agent-2', {
+        type: 'sub',
+        labels: { parentAgentId: 'main' },
+      });
+    });
+
+    it('rejects tagging a non-owned agent without writing', async () => {
+      expect.assertions(2);
+      sessionAgents['agent-5'] = { type: 'sub', labels: { parentAgentId: 'agent-9' } };
+      const svc = service();
+
+      const error = await failure(svc.setAgentTags(CALLER_ID, 'agent-5', ['a']));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_OWNED);
+      expect(registerAgent).not.toHaveBeenCalled();
+    });
+
+    it('renames an owned agent and writes the normalized name', async () => {
+      expect.assertions(2);
+      addSubagent('agent-2', { tags: 'a,b' });
+      const svc = service();
+
+      const result = await svc.renameAgent(CALLER_ID, 'agent-2', ' scout ');
+
+      expect(result).toEqual({ agentId: 'agent-2', name: 'scout', tags: ['a', 'b'] });
+      expect(registerAgent).toHaveBeenCalledWith('agent-2', {
+        type: 'sub',
+        labels: { parentAgentId: 'main', tags: 'a,b', name: 'scout' },
+      });
+    });
+
+    it('does not write when the agent already has the requested name', async () => {
+      expect.assertions(2);
+      addSubagent('agent-2', { name: 'scout' });
+      const svc = service();
+
+      const result = await svc.renameAgent(CALLER_ID, 'agent-2', ' scout ');
+
+      expect(result).toEqual({ agentId: 'agent-2', name: 'scout', tags: [] });
+      expect(registerAgent).not.toHaveBeenCalled();
+    });
+
+    it('rejects a name already held by another subagent without writing', async () => {
+      expect.assertions(3);
+      addSubagent('agent-2');
+      addSubagent('agent-3', { name: 'scout' });
+      const svc = service();
+
+      const error = await failure(svc.renameAgent(CALLER_ID, 'agent-2', 'scout'));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NAME_TAKEN);
+      expect(error.message).toBe('An agent named "scout" already exists (agent-3).');
+      expect(registerAgent).not.toHaveBeenCalled();
+    });
+
+    it('releases the name reservation after a rename', async () => {
+      expect.assertions(1);
+      addSubagent('agent-2');
+      addSubagent('agent-3', { name: 'scout' });
+      const svc = service();
+      await svc.renameAgent(CALLER_ID, 'agent-3', 'scout-2');
+
+      const result = await svc.renameAgent(CALLER_ID, 'agent-2', 'scout');
+
+      expect(result.name).toBe('scout');
+    });
+
+    it.each<[string, string, string]>([
+      [
+        'main',
+        ErrorCodes.AGENT_NAME_RESERVED,
+        'The name "main" is reserved for the root agent.',
+      ],
+      [
+        'agent-12',
+        ErrorCodes.AGENT_NAME_INVALID,
+        'Agent names must not look like an agent id ("agent-12").',
+      ],
+    ])('rejects renaming to the invalid name %j', async (name, code, message) => {
+      addSubagent('agent-2');
+      const svc = service();
+
+      const error = await failure(svc.renameAgent(CALLER_ID, 'agent-2', name));
+
+      expect(error.code).toBe(code);
+      expect(error.message).toBe(message);
+      expect(registerAgent).not.toHaveBeenCalled();
+    });
+
+    it('rejects renaming an unknown target', async () => {
+      expect.assertions(2);
+      const svc = service();
+
+      const error = await failure(svc.renameAgent(CALLER_ID, 'agent-404', 'scout'));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_FOUND);
+      expect(error.details).toEqual({ agentId: 'agent-404' });
+    });
+
+    it('rejects a main-typed agent addressed by its entry id', async () => {
+      expect.assertions(3);
+      sessionAgents['agent-root'] = { type: 'main' };
+      const svc = service();
+
+      const error = await failure(svc.dismissAgents(CALLER_ID, { ids: ['agent-root'] }));
+
+      expect(error.code).toBe(ErrorCodes.AGENT_NOT_A_SUBAGENT);
+      expect(error.message).toBe('Agent "agent-root" is not a subagent.');
+      expect(unregisterAgent).not.toHaveBeenCalled();
+    });
+
+    it('resolves a duplicated owned name to the first agent id', async () => {
+      expect.assertions(2);
+      addSubagent('agent-2', { name: 'scout' });
+      addSubagent('agent-3', { name: 'scout' });
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { names: ['scout'] });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual(['agent-2']);
+      expect(unregisterAgent).toHaveBeenCalledTimes(1);
+    });
+
+    it('de-duplicates ids already selected by all', async () => {
+      expect.assertions(2);
+      addSubagent('agent-2');
+      addSubagent('agent-3');
+      const svc = service();
+
+      const result = await svc.dismissAgents(CALLER_ID, { ids: ['agent-3'], all: true });
+
+      expect(result.dismissed.map((entry) => entry.agentId)).toEqual(['agent-3', 'agent-2']);
+      expect(unregisterAgent).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('SessionSubagentService persona', () => {
+    function enablePersona(): ISessionSubagentService {
+      return service({}, false, true);
+    }
+
+    function addPersonaProfile(overrides: {
+      readonly name: string;
+      readonly extends?: string;
+      readonly persona?: string;
+      readonly mode?: 'overlay' | 'replace';
+      readonly tools?: readonly string[];
+      readonly disallowedTools?: readonly string[];
+      readonly subagents?: readonly string[];
+    }): void {
+      profiles.push(normalizeAgentProfile({ systemPrompt: () => 'catalog persona', ...overrides }));
+    }
+
+    function addSecurityPersona(): void {
+      addPersonaProfile({
+        name: 'security-persona',
+        extends: 'coder',
+        persona: 'You audit code for security issues.',
+        mode: 'overlay',
+        tools: ['Read', 'Grep'],
+        disallowedTools: ['Bash'],
+        subagents: ['explore'],
+      });
+    }
+
+    it('plans a catalog persona with its extends as the default base', async () => {
+      expect.assertions(3);
+      addSecurityPersona();
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({ callerAgentId: CALLER_ID, persona: 'security-persona' });
+
+      expect(plan).toEqual({
+        profileName: 'coder',
+        model: 'main-model',
+        thinking: 'high',
+        fork: false,
+        persona: {
+          mode: 'overlay',
+          text: 'You audit code for security issues.',
+          skills: undefined,
+          tools: ['Read', 'Grep'],
+          disallowedTools: ['Bash'],
+          subagents: ['explore'],
+          base: 'coder',
+        },
+      });
+      expect(plan.persona).not.toHaveProperty('name');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('threads the planned persona into the created agent binding', async () => {
+      expect.assertions(1);
+      addSecurityPersona();
+      const svc = enablePersona();
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'security-persona',
+      });
+
+      await svc.spawn({
+        callerAgentId: CALLER_ID,
+        plan,
+        labels: { parentAgentId: CALLER_ID },
+        prompt: 'Audit the diff',
+      });
+
+      expect(createAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          binding: { profile: 'coder', model: 'main-model', thinking: 'high', persona: plan.persona },
+        }),
+      );
+    });
+
+    it('accepts an explicit subagent_type equal to the persona extends', async () => {
+      expect.assertions(2);
+      addSecurityPersona();
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        profileName: 'coder',
+        persona: 'security-persona',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(plan.persona).toMatchObject({ base: 'coder' });
+    });
+
+    it('rejects a base mismatch between subagent_type and extends', async () => {
+      expect.assertions(3);
+      addSecurityPersona();
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        profileName: 'explore',
+        persona: 'security-persona',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('persona.base_mismatch');
+      expect(error.details).toEqual({
+        reason: 'persona.base_mismatch',
+        persona: 'security-persona',
+        extends: 'coder',
+        requested: 'explore',
+      });
+    });
+
+    it('rejects a catalog persona without extends', async () => {
+      expect.assertions(2);
+      addPersonaProfile({ name: 'unbased-persona', persona: 'You audit code.' });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'unbased-persona',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('persona.base_required');
+    });
+
+    it('rejects a catalog persona without a body', async () => {
+      expect.assertions(2);
+      addPersonaProfile({ name: 'empty-persona', extends: 'coder' });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'empty-persona',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('persona body');
+    });
+
+    it('rejects an unknown non-path persona name and lists the catalog', async () => {
+      expect.assertions(3);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'ghost-persona',
+      });
+
+      expect(error.code).toBe(ErrorCodes.PROFILE_UNKNOWN);
+      expect(error.message).toBe(
+        'Unknown persona: "ghost-persona". Available profiles: coder, explore',
+      );
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('parses a workspace path persona and returns its declared limits', async () => {
+      expect.assertions(6);
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(plan.persona).toEqual({
+        mode: 'overlay',
+        text: 'You audit code for security issues.',
+        skills: undefined,
+        tools: ['Read', 'Grep'],
+        disallowedTools: ['Bash'],
+        subagents: ['explore'],
+        base: 'coder',
+      });
+      expect(workspaceContext.resolve).toHaveBeenCalledWith('personas/security.md');
+      expect(workspaceContext.assertAllowed).toHaveBeenCalledWith(
+        '/repo/personas/security.md',
+        'read',
+      );
+      expect(hostFs.lstat).toHaveBeenCalledWith('/repo/personas/security.md');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('propagates the workspace guard error for a path outside the roots', async () => {
+      expect.assertions(3);
+      workspaceContext.assertAllowed.mockImplementationOnce(() => {
+        throw new Error2(
+          ErrorCodes.FS_PATH_ESCAPES,
+          'Path outside workspace (read): /etc/persona.md',
+          { details: { op: 'read', path: '/etc/persona.md' } },
+        );
+      });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: '../etc/persona.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.FS_PATH_ESCAPES);
+      expect(error.message).toContain('Path outside workspace');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('rejects a sensitive persona file', async () => {
+      expect.assertions(3);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/.env',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('sensitive');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona pointing at .npmrc', async () => {
+      expect.assertions(3);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/.npmrc',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('sensitive');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona pointing at docker/config.json', async () => {
+      expect.assertions(3);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'docker/config.json',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('sensitive');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona whose resolved path is a sensitive file', async () => {
+      expect.assertions(3);
+      hostFs.realpath.mockImplementation(async (path: string) =>
+        path === '/repo/personas/security.md' ? '/repo/.env' : path,
+      );
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('sensitive');
+      expect(hostFs.lstat).not.toHaveBeenCalled();
+    });
+
+    it('reads the persona through its real path when it stays inside the workspace', async () => {
+      expect.assertions(2);
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('resolves a persona path whose final component is missing on realpath', async () => {
+      expect.assertions(2);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas/security.md') {
+          throw new HostFsError(OsFsErrors.codes.OS_FS_NOT_FOUND, 'path does not exist');
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('accepts a persona file inside an additional directory root', async () => {
+      expect.assertions(2);
+      workspaceContext.resolve.mockImplementation((rel: string) => `/extra/${rel}`);
+      ix.stub(ISessionWorkspaceContext, {
+        _serviceBrand: undefined,
+        workDir: '/repo',
+        additionalDirs: ['/extra'],
+        isWithin: () => true,
+        resolve: workspaceContext.resolve,
+        assertAllowed: workspaceContext.assertAllowed,
+      } as unknown as ISessionWorkspaceContext);
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/extra/personas/security.md');
+    });
+
+    it('falls back to the lexical root when the workspace root realpath fails', async () => {
+      expect.assertions(2);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo') {
+          throw new HostFsError(OsFsErrors.codes.OS_FS_NOT_FOUND, 'path does not exist');
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('skips the parent symlink check when the parent does not exist', async () => {
+      expect.assertions(2);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas') {
+          throw new HostFsError(OsFsErrors.codes.OS_FS_NOT_FOUND, 'path does not exist');
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.profileName).toBe('coder');
+      expect(hostFs.readText).toHaveBeenCalledWith('/repo/personas/security.md');
+    });
+
+    it('propagates a non-missing parent realpath failure', async () => {
+      expect.assertions(1);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas') {
+          throw new HostFsError(
+            OsFsErrors.codes.OS_FS_PERMISSION_DENIED,
+            'realpath failed: permission denied',
+          );
+        }
+        return path;
+      });
+      const svc = enablePersona();
+
+      await expect(
+        svc.planSpawn({ callerAgentId: CALLER_ID, persona: 'personas/security.md' }),
+      ).rejects.toThrow(/realpath failed: permission denied/);
+    });
+
+    it('rejects a persona path that escapes the workspace through a symlink', async () => {
+      expect.assertions(4);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas/security.md') return '/outside/personas/security.md';
+        if (path === '/repo/personas') return '/outside/personas';
+        return path;
+      });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.FS_PATH_ESCAPES);
+      expect(error.message).toContain('escapes the workspace through a symlink');
+      expect(error.details).toEqual({
+        persona: 'personas/security.md',
+        path: '/repo/personas/security.md',
+        realPath: '/outside/personas/security.md',
+        reason: 'symlink_outside',
+      });
+      expect(hostFs.readText).not.toHaveBeenCalled();
+    });
+
+    it('rejects a persona with a symlinked parent that stays inside the workspace', async () => {
+      expect.assertions(3);
+      hostFs.realpath.mockImplementation(async (path: string) => {
+        if (path === '/repo/personas') return '/repo/real-personas';
+        if (path === '/repo/personas/security.md') return '/repo/real-personas/security.md';
+        return path;
+      });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.FS_PATH_ESCAPES);
+      expect(error.details).toMatchObject({ reason: 'symlink_parent' });
+      expect(hostFs.readText).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, HostFileStat]>([
+      ['a directory', { isFile: false, isDirectory: true, isSymbolicLink: false, size: 0 }],
+      ['a symlink', { isFile: true, isDirectory: false, isSymbolicLink: true, size: 10 }],
+    ])('rejects %s as a persona file', async (_label, stat) => {
+      hostFs.lstat.mockResolvedValueOnce(stat);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('not a regular file');
+      expect(hostFs.readText).not.toHaveBeenCalled();
+    });
+
+    it('accepts a persona file exactly at the 32768-byte limit', async () => {
+      expect.assertions(2);
+      expect(PERSONA_FILE_MAX_BYTES).toBe(32768);
+      hostFs.lstat.mockResolvedValueOnce({ ...REGULAR_FILE_STAT, size: 32768 });
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(plan.persona).toMatchObject({ base: 'coder' });
+    });
+
+    it('rejects a persona file at 32769 bytes', async () => {
+      expect.assertions(3);
+      hostFs.lstat.mockResolvedValueOnce({ ...REGULAR_FILE_STAT, size: 32769 });
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('limit 32768 bytes');
+      expect(hostFs.readText).not.toHaveBeenCalled();
+    });
+
+    it('wraps a persona file read failure with the path', async () => {
+      expect.assertions(3);
+      hostFs.readText.mockRejectedValueOnce(new Error('disk gone'));
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('/repo/personas/security.md');
+      expect(error.message).toContain('disk gone');
+    });
+
+    it('wraps a persona file parse failure', async () => {
+      expect.assertions(2);
+      hostFs.readText.mockResolvedValueOnce(
+        '---\nname: security-review\ndescription: Security\n---\nBody',
+      );
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'personas/security.md',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toContain('persona.base_required');
+    });
+
+    it('rejects a persona combined with fork', async () => {
+      expect.assertions(2);
+      const svc = enablePersona();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        fork: true,
+        persona: 'security-persona',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toBe(PERSONA_WITH_FORK_UNAVAILABLE);
+    });
+
+    it('rejects a persona while the agent_persona flag is off', async () => {
+      expect.assertions(2);
+      addSecurityPersona();
+      const svc = service();
+
+      const error = await planSpawnError(svc, {
+        callerAgentId: CALLER_ID,
+        persona: 'security-persona',
+      });
+
+      expect(error.code).toBe(ErrorCodes.VALIDATION_FAILED);
+      expect(error.message).toBe(PERSONA_EXPERIMENTAL_UNAVAILABLE);
+    });
+
+    it('keeps the plan shape unchanged when no persona is requested', async () => {
+      expect.assertions(1);
+      const svc = enablePersona();
+
+      const plan = await svc.planSpawn({ callerAgentId: CALLER_ID, profileName: 'coder' });
+
+      expect(plan).toEqual({
+        profileName: 'coder',
+        model: 'main-model',
+        thinking: 'high',
+        fork: false,
+      });
+    });
+  });
+
+  describe('finished agent eviction', () => {
+    it('evicts the least recently finished subagent from the lifecycle list past the bound', async () => {
+      createdHandles.set('agent-a', createdHandle('agent-a'));
+      createdHandles.set('agent-b', createdHandle('agent-b'));
+      sessionAgents['agent-a'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      sessionAgents['agent-b'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      removeAgent.mockImplementation(async (context: AgentContext) => {
+        createdHandles.delete(context.agentId);
+      });
+      vi.stubEnv(FINISHED_SUBAGENT_LIMIT_ENV, '1');
+      try {
+        const svc = service();
+        const signal = new AbortController().signal;
+        await svc
+          .run(stubAgentContext('agent-a', 1), { kind: 'prompt', prompt: 'a' }, { signal })
+          .then((run) => run.completion);
+        await svc
+          .run(stubAgentContext('agent-b', 1), { kind: 'prompt', prompt: 'b' }, { signal })
+          .then((run) => run.completion);
+
+        await vi.waitFor(() => {
+          expect(createdHandles.has('agent-a')).toBe(false);
+        });
+        const listed = ix
+          .get(IAgentLifecycleService)
+          .list()
+          .map((agent) => agent.agentId);
+
+        expect(createdHandles.has('agent-b')).toBe(true);
+        expect(listed).toContain('agent-b');
+        expect(listed).not.toContain('agent-a');
+        expect(unregisterAgent).not.toHaveBeenCalledWith('agent-a');
+        expect(sessionAgents['agent-a']).toBeDefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('skips a finished agent that still has pending turns', async () => {
+      createdHandles.set(
+        'agent-busy',
+        createdHandle('agent-busy', {
+          state: 'idle',
+          pendingTurnIds: [7],
+          hasPendingRequests: false,
+        }),
+      );
+      createdHandles.set('agent-idle', createdHandle('agent-idle'));
+      sessionAgents['agent-busy'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      sessionAgents['agent-idle'] = { type: 'sub', labels: { parentAgentId: CALLER_ID } };
+      removeAgent.mockImplementation(async (context: AgentContext) => {
+        createdHandles.delete(context.agentId);
+      });
+      vi.stubEnv(FINISHED_SUBAGENT_LIMIT_ENV, '1');
+      try {
+        const svc = service();
+        const signal = new AbortController().signal;
+        await svc
+          .run(stubAgentContext('agent-busy', 1), { kind: 'prompt', prompt: 'busy' }, { signal })
+          .then((run) => run.completion);
+        await svc
+          .run(stubAgentContext('agent-idle', 1), { kind: 'prompt', prompt: 'idle' }, { signal })
+          .then((run) => run.completion);
+
+        await vi.waitFor(() => {
+          expect(createdHandles.has('agent-idle')).toBe(false);
+        });
+        expect(createdHandles.has('agent-busy')).toBe(true);
+        expect(removeAgent).not.toHaveBeenCalledWith(
+          expect.objectContaining({ agentId: 'agent-busy' }),
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+});
+
+describe('agent persona flag', () => {
+  it('agentPersonaFlag_registeredDefaultsOn', () => {
+    const flag = getContributedFlags().find((entry) => entry.id === AGENT_PERSONA_FLAG_ID);
+
+    expect(flag).toMatchObject({
+      id: 'agent_persona',
+      title: 'Agent persona',
+      env: 'KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA',
+      default: true,
+      surface: 'core',
+    });
+  });
+});
+
+function gitProcessFrom(out: {
+  stdout?: string;
+  exitCode?: number;
+  stderr?: string;
+}): IHostProcess {
+  const stdout = Readable.from([Buffer.from(out.stdout ?? '')]);
+  const stderr = Readable.from([Buffer.from(out.stderr ?? '')]);
+  const exitCode = out.exitCode ?? 0;
+  return {
+    _serviceBrand: undefined,
+    stdin: { end: vi.fn(), write: vi.fn() } as unknown as IHostProcess['stdin'],
+    stdout,
+    stderr,
+    pid: 1,
+    exitCode,
+    wait: vi.fn().mockResolvedValue(exitCode),
+    kill: vi.fn(async () => {}),
+    dispose: vi.fn(async () => {
+      stdout.destroy();
+      stderr.destroy();
+    }),
+  };
+}
+
+function gitProcessWith(
+  outputs: Readonly<Record<string, { stdout?: string; exitCode?: number; stderr?: string }>>,
+): { process: IHostProcessService; spawn: ReturnType<typeof vi.fn> } {
+  const spawn = vi.fn(async (_command: string, args: readonly string[]): Promise<IHostProcess> => {
+    const out = outputs[args.slice(2).join(' ')] ?? { exitCode: 1 };
+    return gitProcessFrom(out);
+  });
+  return { process: { _serviceBrand: undefined, spawn } as IHostProcessService, spawn };
+}
+
+function spyLogger(): {
+  logger: ILogger;
+  debug: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+} {
+  const debug = vi.fn();
+  const warn = vi.fn();
+  return {
+    debug,
+    warn,
+    logger: {
+      error: vi.fn(),
+      warn,
+      info: vi.fn(),
+      debug,
+      child: vi.fn(),
+    },
+  };
+}
+
+describe('git context session cache', () => {
+  const outputs: Record<string, { stdout?: string; exitCode?: number; stderr?: string }> = {
+    'rev-parse --is-inside-work-tree': { stdout: 'true' },
+    'remote get-url origin': { stdout: 'git@github.com:owner/repo.git' },
+    'symbolic-ref --short HEAD': { stdout: 'main' },
+    'status --porcelain': { stdout: ' M src/a.ts' },
+    'log -3 --format=%h %s': { stdout: 'abc123 Initial commit' },
+  };
+
+  afterEach(() => {
+    clearGitContextCache();
+  });
+
+  it('collects once per session logger and working directory', async () => {
+    expect.assertions(4);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    const first = await collectGitContext(process, '/repo', logger);
+    const second = await collectGitContext(process, '/repo', logger);
+
+    expect(first).toBe(second);
+    expect(first).toContain('Branch: main');
+    expect(spawn).toHaveBeenCalledTimes(5);
+    expect(spawn).toHaveBeenCalledWith('git', ['-C', '/repo', 'rev-parse', '--is-inside-work-tree'], {
+      cwd: '/repo',
+    });
+  });
+
+  it('shares a single in-flight collection between concurrent callers', async () => {
+    expect.assertions(2);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    const [first, second] = await Promise.all([
+      collectGitContext(process, '/repo', logger),
+      collectGitContext(process, '/repo', logger),
+    ]);
+
+    expect(first).toBe(second);
+    expect(spawn).toHaveBeenCalledTimes(5);
+  });
+
+  it('recollects for a different session logger or working directory', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith(outputs);
+    const first = spyLogger().logger;
+    const second = spyLogger().logger;
+
+    await collectGitContext(process, '/repo', first);
+    await collectGitContext(process, '/repo', second);
+    expect(spawn).toHaveBeenCalledTimes(10);
+
+    await collectGitContext(process, '/other', first);
+    expect(spawn).toHaveBeenCalledTimes(15);
+    expect(spawn).toHaveBeenCalledWith(
+      'git',
+      ['-C', '/other', 'rev-parse', '--is-inside-work-tree'],
+      { cwd: '/other' },
+    );
+  });
+
+  it('does not cache a failed collection and retries it', async () => {
+    expect.assertions(5);
+    const { process, spawn } = gitProcessWith({
+      'rev-parse --is-inside-work-tree': { exitCode: 1, stderr: 'fatal: some other git error' },
+    });
+    const { logger, debug } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe('');
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe('');
+
+    expect(debug).toHaveBeenCalledTimes(2);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(debug).toHaveBeenCalledWith(
+      'git context command failed',
+      expect.objectContaining({ command: 'git rev-parse --is-inside-work-tree' }),
+    );
+  });
+
+  it('does not cache the not-a-repo placeholder', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith({
+      'rev-parse --is-inside-work-tree': {
+        exitCode: 128,
+        stderr: 'fatal: not a git repository (or any of the parent directories): .git',
+      },
+    });
+    const { logger } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe(
+      '<git-context status="unavailable" reason="not-a-repo"/>',
+    );
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe(
+      '<git-context status="unavailable" reason="not-a-repo"/>',
+    );
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cache a degraded snapshot with failed git commands', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith({
+      'rev-parse --is-inside-work-tree': { stdout: 'true' },
+      'remote get-url origin': { stdout: 'git@github.com:owner/repo.git' },
+      'symbolic-ref --short HEAD': { stdout: 'main' },
+      'status --porcelain': { exitCode: 1, stderr: 'fatal: transient status failure' },
+      'log -3 --format=%h %s': { stdout: 'abc123 Initial commit' },
+    });
+    const { logger } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toContain('Branch: main');
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toContain('Branch: main');
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+  });
+
+  it('re-collects after a transient failure so the next spawn gets a snapshot', async () => {
+    expect.assertions(3);
+    let attempts = 0;
+    const spawn = vi.fn(async (_command: string, args: readonly string[]): Promise<IHostProcess> => {
+      const key = args.slice(2).join(' ');
+      attempts += 1;
+      if (key === 'rev-parse --is-inside-work-tree' && attempts === 1) {
+        return gitProcessFrom({ exitCode: 1, stderr: 'fatal: transient failure' });
+      }
+      return gitProcessFrom(outputs[key] ?? { exitCode: 1 });
+    });
+    const process = { _serviceBrand: undefined, spawn } as IHostProcessService;
+    const { logger } = spyLogger();
+
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toBe('');
+    await expect(collectGitContext(process, '/repo', logger)).resolves.toContain('Branch: main');
+
+    expect(spawn).toHaveBeenCalledTimes(6);
+  });
+
+  it('scopes cached snapshots to the runtime identity on the same cwd', async () => {
+    expect.assertions(4);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+    const first = scopeGitContextProcess(process, 'w1\0local\0generation-1');
+    const second = scopeGitContextProcess(process, 'w1\0local\0generation-2');
+
+    const firstBlock = await collectGitContext(first, '/repo', logger);
+    const secondBlock = await collectGitContext(second, '/repo', logger);
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+    expect(firstBlock).toBe(secondBlock);
+    await expect(collectGitContext(first, '/repo', logger)).resolves.toBe(firstBlock);
+    expect(spawn).toHaveBeenCalledTimes(10);
+  });
+
+  it('reuses the snapshot for repeated collections through the same scoped process', async () => {
+    expect.assertions(2);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+    const scoped = scopeGitContextProcess(process, 'w1\0local\0generation-1');
+
+    await collectGitContext(scoped, '/repo', logger);
+    await collectGitContext(scoped, '/repo', logger);
+
+    expect(scopeGitContextProcess(process, 'w1\0local\0generation-1')).toBe(scoped);
+    expect(spawn).toHaveBeenCalledTimes(5);
+  });
+
+  it('bounds the per-session cache and evicts the least recently used directory', async () => {
+    expect.assertions(3);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    for (let index = 0; index < 32; index += 1) {
+      await collectGitContext(process, `/repo-${String(index)}`, logger);
+    }
+    expect(spawn).toHaveBeenCalledTimes(160);
+
+    await collectGitContext(process, '/repo-0', logger);
+    await collectGitContext(process, '/repo-32', logger);
+    expect(spawn).toHaveBeenCalledTimes(165);
+
+    await collectGitContext(process, '/repo-0', logger);
+    await collectGitContext(process, '/repo-1', logger);
+    expect(spawn).toHaveBeenCalledTimes(170);
+  });
+
+  it('bypasses the cache when no logger is supplied', async () => {
+    expect.assertions(1);
+    const { process, spawn } = gitProcessWith(outputs);
+
+    await collectGitContext(process, '/repo');
+    await collectGitContext(process, '/repo');
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+  });
+
+  it('drops a cached entry when cleared for its logger', async () => {
+    expect.assertions(2);
+    const { process, spawn } = gitProcessWith(outputs);
+    const { logger } = spyLogger();
+
+    await collectGitContext(process, '/repo', logger);
+    clearGitContextCache(logger);
+    await collectGitContext(process, '/repo', logger);
+
+    expect(spawn).toHaveBeenCalledTimes(10);
+    expect(spawn).toHaveBeenCalledWith('git', ['-C', '/repo', 'status', '--porcelain'], {
+      cwd: '/repo',
+    });
+  });
+});
+
+describe('finished subagent retention', () => {
+  function retentionHost(ids: readonly string[]): {
+    lifecycle: FinishedAgentLifecycle;
+    list: () => readonly string[];
+    removed: string[];
+  } {
+    const roster = new Set(ids);
+    const removed: string[] = [];
+    return {
+      removed,
+      list: () => [...roster],
+      lifecycle: {
+        handleOf: (agentId) =>
+          roster.has(agentId) ? ({ id: agentId } as unknown as IAgentScopeHandle) : undefined,
+        remove: async (agentId) => {
+          removed.push(agentId);
+          roster.delete(agentId);
+        },
+      },
+    };
+  }
+
+  it('defaults the retention bound to 64', () => {
+    expect(resolveFinishedSubagentLimit({})).toBe(DEFAULT_FINISHED_SUBAGENT_LIMIT);
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '' })).toBe(
+      DEFAULT_FINISHED_SUBAGENT_LIMIT,
+    );
+  });
+
+  it('reads a positive integer bound from the environment', () => {
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '3' })).toBe(3);
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: ' 12 ' })).toBe(12);
+  });
+
+  it('treats zero and negative bounds as disabling finished-agent eviction', () => {
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '0' })).toBe(0);
+    expect(resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: '-4' })).toBe(0);
+
+    const retention = new FinishedSubagentRetention(0);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+
+    expect(retention.size).toBe(0);
+  });
+
+  it('rejects a non-integer bound', () => {
+    for (const raw of ['2.5', 'abc']) {
+      expect(() =>
+        resolveFinishedSubagentLimit({ KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT: raw }),
+      ).toThrow(/KIMI_CODE_AGENT_FINISHED_SUBAGENT_LIMIT.*must be an integer/);
+    }
+  });
+
+  it('never evicts when the configured bound disables eviction', async () => {
+    expect.assertions(2);
+    const retention = new FinishedSubagentRetention(0);
+    const host = retentionHost(['agent-1', 'agent-2']);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+
+    const evicted = await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(evicted).toEqual([]);
+    expect(host.removed).toEqual([]);
+  });
+
+  it('evicts least recently finished agents past the bound from the lifecycle roster', async () => {
+    expect.assertions(4);
+    const retention = new FinishedSubagentRetention(3);
+    for (const agentId of ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5']) {
+      retention.markFinished(agentId);
+    }
+    const host = retentionHost(['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5']);
+
+    const evicted = await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(evicted).toEqual(['agent-1', 'agent-2']);
+    expect(host.removed).toEqual(['agent-1', 'agent-2']);
+    expect(host.list()).toEqual(['agent-3', 'agent-4', 'agent-5']);
+    expect(retention.size).toBe(3);
+  });
+
+  it('moves a re-finished agent to the most recent position', async () => {
+    expect.assertions(1);
+    const retention = new FinishedSubagentRetention(1);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+    retention.markFinished('agent-1');
+    const host = retentionHost(['agent-1', 'agent-2']);
+
+    await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(host.removed).toEqual(['agent-2']);
+  });
+
+  it('keeps a finished agent that started running again', async () => {
+    expect.assertions(2);
+    const retention = new FinishedSubagentRetention(2);
+    for (const agentId of ['agent-1', 'agent-2', 'agent-3']) retention.markFinished(agentId);
+    const host = retentionHost(['agent-1', 'agent-2', 'agent-3']);
+
+    const evicted = await retention.evictExcess(
+      host.lifecycle,
+      (handle) => handle.id === 'agent-1',
+    );
+
+    expect(evicted).toEqual(['agent-2']);
+    expect(host.list()).toEqual(['agent-1', 'agent-3']);
+  });
+
+  it('drops bookkeeping for an agent whose live handle is already gone', async () => {
+    expect.assertions(2);
+    const retention = new FinishedSubagentRetention(1);
+    retention.markFinished('ghost');
+    retention.markFinished('agent-2');
+    const host = retentionHost(['agent-2']);
+
+    await retention.evictExcess(host.lifecycle, () => false);
+
+    expect(host.removed).toEqual([]);
+    expect(retention.size).toBe(1);
+  });
+
+  it('keeps bookkeeping after a failed removal and retries it on the next eviction', async () => {
+    expect.assertions(5);
+    const retention = new FinishedSubagentRetention(1);
+    retention.markFinished('agent-1');
+    retention.markFinished('agent-2');
+    const removed: string[] = [];
+    let failures = 1;
+    const lifecycle: FinishedAgentLifecycle = {
+      handleOf: (agentId) => ({ id: agentId } as unknown as IAgentScopeHandle),
+      remove: async (agentId) => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error('remove failed');
+        }
+        removed.push(agentId);
+      },
+    };
+    const isBusy = (handle: IAgentScopeHandle) => handle.id === 'agent-2';
+
+    await expect(retention.evictExcess(lifecycle, isBusy)).rejects.toThrow('remove failed');
+    expect(retention.size).toBe(2);
+
+    const evicted = await retention.evictExcess(lifecycle, isBusy);
+
+    expect(evicted).toEqual(['agent-1']);
+    expect(removed).toEqual(['agent-1']);
+    expect(retention.size).toBe(1);
+  });
+
+  it('serializes concurrent evictions so removals never interleave', async () => {
+    expect.assertions(3);
+    const retention = new FinishedSubagentRetention(1);
+    for (const agentId of ['agent-1', 'agent-2', 'agent-3', 'agent-4']) {
+      retention.markFinished(agentId);
+    }
+    let active = 0;
+    let maxActive = 0;
+    const lifecycle: FinishedAgentLifecycle = {
+      handleOf: (agentId) => ({ id: agentId } as unknown as IAgentScopeHandle),
+      remove: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      retention.evictExcess(lifecycle, () => false),
+      retention.evictExcess(lifecycle, () => false),
+    ]);
+
+    expect(maxActive).toBe(1);
+    expect(first).toEqual(['agent-1', 'agent-2', 'agent-3']);
+    expect(second).toEqual([]);
   });
 });

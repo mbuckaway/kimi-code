@@ -29,6 +29,8 @@ export class AgentBackgroundTask implements BackgroundTask {
     readonly description: string,
     private readonly subagentHost: Pick<SessionSubagentHost, 'markActiveChildDetached'>,
     private readonly abortController: AbortController,
+    /** True when this task carries an agent-to-agent message delivery. */
+    readonly messageDelivery = false,
   ) {
     this.agentId = handle.agentId;
     this.subagentType = handle.profileName;
@@ -69,6 +71,7 @@ export class AgentBackgroundTask implements BackgroundTask {
       kind: 'agent',
       agentId: this.agentId,
       subagentType: this.subagentType,
+      messageDelivery: this.messageDelivery ? true : undefined,
     };
   }
 }

@@ -26,6 +26,7 @@ import type {
   SessionMetaPatch,
 } from '@moonshot-ai/agent-core-v2/session/sessionMetadata/sessionMetadata';
 import type { SkillSummary } from '@moonshot-ai/agent-core-v2/features/skill/catalog/types';
+import type { CrossSessionInbound } from '@moonshot-ai/agent-core-v2/features/messaging/crossSessionInbound';
 
 import type { ScopeRef } from '../channel.js';
 import type { McpServerConfig } from '../../contract/mcp.js';
@@ -100,6 +101,10 @@ export interface SessionFacade {
   }): Promise<string | undefined>;
   update(patch: SessionMetaPatch): Promise<void>;
   setArchived(archived: boolean): Promise<void>;
+  /** This session's cross-session inbound policy. */
+  getCrossSessionInbound(): Promise<CrossSessionInbound>;
+  /** Change this session's cross-session inbound policy at runtime. */
+  setCrossSessionInbound(value: CrossSessionInbound): Promise<void>;
   status(): Promise<SessionStatus>;
   close(): Promise<void>;
   archive(): Promise<void>;
@@ -141,6 +146,10 @@ export function createSessionFacade(call: ScopedCaller, sessionId: string): Sess
     update: (patch) => call(scope, 'sessionMetadata', 'update', [patch]) as Promise<void>,
     setArchived: (archived) =>
       call(scope, 'sessionMetadata', 'setArchived', [archived]) as Promise<void>,
+    getCrossSessionInbound: () =>
+      call(scope, 'crossSessionInboundService', 'get', []) as Promise<CrossSessionInbound>,
+    setCrossSessionInbound: (value) =>
+      call(scope, 'crossSessionInboundService', 'set', [value]) as Promise<void>,
     status: async () => {
       const pending = (kind: 'approval' | 'question') =>
         call(scope, 'sessionInteractionService', 'listPending', [kind]) as Promise<

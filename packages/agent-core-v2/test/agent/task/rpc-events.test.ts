@@ -25,6 +25,7 @@ import { MessageStepRequest } from '#/agent/loop/stepRequest';
 import { IAgentConversationUndoService } from '#/agent/undo/undo';
 import { ErrorCodes } from '#/errors';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import {
   configServices,
   createTestAgent,
@@ -90,6 +91,7 @@ function agentTask(
     readonly subagentType?: string;
     readonly abortController?: AbortController;
     readonly timeoutMs?: number;
+    readonly messageDelivery?: boolean;
   } = {},
 ): SubagentTask {
   const handle: SubagentHandle = {
@@ -101,6 +103,7 @@ function agentTask(
     handle,
     description,
     options.abortController ?? new AbortController(),
+    { messageDelivery: options.messageDelivery },
   );
   if (options.timeoutMs !== undefined) {
     Object.defineProperty(task, 'timeoutMs', {
@@ -485,6 +488,59 @@ describe('AgentTaskService — notification delivery', () => {
     expect(text).toContain('agent task completed.');
     expect(text).toContain('<output-file');
     expect(text).not.toContain('final subagent summary');
+  });
+
+  it('delivers a message-delivery reply through a turn and marks it as untrusted peer input', async () => {
+    const { agent, ctx, manager } = createAgentTaskService();
+    ctx.mockNextResponse({ type: 'text', text: 'notification ack' });
+    const turnEnd = ctx.untilTurnEnd();
+    const taskId = manager.registerTask(
+      agentTask(Promise.resolve({ result: 'peer reply body' }), 'Message reply from agent agent-2', {
+        messageDelivery: true,
+      }),
+    );
+
+    await manager.wait(taskId);
+
+    await vi.waitFor(() => {
+      expect(notifiedCount(ctx)).toBe(1);
+    });
+    await turnEnd;
+
+    const message = notificationMessageFor(agent, taskId);
+    const text = message.content[0]!.text;
+    expect(text).toContain('Message reply from agent agent-2 completed.');
+    expect(text).toContain('Untrusted peer reply from another agent');
+    expect(text).not.toContain('To recover or continue this subagent');
+  });
+
+  it('appends a message-delivery reply to an idle non-main agent instead of starting a turn', async () => {
+    const fixture = createAgentTaskService();
+    const lifecycle = fixture.ctx.get(IAgentLifecycleService);
+    const created = await lifecycle.create();
+    const handle = lifecycle.handleOf(created.agentId);
+    expect(handle).toBeDefined();
+    const tasks = handle!.accessor.get(IAgentTaskService);
+    const context = handle!.accessor.get(IAgentContextMemoryService);
+    const loop = handle!.accessor.get(IAgentLoopService);
+    const append = vi.spyOn(context, 'append');
+    const taskId = tasks.registerTask(
+      agentTask(Promise.resolve({ result: 'peer reply body' }), 'Message reply from agent main', {
+        messageDelivery: true,
+      }),
+    );
+
+    await tasks.wait(taskId);
+
+    await vi.waitFor(() => {
+      expect(append).toHaveBeenCalled();
+    });
+    expect(append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        origin: expect.objectContaining({ kind: 'task', taskId }),
+      }),
+    );
+    expect(loop.hasPendingRequests()).toBe(false);
   });
 
   it('enqueues completed process task notifications into the turn flow', async () => {

@@ -20,6 +20,7 @@ import {
 } from '#/kosong/model/thinking';
 import { THINKING_SECTION } from '#/app/kosongConfig/configSection';
 import { DEFAULT_AGENT_PROFILE_NAME } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import { withPersona } from '#/app/agentProfileCatalog/profile-shared';
 import { IBuiltinAgentProfileLoader } from '#/app/agentProfileCatalog/builtinAgentProfileLoader';
 import { ErrorCodes, Error2 } from "#/errors";
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
@@ -298,11 +299,12 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     }
 
     await this.sessionToolPolicy.ready;
-    const context = await this.buildSystemPromptContext(profile);
+    const effective = input.persona === undefined ? profile : withPersona(profile, input.persona);
+    const context = await this.buildSystemPromptContext(effective);
     this.assertBindable(profile.name);
     const currentProfileName = this.profileName;
-    const rendered = profile.renderSystemPrompt(context);
-    this.activeProfile = profile;
+    const rendered = effective.renderSystemPrompt(context);
+    this.activeProfile = effective;
     this.cacheAgentsMdWarning(context);
 
     const thinkingLevel = this.resolveThinkingEffort(
@@ -319,16 +321,16 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       systemPrompt: rendered.text,
       environmentDisclosure: rendered.environment,
       agentsMdPaths: context.agentsMdPaths ?? [],
-      activeToolNames: profile.tools,
-      disallowedTools: profile.disallowedTools ?? [],
-      subagents: profile.subagents,
+      activeToolNames: effective.tools,
+      disallowedTools: effective.disallowedTools ?? [],
+      subagents: effective.subagents,
     }));
     this.afterConfigDispatch({
       modelAlias: alias,
       profileName: profile.name,
       thinkingLevel,
       systemPrompt: rendered.text,
-      disallowedTools: profile.disallowedTools ?? [],
+      disallowedTools: effective.disallowedTools ?? [],
     });
     this.seedAgentsMdReminder(context);
 
@@ -715,7 +717,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     if (current !== undefined && current !== requested) {
       throw new ProfileError(
         ProfileErrors.codes.PROFILE_ALREADY_BOUND,
-        `agent is already bound to profile "${current}"; cannot switch to "${requested}" in this session`,
+        `agent is already bound to profile "${current}"; cannot switch to "${requested}" in this session. Spawn a new agent (new id or name) with profile "${requested}" instead.`,
         { current, requested },
       );
     }

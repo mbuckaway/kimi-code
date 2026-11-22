@@ -3,10 +3,16 @@ import { mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-import { appRoot, nativeBinPath, nativeSmokeHome, targetTriple } from './paths.mjs';
+import { appRoot, isCrossTarget, nativeBinPath, nativeSmokeHome, targetTriple } from './paths.mjs';
 
 const execFileAsync = promisify(execFile);
 const target = targetTriple();
+if (isCrossTarget(target)) {
+  console.log(
+    `Native smoke skipped: ${target} cannot execute on ${process.platform}-${process.arch}`,
+  );
+  process.exit(0);
+}
 const executablePath = nativeBinPath(target);
 const smokeHome = nativeSmokeHome();
 const packageJson = JSON.parse(await readFile(resolve(appRoot, 'package.json'), 'utf-8'));

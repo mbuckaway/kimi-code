@@ -5,6 +5,8 @@ finishing normally, wait for its completion notification or inspect it with
 `TaskOutput` instead of stopping it.
 
 Guidelines:
+- To stop several tasks or agents at once, use `StopAgents`, which excludes
+  foreground tasks by default.
 - This is a general-purpose stop capability for any background task. It is not
   a bash-specific kill.
 - Stopping a task is destructive: it may leave partial side effects behind.

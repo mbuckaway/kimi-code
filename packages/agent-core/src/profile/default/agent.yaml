@@ -23,7 +23,21 @@ tools:
   - Skill
   - WebSearch
   - Agent
+  - AgentHealth
+  - AgentResult
   - AgentSwarm
+  - BroadcastMessage
+  - ListAgents
+  - ListMessages
+  - ReplyMessage
+  - SendMessage
+  - WaitForAll
+  - StopAgent
+  - StopAgents
+  - InterruptAgent
+  - DismissAgents
+  - RenameAgent
+  - TagAgent
   - FetchURL
   - AskUserQuestion
   - EnterPlanMode

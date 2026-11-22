@@ -23,3 +23,5 @@ Guidelines:
   the task's output and details.
 - This tool is read-only and does not change any state, so it is always safe
   to call, including in plan mode.
+- AgentResult accepts an `agent_id` taken from an agent-kind task and reads that
+  agent's latest result; AgentHealth reports a single agent's derived health.

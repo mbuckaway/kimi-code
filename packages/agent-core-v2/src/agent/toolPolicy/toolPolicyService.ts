@@ -15,6 +15,11 @@ import { IAgentToolPolicyService } from './toolPolicy';
 
 export class AgentToolPolicyService extends Disposable implements IAgentToolPolicyService {
   declare readonly _serviceBrand: undefined;
+  private policyRevision = 0;
+
+  get revision(): number {
+    return this.policyRevision;
+  }
 
   constructor(
     @IAgentProfileService private readonly profile: IAgentProfileService,
@@ -24,6 +29,19 @@ export class AgentToolPolicyService extends Disposable implements IAgentToolPoli
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
   ) {
     super();
+    this._register(
+      this.sessionToolPolicy.onDidChange(() => {
+        this.policyRevision += 1;
+      }),
+    );
+    this._register(
+      this.toolPolicyGate.onDidChange(() => {
+        this.policyRevision += 1;
+      }),
+    );
+    void this.sessionToolPolicy.ready.then(() => {
+      this.policyRevision += 1;
+    });
     this._register(
       toolExecutor.registerToolCallGuard(({ name, source }) => {
         const active =

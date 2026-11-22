@@ -10,6 +10,11 @@ const PLAN_TOOLS = [
   'ReadMediaFile',
   'Glob',
   'Grep',
+  'ListAgents',
+  'ListMessages',
+  'ReplyMessage',
+  'BroadcastMessage',
+  'SendMessage',
   'WebSearch',
   'FetchURL',
 ] as const;

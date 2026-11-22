@@ -118,6 +118,15 @@ function leadingText(blocks: readonly ContentBlock[]): string | undefined {
 const TURN_AGENT_BUSY_CODE = 'turn.agent_busy';
 
 /**
+ * Server-side wall-clock backstop for an in-flight `session/prompt`. A turn
+ * that never settles (hung tool, unanswered permission, stalled model call)
+ * would otherwise leave the JSON-RPC request pending forever; after this
+ * deadline the session cancels the turn and force-settles it as `cancelled`.
+ * Matches the Anton driver-side 2 h deadline.
+ */
+const DEFAULT_PROMPT_DEADLINE_MS = 7_200_000;
+
+/**
  * Map a prompt-launch rejection (from `agent.prompt` / `agent.activateSkill`)
  * to the JSON-RPC error the client sees.
  *
@@ -209,6 +218,12 @@ export class AcpSession {
   /** The in-flight prompt's driver, if any. */
   private driver: TurnDriver | undefined;
   /**
+   * Wall-clock timer that force-settles a parked prompt as `cancelled` (see
+   * {@link DEFAULT_PROMPT_DEADLINE_MS}). Armed per launch and cleared by
+   * {@link settleDriver}.
+   */
+  private promptDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
    * Abort markers of prompts still in their pre-turn image-compression phase
    * (no turn launched yet, so `agent.cancel` has nothing to cancel).
    * `cancel()` flips every marker; the prompt settles with
@@ -282,6 +297,13 @@ export class AcpSession {
     private readonly hostCommands:
       | ReadonlyArray<AvailableCommand>
       | HostSlashCommandsSnapshot = [],
+    /**
+     * Wall-clock deadline for a single `session/prompt`, in milliseconds. A
+     * turn that has not settled within this window is cancelled and
+     * force-settled as `cancelled` (see {@link DEFAULT_PROMPT_DEADLINE_MS}).
+     * Injectable so tests can use a tiny value.
+     */
+    private readonly promptDeadlineMs: number = DEFAULT_PROMPT_DEADLINE_MS,
   ) {
     this.klient = klient;
     this.session = klient.session(sessionId);
@@ -718,6 +740,20 @@ export class AcpSession {
     return new Promise<PromptResponse>((resolve, reject) => {
       const driver: TurnDriver = { resolve, reject, settled: false, early: [] };
       this.driver = driver;
+      // Backstop: a turn that never settles would park `session/prompt`
+      // forever. Reuse the normal abort path, then force-settle as `cancelled`
+      // (mirroring `dispose()`), in case the engine's cancel does not.
+      this.promptDeadlineTimer = setTimeout(() => {
+        this.promptDeadlineTimer = undefined;
+        this.cancel();
+        if (!driver.settled) {
+          this.settleDriver(driver, () => {
+            driver.resolve({ stopReason: 'cancelled' });
+          });
+        }
+      }, this.promptDeadlineMs);
+      // Do not keep the process alive just for a deadline that may never fire.
+      this.promptDeadlineTimer.unref();
       launch.then(
         (launched) => {
           if (driver.settled) return;
@@ -780,6 +816,10 @@ export class AcpSession {
     if (driver.settled) return;
     driver.settled = true;
     if (this.driver === driver) this.driver = undefined;
+    if (this.promptDeadlineTimer !== undefined) {
+      clearTimeout(this.promptDeadlineTimer);
+      this.promptDeadlineTimer = undefined;
+    }
     action();
   }
 

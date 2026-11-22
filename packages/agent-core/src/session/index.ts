@@ -159,6 +159,10 @@ export interface AgentMeta {
   readonly type: AgentType;
   readonly parentAgentId?: string | null;
   readonly swarmItem?: string;
+  /** Addressable name assigned at spawn (agent-to-agent messaging). */
+  readonly name?: string;
+  /** Labels set through `TagAgent`; an agent carries at most 20. */
+  readonly tags?: readonly string[];
 }
 
 interface ResumedAgent {
@@ -172,6 +176,7 @@ export interface CreateAgentOptions {
   readonly profile?: ResolvedAgentProfile;
   readonly parentAgentId?: string;
   readonly swarmItem?: string;
+  readonly name?: string;
   readonly persistMetadata?: boolean;
 }
 
@@ -547,6 +552,19 @@ export class Session {
     if (main !== undefined && main.config.systemPrompt === '') {
       await this.bootstrapAgentProfile(main, profile);
     }
+    // Surface the restored subagents as a roster change (v2 parity): seed the
+    // empty baseline, then sync so each restored subagent reads as an addition.
+    // The post-restoring window makes the injected reminder durable (it lands in
+    // the replayed message list, matching v2's restore-time roster notice).
+    if (main !== undefined && main.subagentHost !== undefined) {
+      main.subagentHost.seedRosterBaseline();
+      main.replayBuilder.postRestoring = true;
+      try {
+        await main.subagentHost.syncRosterForAll();
+      } finally {
+        main.replayBuilder.postRestoring = false;
+      }
+    }
     await this.triggerSessionStart('resume');
     return { warning };
   }
@@ -558,7 +576,7 @@ export class Session {
     if (currentProfileName === requestedProfileName) return;
     throw new KimiError(
       ErrorCodes.REQUEST_INVALID,
-      `agent is already bound to profile "${currentProfileName}"; cannot switch to "${requestedProfileName}" in this session`,
+      `agent is already bound to profile "${currentProfileName}"; cannot switch to "${requestedProfileName}" in this session. Spawn a new agent (new id or name) with profile "${requestedProfileName}" instead.`,
     );
   }
 
@@ -838,6 +856,7 @@ export class Session {
         type,
         parentAgentId,
         swarmItem: options.swarmItem,
+        name: options.name,
       };
       void this.writeMetadata();
     }

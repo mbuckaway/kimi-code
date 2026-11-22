@@ -89,3 +89,18 @@ export interface IModelService {
 
 export const IModelService: ServiceIdentifier<IModelService> =
   createDecorator<IModelService>('modelService');
+
+export const DEEPSEEK_PROVIDER = 'deepseek';
+
+export function modelProvidesWebSearch(model: ModelRecord | undefined): boolean {
+  if (model === undefined) return false;
+  if (model.provider === DEEPSEEK_PROVIDER || model.providerId === DEEPSEEK_PROVIDER) return true;
+  return (model.capabilities ?? []).some(
+    (capability) => capability.trim().toLowerCase() === 'web_search',
+  );
+}
+
+export function activeModelProvidesWebSearch(models: IModelService): boolean {
+  const id = models.getDefaultModel();
+  return id === undefined ? false : modelProvidesWebSearch(models.get(id));
+}

@@ -18,6 +18,7 @@ import {
 import { ProcessTask } from '#/agent/tools/os/bash/process-task';
 import { isUserCancellation, userCancellationReason } from '#/_base/utils/abort';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { drainSessionMetadataWrites } from '#/session/sessionMetadata/sessionMetadataService';
 import {
   configServices,
   createTestAgent,
@@ -32,6 +33,11 @@ import {
 
 const MiB = 1024 * 1024;
 const LIMIT_BYTES = 16 * MiB;
+
+async function removeSessionDir(dir: string): Promise<void> {
+  await drainSessionMetadataWrites();
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+}
 
 interface TaskServiceFixture {
   ctx: TestAgentContext;
@@ -749,7 +755,7 @@ describe('AgentTaskService', () => {
       expect(info).toMatchObject({ status: 'killed' });
       expect(output.outputSizeBytes).toBeLessThanOrEqual(LIMIT_BYTES);
     } finally {
-      await rm(sessionDir, { recursive: true, force: true });
+      await removeSessionDir(sessionDir);
     }
   });
 
@@ -775,7 +781,7 @@ describe('AgentTaskService', () => {
       expect(info?.stopReason ?? '').toMatch(/output limit/i);
       expect(output.outputSizeBytes).toBeLessThanOrEqual(LIMIT_BYTES);
     } finally {
-      await rm(sessionDir, { recursive: true, force: true });
+      await removeSessionDir(sessionDir);
     }
   });
 
@@ -795,7 +801,7 @@ describe('AgentTaskService', () => {
       expect(info).toMatchObject({ status: 'completed' });
       expect(output.outputSizeBytes).toBe(Buffer.byteLength(result));
     } finally {
-      await rm(sessionDir, { recursive: true, force: true });
+      await removeSessionDir(sessionDir);
     }
   });
 
@@ -1146,7 +1152,7 @@ describe('AgentTaskService', () => {
         stopReason: 'user requested',
       });
     } finally {
-      await rm(sessionDir, { recursive: true, force: true });
+      await removeSessionDir(sessionDir);
     }
   });
 
@@ -1341,7 +1347,7 @@ describe('AgentTaskService', () => {
       expect(await persistence!.listTasks()).toEqual([]);
       await ctx.get(ISessionMetadata).ready;
     } finally {
-      await rm(sessionDir, { recursive: true, force: true });
+      await removeSessionDir(sessionDir);
     }
   });
 

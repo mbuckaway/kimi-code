@@ -1764,4 +1764,19 @@ describe('limitAgentReplayByTurns', () => {
     // trailing reminder stays attached to the last kept turn.
     expect(limited).toEqual(records.slice(11));
   });
+
+  it('keeps agent messages attached to the turn that is already open', () => {
+    const records = [
+      replayMessage('user', 'first', { kind: 'user' }),
+      replayMessage('assistant', 'one'),
+      replayMessage('user', 'from a sibling', { kind: 'agent_message', from: 'agent-0' }),
+      replayMessage('assistant', 'two'),
+      replayMessage('user', 'second', { kind: 'user' }),
+      replayMessage('assistant', 'three'),
+    ];
+
+    // The agent message is not a turn boundary: keeping one turn starts at the
+    // real user prompt, not at the agent message.
+    expect(limitAgentReplayByTurns(records, 1)).toEqual(records.slice(4));
+  });
 });

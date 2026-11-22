@@ -465,6 +465,66 @@ describe('Agent tools', () => {
     expect(description).not.toContain('Model preference:');
   });
 
+  it('registers SendMessage and ListAgents only when agent messaging is enabled', () => {
+    const subagentHost = {
+      delegatableSubagents: vi.fn(() => ({})),
+      sendMessage: vi.fn(),
+      listAgents: vi.fn(() => []),
+    } as unknown as SessionSubagentHost;
+
+    const off = testAgent({
+      subagentHost,
+      experimentalFlags: new FlagResolver({}, FLAG_DEFINITIONS, { agent_messaging: false }),
+    });
+    off.configure({ tools: ['SendMessage', 'ListAgents'] });
+    const offNames = off.agent.tools.loopTools.map((tool) => tool.name);
+    expect(offNames).not.toContain('SendMessage');
+    expect(offNames).not.toContain('ListAgents');
+
+    const on = testAgent({
+      subagentHost,
+      experimentalFlags: new FlagResolver({}, FLAG_DEFINITIONS, { agent_messaging: true }),
+    });
+    on.configure({ tools: ['SendMessage', 'ListAgents'] });
+    const onNames = on.agent.tools.loopTools.map((tool) => tool.name);
+    expect(onNames).toContain('SendMessage');
+    expect(onNames).toContain('ListAgents');
+  });
+
+  it('registers the fleet-control tools only when agent fleet control is enabled', () => {
+    const subagentHost = {
+      delegatableSubagents: vi.fn(() => ({})),
+    } as unknown as SessionSubagentHost;
+    const fleetTools = [
+      'StopAgent',
+      'StopAgents',
+      'InterruptAgent',
+      'DismissAgents',
+      'TagAgent',
+      'RenameAgent',
+    ];
+
+    const off = testAgent({
+      subagentHost,
+      experimentalFlags: new FlagResolver({}, FLAG_DEFINITIONS, {
+        agent_fleet_control: false,
+      }),
+    });
+    off.configure({ tools: fleetTools });
+    const offNames = off.agent.tools.loopTools.map((tool) => tool.name);
+    for (const name of fleetTools) expect(offNames).not.toContain(name);
+
+    const on = testAgent({
+      subagentHost,
+      experimentalFlags: new FlagResolver({}, FLAG_DEFINITIONS, {
+        agent_fleet_control: true,
+      }),
+    });
+    on.configure({ tools: fleetTools });
+    const onNames = on.agent.tools.loopTools.map((tool) => tool.name);
+    for (const name of fleetTools) expect(onNames).toContain(name);
+  });
+
   it('self-heals the builtin tool table when the provider becomes resolvable after construction', () => {
     // The ProviderManager reads this live config; it starts with no model or
     // provider, so hasProvider is false at Agent construction and

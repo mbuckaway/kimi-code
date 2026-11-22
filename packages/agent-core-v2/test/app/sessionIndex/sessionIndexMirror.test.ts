@@ -2,7 +2,7 @@ import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LifecycleScope } from '#/app/scopes';
 import {
@@ -123,6 +123,31 @@ describe('SessionIndexMirror', () => {
     expect(counters.get(WORKSPACE)).toEqual({ active: 1, archived: 1 });
   });
 
+  it('drains a same-key record that arrives while a flush is in flight', async () => {
+    build();
+    await publishGeneration();
+    mirror.record(summary('a', { title: 'first', updatedAt: 1 }));
+
+    const batch = queryStore.batch.bind(queryStore);
+    let injected = false;
+    vi.spyOn(queryStore, 'batch').mockImplementation(async (ops) => {
+      if (!injected) {
+        injected = true;
+        mirror.record(summary('a', { title: 'second', updatedAt: 9 }));
+      }
+      return batch(ops);
+    });
+
+    await mirror.drain();
+
+    expect(mirror.pending()).toEqual([]);
+    const stored = await queryStore.getMany<{ title?: string }>(
+      sessionCollection(GENERATION),
+      ['a'],
+    );
+    expect(stored.get('a')).toMatchObject({ title: 'second' });
+  });
+
   it('tracks archive transitions against the stored summary', async () => {
     build();
     await publishGeneration();
@@ -200,12 +225,22 @@ describe('SessionIndexMirror', () => {
 
     mirror.record(summary('a', { updatedAt: 7 }));
     await mirror.drain();
-    expect(mirror.pending().map((s) => s.id)).toEqual(['a']);
-
-    await mirror.drain();
+    expect(failures).toBe(0);
     expect(mirror.pending()).toEqual([]);
     expect(await queryStore.get(sessionCollection(GENERATION), 'a')).toMatchObject({
       id: 'a',
     });
+  });
+
+  it('leaves entries queued when every flush keeps failing', async () => {
+    build();
+    await publishGeneration();
+    queryStore.batch = async () => {
+      throw new Error('persistent flush failure');
+    };
+
+    mirror.record(summary('a', { updatedAt: 7 }));
+    await mirror.drain();
+    expect(mirror.pending().map((s) => s.id)).toEqual(['a']);
   });
 });

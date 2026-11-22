@@ -209,6 +209,16 @@ export function groupMessagesIntoSnapshot(
     if (!isTaskOrigin) prevNonTaskRole = message.role;
 
     if (message.role === 'user') {
+      if (originKind === 'agent_message' || originKind === 'session_message') {
+        const steeredByKind = steeredContents.get(JSON.stringify(message.content ?? []));
+        const steeredRemaining = steeredByKind?.get(originKind) ?? 0;
+        if (steeredRemaining > 0) {
+          steeredByKind?.set(originKind, steeredRemaining - 1);
+          continue;
+        }
+        startTurn(mapOrigin(message));
+        continue;
+      }
       if (originKind !== undefined && HIDDEN_USER_ORIGINS.has(originKind)) {
         if (opensOwnTurn(message)) {
           const opening =
@@ -434,6 +444,9 @@ function mapOrigin(message: HistoryMessage): TurnOrigin {
     }
     case 'hook_result':
       return { kind: 'hook', payload: origin };
+    case 'agent_message':
+    case 'session_message':
+      return { kind: 'other', payload: origin };
     case 'shell_command':
       return { kind: 'user', payload: origin };
     case 'user':

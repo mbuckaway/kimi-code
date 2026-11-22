@@ -29,7 +29,7 @@ export const FLAG_DEFINITIONS = [
     description:
       'Keep MCP tool schemas out of the immutable top-level tools[]; the model loads them on demand via the select_tools tool. Only takes effect on models whose capability catalog declares dynamically loaded tools.',
     env: 'KIMI_CODE_EXPERIMENTAL_TOOL_SELECT',
-    default: false,
+    default: true,
     surface: 'core',
   },
   {
@@ -48,6 +48,24 @@ export const FLAG_DEFINITIONS = [
       'Allow device-code OAuth login to kimi.com / kimi.ai. Disabled by default; token/apiKey auth remains the default.',
     env: 'KIMI_CODE_EXPERIMENTAL_KIMI_OAUTH',
     default: false,
+    surface: 'both',
+  },
+  {
+    id: 'agent_messaging',
+    title: 'Agent messaging',
+    description:
+      'Let agents message each other with SendMessage, discover recipients and fleet state with ListAgents, AgentResult, AgentHealth and WaitForAll, and let the Agent tool assign addressable names to spawned subagents.',
+    env: 'KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING',
+    default: true,
+    surface: 'both',
+  },
+  {
+    id: 'agent_fleet_control',
+    title: 'Agent fleet control',
+    description:
+      'Let agents stop, interrupt, dismiss, tag, and rename the agents they own through StopAgent, StopAgents, InterruptAgent, DismissAgents, TagAgent and RenameAgent.',
+    env: 'KIMI_CODE_EXPERIMENTAL_AGENT_FLEET_CONTROL',
+    default: true,
     surface: 'both',
   },
 ] as const satisfies readonly FlagDefinitionInput[];

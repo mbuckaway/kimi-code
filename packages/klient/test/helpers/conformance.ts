@@ -560,6 +560,23 @@ export function defineKlientConformance(
       }
     });
 
+    it('session cross-session inbound defaults to accept and round-trips set/get', async () => {
+      const created = await target.klient.global.sessions.create({
+        workDir: process.cwd(),
+        title: 'conformance cross-session inbound',
+      });
+      const session = target.klient.session(created.id);
+      try {
+        expect(await session.getCrossSessionInbound()).toBe('accept');
+        await session.setCrossSessionInbound('hold');
+        expect(await session.getCrossSessionInbound()).toBe('hold');
+        await session.setCrossSessionInbound('refuse');
+        expect(await session.getCrossSessionInbound()).toBe('refuse');
+      } finally {
+        await session.close();
+      }
+    });
+
     it('propagates prompt id conflicts with the same 40927 error', async () => {
       const created = await target.klient.global.sessions.create({
         workDir: process.cwd(),

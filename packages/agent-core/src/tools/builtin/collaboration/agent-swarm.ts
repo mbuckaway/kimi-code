@@ -7,7 +7,10 @@ import {
   type QueuedSubagentTask,
   type SessionSubagentHost,
 } from '../../../session/subagent-host';
-import { stripSubagentModelParameter } from '../../../session/subagent-binding';
+import {
+  stripSubagentModelParameter,
+  stripToolParameter,
+} from '../../../session/subagent-binding';
 import { ToolAccesses } from '../../../loop/tool-access';
 import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -31,6 +34,13 @@ export const AgentSwarmToolInputSchema = z
       .optional()
       .describe(
         'Subagent type used for every new subagent spawned from items; defaults to coder when omitted. Resumed subagents always keep their original type, so passing subagent_type together with resume_agent_ids is allowed — it only affects the item-based spawns.',
+      ),
+    subagent_types: z
+      .array(z.string().trim().min(1))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'One subagent type per new subagent, positionally aligned with items or prompts: pass exactly one type per item or prompt, in the same order. Every entry must be an existing agent type this agent may delegate to; all entries are validated before any subagent starts. Cannot be combined with subagent_type. Resumed subagents keep their existing type.',
       ),
     model: z
       .enum(['primary', 'secondary'])
@@ -66,16 +76,31 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Map of existing subagent agent_id to the prompt used to resume that subagent. These resumed subagents are launched before new item-based subagents.',
       ),
+    names: z
+      .array(z.string().trim().min(1).max(64))
+      .max(MAX_AGENT_SWARM_SUBAGENTS)
+      .optional()
+      .describe(
+        'Optional names for the new subagents, positionally aligned with items or prompts: pass exactly one name per item or prompt, in the same order. Each name is 1-64 characters of letters, digits, ".", "_" or "-", must not be "main", and must be unique within this call. Ignored for resumed subagents, which keep their existing names.',
+      ),
   })
   .strict();
 
 export type AgentSwarmToolInput = z.infer<typeof AgentSwarmToolInputSchema>;
+
+export const NAMES_EXPERIMENTAL_UNAVAILABLE =
+  'names is disabled: the agent_messaging experimental flag is off.';
+
+const SUBAGENT_TYPE_WITH_SUBAGENT_TYPES_UNAVAILABLE =
+  'subagent_type and subagent_types cannot be combined; use subagent_type for one shared type or subagent_types per item/prompt.';
 
 interface AgentSwarmSpawnSpec {
   readonly kind: 'spawn';
   readonly index: number;
   readonly item?: string;
   readonly prompt: string;
+  readonly name?: string;
+  readonly profileName?: string;
 }
 
 interface AgentSwarmResumeSpec {
@@ -116,14 +141,25 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     // `model` parameter is stripped from the advertised schema so the
     // secondary-model concept never enters the prompt.
     modelChoiceEnabled = false,
+    // Mirrors the `agent_messaging` experiment: on (the default), the `names`
+    // parameter names newly spawned subagents. Off, `names` is stripped from
+    // the advertised schema and rejected at run time.
+    private readonly agentMessagingEnabled: boolean = true,
+    // Agent types this agent may delegate to, used to reject unknown
+    // `subagent_types` entries before any subagent starts.
+    private readonly subagentTypes?: readonly string[],
   ) {
     this.description =
       subagentModelDescription === undefined
         ? AGENT_SWARM_DESCRIPTION
         : `${AGENT_SWARM_DESCRIPTION}\n\n${subagentModelDescription}`;
-    this.parameters = modelChoiceEnabled
+    let parameters = modelChoiceEnabled
       ? AGENT_SWARM_PARAMETERS
       : AGENT_SWARM_PARAMETERS_NO_MODEL;
+    if (!agentMessagingEnabled) {
+      parameters = stripToolParameter(parameters, 'names');
+    }
+    this.parameters = parameters;
   }
 
   resolveExecution(args: AgentSwarmToolInput): ToolExecution {
@@ -167,19 +203,26 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     signal: AbortSignal,
     toolCallId: string,
   ): Promise<string> {
-    const profileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
+    if (args.names !== undefined && !this.agentMessagingEnabled) {
+      throw new Error(NAMES_EXPERIMENTAL_UNAVAILABLE);
+    }
+    const defaultProfileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
     const specs = createAgentSwarmSpecs(args, (agentId) => this.subagentHost.getSwarmItem(agentId));
+    this.requireKnownSubagentTypes(specs);
     const tasks = specs.map((spec): QueuedSubagentTask<AgentSwarmSpec> => {
+      const profileName =
+        spec.kind === 'resume' ? 'subagent' : (spec.profileName ?? defaultProfileName);
       const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
       const common = {
         data: spec,
-        profileName: spec.kind === 'resume' ? 'subagent' : profileName,
+        profileName,
         parentToolCallId: toolCallId,
         prompt: spec.prompt,
         description: childDescription(args.description, spec.index, descriptionName),
         swarmIndex: spec.index,
         runInBackground: false,
         swarmItem: spec.item,
+        name: spec.kind === 'spawn' ? spec.name : undefined,
         signal,
         timeout: this.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS,
         modelChoice: args.model,
@@ -198,6 +241,22 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     });
     const results = await this.subagentHost.runQueued(tasks);
     return renderSwarmResults(results.map(({ task, ...result }) => ({ spec: task.data, ...result })));
+  }
+
+  private requireKnownSubagentTypes(specs: readonly AgentSwarmSpec[]): void {
+    const requested = specs.flatMap((spec) =>
+      spec.kind === 'spawn' && spec.profileName !== undefined ? [spec.profileName] : [],
+    );
+    if (requested.length === 0) return;
+    const allowed =
+      this.subagentTypes ?? Object.keys(this.subagentHost.delegatableSubagents());
+    for (const profileName of requested) {
+      if (allowed.includes(profileName)) continue;
+      if (this.subagentHost.subagentTypeExists(profileName)) {
+        throw new Error(subagentTypeNotAllowedMessage(profileName, allowed));
+      }
+      throw new Error(`Unknown agent type: "${profileName}"`);
+    }
   }
 }
 
@@ -237,6 +296,16 @@ function createAgentSwarmSpecs(
       `prompt_template must include the ${PROMPT_TEMPLATE_PLACEHOLDER} placeholder.`,
     );
   }
+  const namedSpecs = resolveSpecNames(args.names, newCount, promptCount, itemCount);
+  if (args.subagent_types !== undefined && args.subagent_type !== undefined) {
+    throw new Error(SUBAGENT_TYPE_WITH_SUBAGENT_TYPES_UNAVAILABLE);
+  }
+  const requestedTypes = resolveSpecTypes(
+    args.subagent_types,
+    newCount,
+    promptCount,
+    itemCount,
+  );
 
   const seenPrompts = new Map<string, number>();
   const specs: AgentSwarmSpec[] = [];
@@ -260,6 +329,8 @@ function createAgentSwarmSpecs(
         kind: 'spawn',
         index: specs.length + 1,
         prompt,
+        name: namedSpecs?.[index],
+        profileName: requestedTypes?.[index],
       });
     });
   } else if (items.length > 0) {
@@ -278,10 +349,81 @@ function createAgentSwarmSpecs(
         index: specs.length + 1,
         item,
         prompt,
+        name: namedSpecs?.[index],
+        profileName: requestedTypes?.[index],
       });
     });
   }
   return specs;
+}
+
+function resolveSpecTypes(
+  types: readonly string[] | undefined,
+  newCount: number,
+  promptCount: number,
+  itemCount: number,
+): readonly string[] | undefined {
+  return resolveCohortValues(
+    types,
+    newCount,
+    promptCount,
+    itemCount,
+    'subagent_types',
+    'subagent_types requires items or prompts; resumed subagents keep their existing types.',
+  )?.map((type) => type.trim());
+}
+
+function resolveSpecNames(
+  names: readonly string[] | undefined,
+  newCount: number,
+  promptCount: number,
+  itemCount: number,
+): readonly string[] | undefined {
+  const resolved = resolveCohortValues(
+    names,
+    newCount,
+    promptCount,
+    itemCount,
+    'names',
+    'names requires items or prompts; resumed subagents keep their existing names.',
+  );
+  if (resolved === undefined) return undefined;
+  const seenNames = new Set<string>();
+  return resolved.map((raw) => {
+    const name = raw.trim();
+    if (seenNames.has(name)) {
+      throw new Error('Duplicate subagent names. AgentSwarm requires distinct names.');
+    }
+    seenNames.add(name);
+    return name;
+  });
+}
+
+function resolveCohortValues(
+  values: readonly string[] | undefined,
+  newCount: number,
+  promptCount: number,
+  itemCount: number,
+  label: string,
+  missingMessage: string,
+): readonly string[] | undefined {
+  if (values === undefined) return undefined;
+  if (newCount === 0) throw new Error(missingMessage);
+  const expected = promptCount > 0 ? promptCount : itemCount;
+  if (values.length !== expected) {
+    throw new Error(
+      `AgentSwarm ${label} must match the number of items/prompts (expected ${String(expected)}, got ${String(values.length)}).`,
+    );
+  }
+  return values;
+}
+
+function subagentTypeNotAllowedMessage(
+  profileName: string,
+  allowed: readonly string[],
+): string {
+  const list = allowed.length === 0 ? 'none' : allowed.join(', ');
+  return `Subagent type "${profileName}" is not allowed for this agent. Allowed subagent types: ${list}.`;
 }
 
 function hasMinimumAgentSwarmInputs(itemCount: number, resumeCount: number): boolean {
@@ -313,11 +455,15 @@ function renderSwarmResults(results: readonly SwarmRunResult[]): string {
   for (const result of results) {
     const agentId = result.agentId === undefined ? '' : ` agent_id="${result.agentId}"`;
     const mode = result.spec.kind === 'resume' ? ' mode="resume"' : '';
+    const name =
+      result.spec.kind === 'spawn' && result.spec.name !== undefined
+        ? ` name="${escapeXmlAttribute(result.spec.name)}"`
+        : '';
     const item = result.spec.item === undefined ? '' : ` item="${escapeXmlAttribute(result.spec.item)}"`;
     const state = result.state === undefined ? '' : ` state="${result.state}"`;
     const body = result.status === 'completed' ? (result.result ?? '') : (result.error ?? 'unknown error');
     lines.push(
-      `<subagent${mode}${agentId}${item}${state} outcome="${result.status}">${body}</subagent>`,
+      `<subagent${mode}${agentId}${name}${item}${state} outcome="${result.status}">${body}</subagent>`,
     );
   }
 

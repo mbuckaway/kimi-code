@@ -298,7 +298,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 6_262,
+        tokens_before: 7_250,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -572,7 +572,7 @@ describe('FullCompaction', () => {
       session_id: 'test-session',
       cwd: dir,
       trigger: 'auto',
-      token_count: 6_262,
+      token_count: 7_250,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -658,7 +658,7 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 18_683,
+        tokens_before: 24_177,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -1125,7 +1125,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 18_683,
+        tokens_before: 24_177,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1350,7 +1350,7 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 18_683,
+        tokens_before: 24_177,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -1547,7 +1547,7 @@ describe('FullCompaction', () => {
   });
 
   it('auto-compacts very large context in one full-history round when the summarizer accepts it', async () => {
-    const maxContextTokens = 24_000;
+    const maxContextTokens = 32_000;
     const ctx = testAgent();
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
@@ -1723,8 +1723,8 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'auto',
-        tokens_before: 6_269,
-        tokens_after: 6_253,
+        tokens_before: 7_257,
+        tokens_after: 7_241,
         compacted_count: 7,
         retry_count: 0,
       }),
@@ -2273,7 +2273,7 @@ describe('FullCompaction', () => {
 
       expect(eventIndex(events, 'compaction.started')).toBe(-1);
       expect(ctx.llmCalls).toHaveLength(1);
-      expect(messageText(ctx.llmCalls[0]?.history.at(-1))).toBe('small prompt');
+      expect(ctx.llmCalls[0]?.history.map(messageText)).toContain('small prompt');
     } finally {
       registration.dispose();
     }

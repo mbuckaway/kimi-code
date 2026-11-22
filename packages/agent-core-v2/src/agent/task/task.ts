@@ -71,6 +71,11 @@ export interface AgentTaskWaitDelivery {
   readonly status: AgentTaskStatus;
 }
 
+export interface AgentTaskCapacity {
+  readonly running: number;
+  readonly max?: number;
+}
+
 export interface IAgentTaskService {
   readonly _serviceBrand: undefined;
 
@@ -78,6 +83,7 @@ export interface IAgentTaskService {
   registerTask(task: AgentTask, options?: RegisterAgentTaskOptions): string;
   getTask(taskId: string): AgentTaskInfo | undefined;
   list(activeOnly?: boolean, limit?: number): readonly AgentTaskInfo[];
+  capacity(): AgentTaskCapacity;
   persistOutput(taskId: string): void;
   getOutputSnapshot(
     taskId: string,

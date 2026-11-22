@@ -46,6 +46,7 @@ export async function createTestClient(opts: {
   disableAuth?: boolean;
   extraSeeds?: RunAcpServerOptions['extraSeeds'];
   slashCommands?: RunAcpServerOptions['slashCommands'];
+  promptDeadlineMs?: RunAcpServerOptions['promptDeadlineMs'];
 }): Promise<TestClient> {
   const toAgent = new PassThrough();
   const toClient = new PassThrough();
@@ -55,6 +56,7 @@ export async function createTestClient(opts: {
     disableAuth: opts.disableAuth ?? true,
     extraSeeds: opts.extraSeeds,
     slashCommands: opts.slashCommands,
+    promptDeadlineMs: opts.promptDeadlineMs,
   });
 
   let nextId = 1;

@@ -5,7 +5,10 @@ import {
   type SystemPromptRenderResult,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { AgentProfileContribution } from '#/app/agentProfileCatalog/agentProfileContribution';
-import { renderPromptTemplateResult } from '#/app/agentProfileCatalog/profile-shared';
+import {
+  renderPersonaSystemPrompt,
+  renderPromptTemplateResult,
+} from '#/app/agentProfileCatalog/profile-shared';
 
 import type { AgentFileDefinition, AgentFileDiscoveryResult } from './types';
 
@@ -16,16 +19,27 @@ export function agentProfileFromFile(
   const skillActive =
     (definition.tools === undefined || definition.tools.includes('Skill')) &&
     !(definition.disallowedTools ?? []).includes('Skill');
+  const isPersona = definition.extends !== undefined;
   return normalizeAgentProfile({
     name: definition.name,
     description: definition.description,
     whenToUse: definition.whenToUse,
     override: definition.override || definition.source === 'explicit',
+    mode: isPersona ? definition.mode : undefined,
+    extends: definition.extends,
+    persona: isPersona ? definition.prompt : undefined,
+    skills: definition.skills,
     tools: definition.tools,
     disallowedTools: definition.disallowedTools,
     subagents: definition.subagents,
-    renderSystemPrompt: (context) =>
-      renderPromptTemplateResult(definition.prompt, context, { skillActive }, basePrompt),
+    renderSystemPrompt: isPersona
+      ? renderPersonaSystemPrompt(
+          basePrompt,
+          { mode: definition.mode, text: definition.prompt, skills: definition.skills },
+          skillActive,
+        )
+      : (context) =>
+          renderPromptTemplateResult(definition.prompt, context, { skillActive }, basePrompt),
   });
 }
 

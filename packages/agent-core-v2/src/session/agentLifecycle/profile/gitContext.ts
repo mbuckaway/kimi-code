@@ -6,6 +6,7 @@ import type { IHostProcess, IHostProcessService } from '#/os/interface/hostProce
 const GIT_TIMEOUT_MS = 5_000;
 const MAX_DIRTY_FILES = 20;
 const MAX_COMMIT_LINE_LENGTH = 200;
+const MAX_CACHED_DIRECTORIES = 32;
 
 const ALLOWED_HOSTS = [
   'github.com',
@@ -27,19 +28,107 @@ type GitResult =
 
 type TaggedGitResult = { readonly args: readonly string[]; readonly result: GitResult };
 
-export async function collectGitContext(
+type GitContextSnapshot = { readonly text: string; readonly cacheable: boolean };
+
+let gitContextCaches = new WeakMap<ILogger, Map<string, Promise<string>>>();
+const scopedProcesses = new WeakMap<IHostProcessService, Map<string, IHostProcessService>>();
+const processScopes = new WeakMap<IHostProcessService, string>();
+const anonymousProcessIds = new WeakMap<IHostProcessService, number>();
+let nextAnonymousProcessId = 1;
+
+export function clearGitContextCache(log?: ILogger): void {
+  if (log === undefined) {
+    gitContextCaches = new WeakMap();
+    return;
+  }
+  gitContextCaches.delete(log);
+}
+
+export function scopeGitContextProcess(
+  process: IHostProcessService,
+  identity: string,
+): IHostProcessService {
+  let scopes = scopedProcesses.get(process);
+  if (scopes === undefined) {
+    scopes = new Map();
+    scopedProcesses.set(process, scopes);
+  }
+  const existing = scopes.get(identity);
+  if (existing !== undefined) return existing;
+
+  const scoped: IHostProcessService = {
+    _serviceBrand: undefined,
+    spawn: (command, args, options) => process.spawn(command, args, options),
+  };
+  scopes.set(identity, scoped);
+  processScopes.set(scoped, identity);
+  return scoped;
+}
+
+export function collectGitContext(
   process: IHostProcessService,
   cwd: string,
   log?: ILogger,
 ): Promise<string> {
+  if (log === undefined) {
+    return collectGitContextUncached(process, cwd, log).then((snapshot) => snapshot.text);
+  }
+
+  let entries = gitContextCaches.get(log);
+  if (entries === undefined) {
+    entries = new Map();
+    gitContextCaches.set(log, entries);
+  }
+  const key = `${cacheScopeOf(process)}\0${cwd}`;
+  const cached = entries.get(key);
+  if (cached !== undefined) {
+    entries.delete(key);
+    entries.set(key, cached);
+    return cached;
+  }
+
+  const pending = collectGitContextUncached(process, cwd, log).then(
+    (snapshot) => {
+      if (!snapshot.cacheable && entries.get(key) === pending) entries.delete(key);
+      return snapshot.text;
+    },
+    (error: unknown) => {
+      if (entries.get(key) === pending) entries.delete(key);
+      throw error;
+    },
+  );
+  entries.set(key, pending);
+  while (entries.size > MAX_CACHED_DIRECTORIES) {
+    const oldest = entries.keys().next().value;
+    if (oldest === undefined) break;
+    entries.delete(oldest);
+  }
+  return pending;
+}
+
+function cacheScopeOf(process: IHostProcessService): string {
+  const scope = processScopes.get(process);
+  if (scope !== undefined) return scope;
+  const existing = anonymousProcessIds.get(process);
+  if (existing !== undefined) return `process-${String(existing)}`;
+  const id = nextAnonymousProcessId++;
+  anonymousProcessIds.set(process, id);
+  return `process-${String(id)}`;
+}
+
+async function collectGitContextUncached(
+  process: IHostProcessService,
+  cwd: string,
+  log?: ILogger,
+): Promise<GitContextSnapshot> {
   const revParseArgs = ['rev-parse', '--is-inside-work-tree'] as const;
   const revParse = await runGit(process, cwd, revParseArgs);
   if (!revParse.ok) {
     if (revParse.kind === 'command-failed' && isNotARepo(revParse.stderr)) {
-      return `<git-context status="unavailable" reason="not-a-repo"/>`;
+      return { text: '<git-context status="unavailable" reason="not-a-repo"/>', cacheable: false };
     }
     logGitFailure(cwd, revParseArgs, revParse, log);
-    return '';
+    return { text: '', cacheable: false };
   }
 
   const commandArgs = [
@@ -55,6 +144,7 @@ export async function collectGitContext(
   for (const { args, result } of [remote, branch, status, gitLog]) {
     if (!result.ok) logGitFailure(cwd, args, result, log);
   }
+  const degraded = [remote, branch, status, gitLog].some(({ result }) => !result.ok);
 
   const remoteUrl = stdoutOf(remote.result);
   const branchName = stdoutOf(branch.result);
@@ -93,8 +183,11 @@ export async function collectGitContext(
     }
   }
 
-  if (sections.length <= 1) return '';
-  return `<git-context>\n${sections.join('\n')}\n</git-context>`;
+  if (sections.length <= 1) return { text: '', cacheable: false };
+  return {
+    text: `<git-context>\n${sections.join('\n')}\n</git-context>`,
+    cacheable: !degraded,
+  };
 }
 
 export function sanitizeRemoteUrl(remoteUrl: string): string | null {

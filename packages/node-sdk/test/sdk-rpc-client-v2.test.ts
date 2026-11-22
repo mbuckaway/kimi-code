@@ -1078,7 +1078,7 @@ key = "${titleOAuthRef.key}"
   });
 
   it('rejects setTowerMode when the tower feature is unavailable', async () => {
-    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_TOWER', '0');
     const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-'));
     tempDirs.push(homeDir);
     const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));

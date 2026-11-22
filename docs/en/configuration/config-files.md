@@ -115,6 +115,7 @@ Fields in the config file fall into two categories: **top-level scalars** that d
 | `default_permission_mode` | `string` | `manual` | Default permission mode for new sessions; one of `manual` (prompt each time), `yolo` (auto-approve tool actions, but the agent may still ask questions), or `auto` (fully autonomous — the agent decides everything without asking) |
 | `default_plan_mode` | `boolean` | `false` | Whether new sessions start in Plan mode (produce a plan before executing) by default |
 | `default_swarm_mode` | `boolean` | `true` | Whether new sessions start in Swarm mode (prefer parallel `AgentSwarm` subagents) by default |
+| `cross_session_inbound` | `string` | `accept` | Default cross-session inbound policy: `accept` delivers each message from another session, `hold` withholds them until the session switches to `accept`, `refuse` drops them |
 | `merge_all_available_skills` | `boolean` | `true` | Whether to merge Agent Skills from all available directories |
 | `extra_skill_dirs` | `array<string>` | — | Extra skill search directories, layered on top of the default directories |
 | `extra_agent_dirs` | `array<string>` | — | Extra custom agent search directories, layered on top of the default directories |
@@ -536,6 +537,14 @@ This section is read by the `kimi web` command itself, before the socket binds �
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `kimi_oauth` | `boolean` | `false` | Enable kimi.com/kimi.ai OAuth device-code login for the web UI and TUI; token/apiKey auth remains the default |
+| `agent_messaging` | `boolean` | `true` | Agent-to-agent messaging and read-only fleet visibility: the `SendMessage`, `ListAgents`, `AgentResult`, `AgentHealth` and `WaitForAll` tools, and the `name` parameter on the `Agent` tool; set to `false` to disable |
+| `agent_fleet_control` | `boolean` | `true` | Destructive fleet lifecycle control: the `StopAgent`, `InterruptAgent`, `StopAgents`, `DismissAgents`, `TagAgent` and `RenameAgent` tools; enabled by default, set to `false` to disable |
+| `agent_persona` | `boolean` | `true` | Layer a Markdown persona (overlay or replace) onto a spawned agent profile through the `persona`/`personas` parameters on `Agent` and `AgentSwarm`; enabled by default, set to `false` to disable |
+| `tool-select` | `boolean` | `true` | Keep MCP tool schemas out of the top-level tool list and let the model load them on demand with `select_tools`; only affects models that support dynamically loaded tools. Enabled by default |
+| `secondary-model` | `boolean` | `false` | Let newly spawned subagents use a separately configured secondary model by default, with an explicit primary-model override for quality-sensitive tasks; off by default |
+| `subagent_fork` | `boolean` | `false` | Let `Agent` and `AgentSwarm` start a subagent with a snapshot of the caller's conversation history through the `fork` parameter; off by default |
+| `wait_for` | `boolean` | `true` | Give the model the `WaitFor` tool so it can wait for background tasks inside the current turn instead of ending the turn; enabled by default |
+| `tower` | `boolean` | `true` | Enable tower mode, which coordinates multiple agents on a shared objective and is toggled with `/tower`; enabled by default — set `false` to disable |
 
 ## `services`
 

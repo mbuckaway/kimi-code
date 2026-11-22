@@ -336,6 +336,7 @@ describe('KimiHarness config API', () => {
   });
 
   it('returns experimental feature metadata through the harness', async () => {
+    expect.assertions(1);
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
     const homeDir = await makeTempDir();
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
@@ -349,8 +350,8 @@ describe('KimiHarness config API', () => {
           'Keep MCP tool schemas out of the immutable top-level tools[]; the model loads them on demand via the select_tools tool. Only takes effect on models whose capability catalog declares dynamically loaded tools.',
         surface: 'core',
         env: 'KIMI_CODE_EXPERIMENTAL_TOOL_SELECT',
-        defaultEnabled: false,
-        enabled: false,
+        defaultEnabled: true,
+        enabled: true,
         source: 'default',
       },
       {
@@ -375,7 +376,45 @@ describe('KimiHarness config API', () => {
         enabled: false,
         source: 'default',
       },
+      {
+        id: 'agent_messaging',
+        title: 'Agent messaging',
+        description:
+          'Let agents message each other with SendMessage, discover recipients and fleet state with ListAgents, AgentResult, AgentHealth and WaitForAll, and let the Agent tool assign addressable names to spawned subagents.',
+        surface: 'both',
+        env: 'KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING',
+        defaultEnabled: true,
+        enabled: true,
+        source: 'default',
+      },
+      {
+        id: 'agent_fleet_control',
+        title: 'Agent fleet control',
+        description:
+          'Let agents stop, interrupt, dismiss, tag, and rename the agents they own through StopAgent, StopAgents, InterruptAgent, DismissAgents, TagAgent and RenameAgent.',
+        surface: 'both',
+        env: 'KIMI_CODE_EXPERIMENTAL_AGENT_FLEET_CONTROL',
+        defaultEnabled: true,
+        enabled: true,
+        source: 'default',
+      },
     ]);
+  });
+
+  it('reports a config-disabled flag through the harness', async () => {
+    expect.assertions(1);
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
+    const homeDir = await makeTempDir();
+    const configPath = join(homeDir, 'config.toml');
+    await writeFile(configPath, '[experimental]\ntool-select = false\n', 'utf-8');
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    const features = await harness.getExperimentalFeatures();
+    expect(features.find((feature) => feature.id === 'tool-select')).toMatchObject({
+      defaultEnabled: true,
+      enabled: false,
+      source: 'config',
+    });
   });
 
   it('can create the default config scaffold without selecting a model', async () => {

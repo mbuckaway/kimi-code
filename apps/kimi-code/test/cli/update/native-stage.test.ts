@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -272,6 +272,32 @@ describe('stageNativeUpdate', () => {
     // Expand-Archive via -EncodedCommand and still stage the inner exe.
     childProcessMocks.execFile.mockImplementationOnce((command, args, callback) => {
       callback(new Error('simulated tar failure'));
+    });
+    // Simulate Expand-Archive's extraction instead of invoking the runner's
+    // real PowerShell: Defender intermittently quarantines the fake kimi.exe
+    // between extraction and chmod, which made this test flaky. The dispatch
+    // (tar fails, then PowerShell with the Expand-Archive script) is still
+    // asserted from the recorded calls below.
+    childProcessMocks.execFile.mockImplementationOnce((command, args, callback) => {
+      const encoded = args[args.indexOf('-EncodedCommand') + 1];
+      if (encoded === undefined) {
+        callback(new Error('expected an -EncodedCommand argument'));
+        return;
+      }
+      const script = Buffer.from(encoded, 'base64').toString('utf16le');
+      const destination = /-DestinationPath '((?:[^']|'')*)'/
+        .exec(script)?.[1]
+        ?.replaceAll("''", "'");
+      void (async () => {
+        try {
+          if (destination === undefined) throw new Error('expected a -DestinationPath argument');
+          await mkdir(destination, { recursive: true });
+          await writeFile(join(destination, 'kimi.exe'), inner);
+          callback(null, '', '');
+        } catch (error) {
+          callback(error as Error);
+        }
+      })();
     });
 
     const result = await stageNativeUpdate({

@@ -122,7 +122,7 @@ interface LLMRequestLogInput {
   readonly thinkingEffort?: ThinkingEffort | null;
   readonly maxTokens?: number;
   readonly systemPrompt: string;
-  readonly tools: readonly Tool[];
+  readonly systemPromptHash: string;
   readonly messages: readonly Message[];
   readonly fields?: AgentLLMRequestLogFields;
 }
@@ -371,6 +371,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         ),
       };
       this.warnAboutAnthropicThinkingEffort(request);
+      const toolSymbol = symboliseTools(input.tools);
       const logInput: LLMRequestLogInput = {
         protocol: request.model.protocol,
         providerType: request.model.providerType,
@@ -379,12 +380,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         thinkingEffort: request.thinkingEffort,
         maxTokens: effectiveMaxCompletionTokens(request.params),
         systemPrompt: input.systemPrompt,
-        tools: input.tools,
+        systemPromptHash: fingerprint(input.systemPrompt),
         messages: input.messages,
         fields,
       };
-      this.logRequest(logInput);
-      this.recordRequest(logInput);
+      this.logRequest(logInput, toolSymbol.visibleCount, toolSymbol.hash);
+      this.recordRequest(logInput, toolSymbol.hash, toolSymbol.signature);
 
       let message: Message | undefined;
       let usage: TokenUsage | undefined;
@@ -729,21 +730,21 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     return snapshot;
   }
 
-  private logRequest(input: LLMRequestLogInput): void {
+  private logRequest(input: LLMRequestLogInput, toolCount: number, toolsHash: string): void {
     const logFields: AgentLLMRequestLogFields = input.fields ?? {};
-    const wireTools = providerVisibleTools(input.tools);
     const config = {
       provider: input.protocol,
+      providerType: input.providerType,
       model: input.modelName,
       modelAlias: input.modelAlias,
       thinkingEffort: input.thinkingEffort ?? undefined,
       systemPromptChars: input.systemPrompt.length,
-      toolCount: wireTools.length,
+      toolCount,
     };
     const signature = JSON.stringify({
       ...config,
-      systemPromptHash: fingerprint(input.systemPrompt),
-      toolsHash: fingerprint(JSON.stringify(toolSignature(wireTools))),
+      systemPromptHash: input.systemPromptHash,
+      toolsHash,
     });
     if (signature !== this.lastConfigLogSignature) {
       this.lastConfigLogSignature = signature;
@@ -756,18 +757,18 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.log.info('llm request', requestFields);
   }
 
-  private recordRequest(input: LLMRequestLogInput): void {
+  private recordRequest(
+    input: LLMRequestLogInput,
+    toolsHash: string,
+    tools: readonly LlmRequestToolSchema[],
+  ): void {
     const fields = input.fields ?? {};
-    const wireTools = providerVisibleTools(input.tools);
-    const tools = toolSignature(wireTools);
-    const toolsHash = fingerprint(JSON.stringify(tools));
     if (!this.states.get(llmRequestTraceKey).seenToolsHashes.includes(toolsHash)) {
       void this.dispatcher.dispatch(
         new LlmToolsSnapshot({ agentId: this.scopeContext.agentId, hash: toolsHash, tools }),
       );
     }
 
-    const systemPromptHash = fingerprint(input.systemPrompt);
     const overrides = this.config.get<ModelOverrides>('modelOverrides');
     const thinkingConfig = this.config.get<ThinkingConfig>(THINKING_SECTION);
     const modelConfig =
@@ -789,7 +790,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       maxTokens: input.maxTokens,
       betaApi: modelConfig?.betaApi,
       toolSelect: this.toolSelect.enabled(),
-      systemPromptHash,
+      systemPromptHash: input.systemPromptHash,
       systemPrompt:
         input.systemPrompt === this.profile.data().systemPrompt
           ? undefined
@@ -877,6 +878,22 @@ function providerVisibleTools(tools: readonly Tool[]): readonly Tool[] {
 
 function toolSignature(tools: readonly Tool[]): readonly LlmRequestToolSchema[] {
   return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+}
+
+interface ToolSymbolisation {
+  readonly visibleCount: number;
+  readonly signature: readonly LlmRequestToolSchema[];
+  readonly hash: string;
+}
+
+function symboliseTools(tools: readonly Tool[]): ToolSymbolisation {
+  const visible = providerVisibleTools(tools);
+  const signature = toolSignature(visible);
+  return {
+    visibleCount: visible.length,
+    signature,
+    hash: fingerprint(JSON.stringify(signature)),
+  };
 }
 
 function requestKindForRecord(fields: AgentLLMRequestLogFields): LlmRequestPayload['kind'] {

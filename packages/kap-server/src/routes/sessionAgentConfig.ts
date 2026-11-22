@@ -73,7 +73,7 @@ export async function applySessionAgentConfig(
         );
       }
     } else {
-      tower.exit();
+      await tower.exit();
     }
   }
   if (agentConfig.goal_objective !== undefined) {

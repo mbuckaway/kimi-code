@@ -8,7 +8,7 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'pathe';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -1235,6 +1235,12 @@ describe('Session MCP startup', () => {
       id: 'test-mcp-slow',
       kaos: testKaos.withCwd(tmp),
       homedir: join(tmp, 'session'),
+      // Keep profile/skill discovery inside the temp dir: scanning the real
+      // user home adds environment-dependent startup latency unrelated to the
+      // MCP-startup behavior under test.
+      kimiHomeDir: join(tmp, 'kimi-home'),
+      skills: { userHomeDir: tmp, brandHomeDir: join(tmp, 'kimi-home') },
+      agents: { userHomeDir: tmp },
       rpc: sessionRpc(),
       mcpConfig: {
         servers: {
@@ -1330,12 +1336,44 @@ describe('Session MCP startup', () => {
   it('waits for initial MCP startup before the first prompt reaches the model', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'kimi-session-mcp-prompt-'));
     const events: SessionRpcEvent[] = [];
+    let resolveTurnStarted!: () => void;
+    const turnStarted = new Promise<void>((resolve) => {
+      resolveTurnStarted = resolve;
+    });
     let resolveTurnEnded!: () => void;
     const turnEnded = new Promise<void>((resolve) => {
       resolveTurnEnded = resolve;
     });
     const scripted = createScriptedGenerate();
     scripted.mockNextResponse({ type: 'text', text: 'ready' });
+    const mcpStatusAtGenerate: (string | undefined)[] = [];
+    const generate: typeof scripted.generate = (
+      chat,
+      systemPrompt,
+      tools,
+      history,
+      callbacks,
+      options,
+    ) => {
+      mcpStatusAtGenerate.push(
+        session.mcp.list().find((entry) => entry.name === 'slow')?.status,
+      );
+      return scripted.generate(chat, systemPrompt, tools, history, callbacks, options);
+    };
+    // Hold the startup open until this test opens the gate file, so "the model
+    // was not reached yet" never depends on a wall-clock window: the server
+    // cannot finish its handshake while the gate is closed, no matter how the
+    // machine is loaded. Once the gate opens, the fixture boots and applies its
+    // own KIMI_TEST_MCP_START_DELAY_MS before connecting.
+    const gateFile = join(tmp, 'mcp-startup-gate');
+    const gatedLauncher = [
+      `const { existsSync } = require('node:fs');`,
+      `const { setTimeout: sleep } = require('node:timers/promises');`,
+      `(async () => {`,
+      `  while (!existsSync(process.env['KIMI_TEST_MCP_GATE'])) await sleep(5);`,
+      `  await import(process.env['KIMI_TEST_MCP_FIXTURE']);`,
+      `})().catch((error) => { console.error(error); process.exit(1); });`,
+    ].join('\n');
     const session = new Session({
       id: 'test-mcp-turn-ended',
       kaos: testKaos.withCwd(tmp),
@@ -1343,6 +1381,7 @@ describe('Session MCP startup', () => {
       rpc: sessionRpc({
         events,
         onEvent: (event) => {
+          if (event.type === 'turn.started') resolveTurnStarted();
           if (event.type === 'turn.ended') resolveTurnEnded();
         },
       }),
@@ -1352,9 +1391,13 @@ describe('Session MCP startup', () => {
           slow: {
             transport: 'stdio',
             command: process.execPath,
-            args: [stdioFixture],
-            env: { KIMI_TEST_MCP_START_DELAY_MS: '250' },
-            startupTimeoutMs: 2_000,
+            args: ['-e', gatedLauncher],
+            env: {
+              KIMI_TEST_MCP_START_DELAY_MS: '250',
+              KIMI_TEST_MCP_GATE: gateFile,
+              KIMI_TEST_MCP_FIXTURE: pathToFileURL(stdioFixture).href,
+            },
+            startupTimeoutMs: 10_000,
           },
         },
       },
@@ -1363,7 +1406,7 @@ describe('Session MCP startup', () => {
     try {
       const { agent } = await session.createAgent({
         type: 'main',
-        generate: scripted.generate,
+        generate,
       });
       agent.config.update({
         cwd: tmp,
@@ -1374,19 +1417,28 @@ describe('Session MCP startup', () => {
       // This bare agent gets no profile, so grant MCP access explicitly.
       agent.tools.setActiveTools(['mcp__*']);
 
+      expect(session.mcp.list().find((entry) => entry.name === 'slow')?.status).toBe('pending');
       await new SessionAPIImpl(session).prompt({
         agentId: 'main',
         input: [{ type: 'text', text: 'hello' }],
       });
-      await sleep(100);
+      await Promise.race([
+        turnStarted,
+        sleep(2_000).then(() => {
+          throw new Error('Timed out waiting for turn.started');
+        }),
+      ]);
 
-      expect(events.some((event) => event.type === 'turn.started')).toBe(true);
+      // The turn is running but still parked on the (gated) initial startup:
+      // nothing has reached the model.
       expect(events.some((event) => event.type === 'turn.step.started')).toBe(false);
       expect(scripted.calls).toHaveLength(0);
+      expect(session.mcp.list().find((entry) => entry.name === 'slow')?.status).toBe('pending');
 
+      await writeFile(gateFile, '');
       await Promise.race([
         turnEnded,
-        sleep(1_000).then(() => {
+        sleep(5_000).then(() => {
           throw new Error('Timed out waiting for turn.ended');
         }),
       ]);
@@ -1394,11 +1446,13 @@ describe('Session MCP startup', () => {
       expect(scripted.calls).toHaveLength(1);
       const toolNames = scripted.calls[0]!.tools.map((tool) => tool.name);
       expect(toolNames).toContain('mcp__slow__echo');
+      // The model was reached only after the initial startup settled.
+      expect(mcpStatusAtGenerate).toEqual(['connected']);
     } finally {
       await session.close();
       await rm(tmp, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
     }
-  }, 7000);
+  }, 15000);
 
   it('emits tool.list.updated(mcp.disconnected) when reconnect drops the live tools', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'kimi-session-mcp-reconnect-'));

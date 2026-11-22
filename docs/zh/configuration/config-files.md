@@ -115,6 +115,7 @@ timeout = 5
 | `default_permission_mode` | `string` | `manual` | 新会话的默认权限模式，可选 `manual`（逐次询问）、`yolo`（自动批准工具操作，Agent 仍可能提问）、`auto`（完全自主，Agent 自己做决定，不再提问） |
 | `default_plan_mode` | `boolean` | `false` | 新会话是否默认以 Plan 模式（先出计划再执行）启动 |
 | `default_swarm_mode` | `boolean` | `true` | 新会话是否默认以 Swarm 模式（优先使用并行的 `AgentSwarm` 子代理）启动 |
+| `cross_session_inbound` | `string` | `accept` | 跨会话入站消息的默认策略：`accept` 逐条投递其他会话发来的消息，`hold` 暂存这些消息直到会话切换为 `accept`，`refuse` 直接丢弃 |
 | `merge_all_available_skills` | `boolean` | `true` | 是否合并所有目录中的 Agent Skills |
 | `extra_skill_dirs` | `array<string>` | — | 额外 Skill 搜索目录，叠加到默认目录之上 |
 | `extra_agent_dirs` | `array<string>` | — | 额外自定义 Agent 搜索目录，叠加到默认目录之上 |
@@ -535,6 +536,14 @@ allowed_host = [".example.com"]
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `kimi_oauth` | `boolean` | `false` | 在 web UI 和 TUI 中启用 kimi.com/kimi.ai 的 OAuth 设备码登录；token/apiKey 鉴权仍为默认 |
+| `agent_messaging` | `boolean` | `true` | Agent 间的消息通信与只读的 Agent 集群可见性：`SendMessage`、`ListAgents`、`AgentResult`、`AgentHealth`、`WaitForAll` 工具，以及 `Agent` 工具的 `name` 参数；设为 `false` 可禁用 |
+| `agent_fleet_control` | `boolean` | `true` | 破坏性的 Agent 集群生命周期控制：`StopAgent`、`InterruptAgent`、`StopAgents`、`DismissAgents`、`TagAgent` 和 `RenameAgent` 工具；默认启用，设为 `false` 可禁用 |
+| `agent_persona` | `boolean` | `true` | 通过 `Agent` 和 `AgentSwarm` 的 `persona`/`personas` 参数，给派生的 Agent profile 叠加 Markdown persona（overlay 或 replace）；默认启用，设为 `false` 可禁用 |
+| `tool-select` | `boolean` | `true` | 将 MCP 工具 schema 移出顶层工具列表，由模型通过 `select_tools` 按需加载；仅对支持动态加载工具的模型生效。默认启用 |
+| `secondary-model` | `boolean` | `false` | 让新派生的 subagent 默认使用单独配置的次级模型，并可对质量敏感任务显式指定主模型；默认关闭 |
+| `subagent_fork` | `boolean` | `false` | 让 `Agent` 和 `AgentSwarm` 通过 `fork` 参数以调用方对话历史的快照启动 subagent；默认关闭 |
+| `wait_for` | `boolean` | `true` | 向模型提供 `WaitFor` 工具，使其可以在当前轮次内等待后台任务，而不是结束轮次；默认启用 |
+| `tower` | `boolean` | `true` | 启用 tower 模式，在共享目标上协调多个 Agent，通过 `/tower` 切换；默认启用，设为 `false` 可关闭 |
 
 ## `services`
 

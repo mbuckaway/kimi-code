@@ -40,6 +40,13 @@ export interface BackgroundTaskInfoBase {
   readonly stopReason?: string;
   /** Suppress automatic terminal notifications/reminders for this task. */
   readonly terminalNotificationSuppressed?: boolean;
+  /**
+   * True for a task that delivers an agent-to-agent message. The subagent
+   * completion drain neither waits on nor suppresses its terminal
+   * notification, so a peer reply can still steer the sender after the
+   * sender's own turn has ended.
+   */
+  readonly messageDelivery?: boolean;
   /** Deadline supplied at registration; surfaced via task info. */
   readonly timeoutMs?: number;
 }

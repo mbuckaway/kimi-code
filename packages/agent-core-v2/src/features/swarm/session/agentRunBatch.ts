@@ -24,6 +24,7 @@ export interface AgentRunAttemptOptions {
 export interface AgentSpawnAttemptOptions extends AgentRunAttemptOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
+  readonly name?: string;
   readonly plan: SubagentSpawnPlan;
 }
 
@@ -37,7 +38,6 @@ export type AgentRunAttemptHandle = {
 };
 
 const INITIAL_LAUNCH_LIMIT = 5;
-const INITIAL_LAUNCH_INTERVAL_MS = 700;
 const RATE_LIMIT_RETRY_BASE_MS = 3000;
 const RATE_LIMIT_RETRY_FACTOR = 2;
 const RATE_LIMIT_CAPACITY_SHRINK_INTERVAL_MS = 2000;
@@ -45,6 +45,9 @@ const RATE_LIMIT_CAPACITY_RECOVERY_INTERVAL_MS = 3 * 60 * 1000;
 const RATE_LIMIT_SUSPENDED_REASON = 'Provider rate limit; subagent requeued for retry.';
 
 const AGENT_SWARM_MAX_CONCURRENCY_ENV = 'KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY';
+const AGENT_SWARM_LAUNCH_INTERVAL_ENV = 'KIMI_CODE_AGENT_SWARM_LAUNCH_INTERVAL_MS';
+
+export const SWARM_LAUNCH_INTERVAL_MODE = 'normal-mode';
 
 export type QueuedAgentRunTask<T = unknown> = SessionSwarmTask<T>;
 
@@ -93,6 +96,7 @@ type ActiveAttempt<T> = {
 
 export type AgentRunBatchOptions = {
   readonly maxConcurrency?: number;
+  readonly normalLaunchIntervalMs?: number;
 };
 
 export class AgentRunBatch<T> {
@@ -104,6 +108,7 @@ export class AgentRunBatch<T> {
   private readonly batchSignal: AbortSignal | undefined;
   private readonly batchAbortListener: () => void;
   private readonly maxConcurrency: number | undefined;
+  private readonly normalLaunchIntervalMs: number;
   private normalLaunchCount = 0;
   private normalLaunchTimer: ReturnType<typeof setTimeout> | undefined;
   private rateLimitLaunchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -126,6 +131,7 @@ export class AgentRunBatch<T> {
     options: AgentRunBatchOptions = {},
   ) {
     this.maxConcurrency = options.maxConcurrency;
+    this.normalLaunchIntervalMs = options.normalLaunchIntervalMs ?? resolveSwarmLaunchIntervalMs();
     this.states = tasks.map((task, index) => ({
       index,
       task,
@@ -188,10 +194,24 @@ export class AgentRunBatch<T> {
       this.normalLaunchCount < INITIAL_LAUNCH_LIMIT &&
       this.pending.length > 0 &&
       !this.rateLimitMode &&
-      !this.isAtConcurrencyLimit()
+      this.active.size < this.maxActiveAttempts()
     ) {
       this.startAttempt(this.pending.shift()!);
       this.normalLaunchCount += 1;
+    }
+
+    if (this.normalLaunchIntervalMs <= 0) {
+      while (
+        this.pending.length > 0 &&
+        !this.rateLimitMode &&
+        !this.isAtConcurrencyLimit()
+      ) {
+        const next = this.pending.shift();
+        if (next === undefined) break;
+        this.startAttempt(next);
+        this.normalLaunchCount += 1;
+      }
+      return;
     }
 
     if (
@@ -210,11 +230,15 @@ export class AgentRunBatch<T> {
       this.startAttempt(this.pending.shift()!);
       this.normalLaunchCount += 1;
       this.schedule();
-    }, INITIAL_LAUNCH_INTERVAL_MS);
+    }, this.normalLaunchIntervalMs);
   }
 
   private isAtConcurrencyLimit(): boolean {
     return this.maxConcurrency !== undefined && this.active.size >= this.maxConcurrency;
+  }
+
+  private maxActiveAttempts(): number {
+    return this.maxConcurrency ?? Number.POSITIVE_INFINITY;
   }
 
   private scheduleRateLimitLaunch(): void {
@@ -227,6 +251,7 @@ export class AgentRunBatch<T> {
       this.scheduleRateLimitWakeup(this.nextRateLimitCapacityRecoveryAt(), now);
       return;
     }
+    if (this.isAtConcurrencyLimit()) return;
 
     const nextAllowedAt = Math.max(this.nextRateLimitLaunchAt, this.nextPendingReadyAt());
     const nextWakeupAt = Math.min(nextAllowedAt, this.nextRateLimitCapacityRecoveryAt());
@@ -294,6 +319,7 @@ export class AgentRunBatch<T> {
         const spawnOptions: AgentSpawnAttemptOptions = {
           profileName: task.profileName,
           swarmItem: task.swarmItem,
+          name: task.name,
           plan: task.plan,
           ...runOptions,
         };
@@ -435,7 +461,10 @@ export class AgentRunBatch<T> {
     if (!this.rateLimitMode) {
       this.rateLimitMode = true;
       this.clearNormalTimer();
-      this.rateLimitCapacity = Math.max(1, this.startedSuccessCount);
+      this.rateLimitCapacity = Math.max(
+        1,
+        Math.min(this.startedSuccessCount, this.maxActiveAttempts()),
+      );
       this.nextRateLimitLaunchAt = Math.max(
         this.nextRateLimitLaunchAt,
         now + RATE_LIMIT_RETRY_BASE_MS,
@@ -464,7 +493,7 @@ export class AgentRunBatch<T> {
     const nextRecoveryAt = this.nextRateLimitCapacityRecoveryAt();
     if (nextRecoveryAt > now) return;
 
-    this.rateLimitCapacity += 1;
+    this.rateLimitCapacity = Math.min(this.rateLimitCapacity + 1, this.maxActiveAttempts());
     this.lastCapacityRecoveryAt = now;
     this.nextRateLimitLaunchAt = Math.min(this.nextRateLimitLaunchAt, now);
   }
@@ -495,10 +524,12 @@ export class AgentRunBatch<T> {
     const nextWakeupAt =
       this.active.size >= this.rateLimitCapacity
         ? this.nextRateLimitCapacityRecoveryAt()
-        : Math.min(
-            Math.max(this.nextRateLimitLaunchAt, this.nextPendingReadyAt()),
-            this.nextRateLimitCapacityRecoveryAt(),
-          );
+        : this.isAtConcurrencyLimit()
+          ? Number.POSITIVE_INFINITY
+          : Math.min(
+              Math.max(this.nextRateLimitLaunchAt, this.nextPendingReadyAt()),
+              this.nextRateLimitCapacityRecoveryAt(),
+            );
 
     this.scheduleRateLimitWakeup(nextWakeupAt, now);
   }
@@ -639,6 +670,22 @@ export function resolveSwarmMaxConcurrency(
     throw new Error2(
       ErrorCodes.VALIDATION_FAILED,
       `${AGENT_SWARM_MAX_CONCURRENCY_ENV} must be a positive integer, got ${JSON.stringify(raw)}.`,
+      { details: { value: raw } },
+    );
+  }
+  return value;
+}
+
+export function resolveSwarmLaunchIntervalMs(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = env[AGENT_SWARM_LAUNCH_INTERVAL_ENV];
+  if (raw === undefined || raw.trim() === '') return 0;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error2(
+      ErrorCodes.VALIDATION_FAILED,
+      `${AGENT_SWARM_LAUNCH_INTERVAL_ENV} must be a non-negative integer, got ${JSON.stringify(raw)}.`,
       { details: { value: raw } },
     );
   }

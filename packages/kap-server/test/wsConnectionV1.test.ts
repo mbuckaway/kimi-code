@@ -660,6 +660,37 @@ describe('WsConnectionV1 outbound buffer', () => {
     conn.close();
   });
 
+  it('delivers a pre-serialized frame immediately without re-serializing it', () => {
+    const socket = new FakeSocket();
+    const conn = makeConn(socket, { flushIntervalMs: 16 });
+    socket.sent = [];
+    const wire = '{ "type": "transcript.ops",   "seq": 9 }';
+
+    conn.sendSerialized(wire, 'immediate');
+
+    expect(socket.sent).toEqual([wire]);
+    conn.close();
+  });
+
+  it('batches serialized and object frames together while passing the strings through unchanged', async () => {
+    const socket = new FakeSocket();
+    const conn = makeConn(socket, { flushIntervalMs: 16 });
+    socket.sent = [];
+    const firstWire = '{"type":"custom.first",  "seq": 21}';
+    const envelope = durable('event.session.work_changed', 's1', 22);
+    const secondWire = '{ "type": "custom.second", "seq": 23 }';
+
+    conn.sendSerialized(firstWire);
+    conn.send(envelope);
+    conn.sendSerialized(secondWire);
+    expect(socket.sent).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(16);
+
+    expect(socket.sent).toEqual([firstWire, JSON.stringify(envelope), secondWire]);
+    conn.close();
+  });
+
   it('sends public events immediately and preserves FIFO with subscribed events', async () => {
     const socket = new FakeSocket();
     const conn = makeConn(socket, { flushIntervalMs: 16 });

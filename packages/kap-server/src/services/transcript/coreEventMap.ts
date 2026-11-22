@@ -1539,6 +1539,8 @@ function mapTurnOrigin(origin: unknown): TurnOrigin {
       return { kind: 'compaction', payload: origin };
     case 'shell_command':
       return { kind: 'user', payload: origin };
+    case 'agent_message':
+      return { kind: 'other', payload: origin };
     default:
       return { kind: 'other', payload: origin };
   }

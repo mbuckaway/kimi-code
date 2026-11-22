@@ -14,6 +14,7 @@ import { FullCompactionErrors } from '#/agent/fullCompaction/errors';
 import { GoalErrors } from '#/features/goal/errors';
 import { LoopErrors } from '#/agent/loop/errors';
 import { McpErrors } from '#/mcpCore/errors';
+import { MessagingErrors } from '#/features/messaging/errors';
 import { ModelCatalogErrors } from '#/kosong/model/errors';
 import { OsFsErrors } from '#/os/interface/hostFsErrors';
 import { OsProcessErrors } from '#/os/interface/hostProcess';
@@ -51,6 +52,7 @@ export { FullCompactionErrors } from '#/agent/fullCompaction/errors';
 export { GoalErrors } from '#/features/goal/errors';
 export { LoopErrors } from '#/agent/loop/errors';
 export { McpErrors } from '#/mcpCore/errors';
+export { MessagingErrors } from '#/features/messaging/errors';
 export { ModelCatalogErrors } from '#/kosong/model/errors';
 export { OsFsErrors } from '#/os/interface/hostFsErrors';
 export { OsProcessErrors } from '#/os/interface/hostProcess';
@@ -86,6 +88,7 @@ export const ErrorCodes = {
   ...GoalErrors.codes,
   ...LoopErrors.codes,
   ...McpErrors.codes,
+  ...MessagingErrors.codes,
   ...ModelCatalogErrors.codes,
   ...OsFsErrors.codes,
   ...OsProcessErrors.codes,

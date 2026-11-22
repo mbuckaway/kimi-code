@@ -22,9 +22,13 @@ subagent 由 main agent 自动调度——根据任务复杂度、上下文消�
 
 subagent 支持在后台运行：完成后结果自动回到 main agent，无需手动轮询。也可以唤回已有的 subagent 实例继续推进同一任务。
 
+Agent 间的消息通信是由 `agent_messaging` flag 控制的实验功能，默认启用；可通过 `KIMI_CODE_EXPERIMENTAL_AGENT_MESSAGING=0` 或 `config.toml` 中 `[experimental]` 下的 `agent_messaging = false` 禁用。启用时，`Agent` 工具接受可选的 `name` 参数，让新 subagent 可按名称寻址：名称由 1–64 个字母、数字、`.`、`_` 或 `-` 组成，在会话的所有 subagent 中唯一，`main` 保留给根 agent；恢复（resume）时该参数会被忽略。
+
+此后，Agent 之间可以用 `SendMessage` 互相发消息，并用 `ListAgents` 查看可以联系的对象。运行中的 Agent 会在下一个步骤边界收到消息，空闲的 Agent（包括 `main`）会被唤醒来回复。消息以 `<agent-message>` 信封送达，属于来自其他 Agent 的不受信任输入：既不是用户审批，也不授予任何权限。subagent 的启动提示词中还会附带一份可联系 Agent 的名单（roster）。
+
 ## 上下文隔离与资源开销
 
-每个 subagent 拥有完全独立的上下文窗口，只能看到 main agent 显式传入的任务描述，看不到 main agent 的对话历史。subagent 自己的中间思考和工具调用记录不会回流，只有最终结果会出现在 main agent 的上下文里。
+每个 subagent 拥有完全独立的上下文窗口，只能看到 main agent 显式传入的内容（默认只有任务描述），看不到 main agent 的对话历史。subagent 自己的中间思考和工具调用记录不会回流，只有最终结果会出现在 main agent 的上下文里。启用 [Agent 间的消息通信](#调用方式) 后，与其他 Agent 交换的消息会双向传递，这是上述隔离的唯一例外。
 
 这种隔离带来两个好处：
 
@@ -102,12 +106,15 @@ disallowedTools:
 | `tools` | 否 | 工具名允许列表，如 `Read`、`Bash`；MCP 工具用 glob 匹配，如 `mcp__github__*`。支持 YAML 列表或逗号分隔字符串（`tools: Read, Grep`）两种写法。缺省表示允许全部工具；单独的 `*` 同样表示允许全部工具；空列表（`tools: []`）表示禁用全部工具 |
 | `disallowedTools` | 否 | 禁止列表，写法与匹配规则相同，在 `tools` 之后应用 |
 | `subagents` | 否 | 允许委派的 subagent 名称列表，写法与 `tools` 相同（YAML 列表或逗号分隔字符串）。缺省表示继承默认 Agent 的委派列表（内置默认为 `coder`、`explore`、`plan`，它们自身都不能再派发，因此继承得到的链路必然终止）；单独的 `*` 表示可委派所有类型。main agent 的有效委派列表还会自动并入所有发现的自定义 Agent，因此自定义 Agent 默认即可被委派 |
+| `extends` | 否 | 该文件叠加角色层时所基于的基座 Agent。存在时，文件是 [persona](#persona) 而不是独立 Agent |
+| `mode` | 否 | persona 与基座 Agent 的组合方式：`overlay`（默认）把正文渲染到基座提示词的 `${persona}` 位置，`replace` 让正文成为系统提示词、`${base_prompt}` 仍展开为基座提示词。其他取值会被忽略并回退到默认值。仅在存在 `extends` 时读取；见 [Persona](#persona) |
+| `skills` | 否 | persona 的强项，支持 YAML 列表或逗号分隔字符串，渲染为 persona 块末尾的 `You are strongest at: <列表>.`。`skills` 不存在时可用 `expertise` 作为别名 |
 
 内置工具与用户工具按名称精确匹配（区分大小写）；以 `mcp__` 开头的条目按 glob 匹配 MCP 工具。有三种写法永远匹配不到任何工具，在 profile 生效时会给出警告：`mcp__` 模式之外使用通配符（`disallowedTools` 里单独的 `*` 什么也禁不掉）；不是完整 `mcp__<服务器>__<工具>` 形式的 `mcp__` 字面量（`mcp__github` 匹配不到任何工具 —— 匹配整个服务器要用 `mcp__github__*`）；以及任何已注册或内置工具都没有的名字（通常是笔误，如把 `Read` 写成 `read`）。
 
 正文即 Agent 的系统提示词，每次构建提示词时都会作为模板渲染：`${var}` 占位符替换为实时上下文值——未知变量保持原样，单独的 `$` 没有特殊含义，上下文中缺失的变量渲染为空字符串。`${base_prompt}` 会在你放置它的位置嵌入有效默认系统提示词（内置默认，或存在时为你的 `SYSTEM.md` 覆盖），因此文件可以"包裹"默认行为而不是替换它。如果文件会替换默认提示词、但仍要保留已启用 plugin 提供的指令，请把 `${plugin_sections}` 放在希望出现这些指令的位置。可用变量见下文 SYSTEM.md 变量表。
 
-未知字段会被忽略，新版本写的文件在旧版本上仍可读取。其他 Agent 工具的字段（如 Claude Code 的 `model`、OpenCode 的 `mode`）同样会被忽略；加上 `tools` 的逗号分隔写法和 `name` 缺省回退到文件名，Claude Code 与 OpenCode 风格的 Agent 文件一般可直接加载 —— 只含 `description` 和正文的最小文件可跨工具通用。
+未知字段会被忽略，新版本写的文件在旧版本上仍可读取。其他 Agent 工具的字段（如 Claude Code 的 `model`）同样会被忽略，`mode` 取 `overlay` 或 `replace` 之外的值（例如 OpenCode 的 `mode: subagent`）也会回退到默认值。加上 `tools` 的逗号分隔写法和 `name` 缺省回退到文件名，Claude Code 与 OpenCode 风格的 Agent 文件一般可直接加载 —— 只含 `description` 和正文的最小文件可跨工具通用。
 
 目录中发现的非法文件会被跳过并告警，不影响其他文件。通过 `--agent-file` 显式传入的文件必须合法 —— 否则 CLI 会报错并退出。
 
@@ -116,6 +123,29 @@ disallowedTools:
 :::
 
 作为 subagent 委派的自定义 Agent 不会携带内置 subagent 的角色框架（"你的最后一条消息就是完整交付"）。如果编写的 Agent 用于委派，请在正文中说明：其最后一条消息应当是交付给调用方的完整、自包含的结果。
+
+### Persona
+
+Persona 是一个 Agent 文件，它给另一个 Agent（基座 Agent）叠加一层角色设定，而不是定义一个独立 Agent。多个任务共用同一个基座 Agent、但需要不同角色框架时使用它 —— 例如让一个 `coder` 在某个派生中侧重安全审查，在另一个派生中侧重性能审查。该功能是实验功能，默认启用：通过 `KIMI_CODE_EXPERIMENTAL_AGENT_PERSONA=0` 或 `config.toml` 中 `[experimental]` 下的 `agent_persona = false` 禁用。
+
+Persona 用 `extends` 声明基座 Agent，用 `mode` 选择两段提示词的组合方式。`mode: overlay` 是默认值：基座系统提示词保持完整，persona 正文渲染到它的 `${persona}` 位置，排在角色段落之后。`mode: replace` 则让 persona 正文成为系统提示词，而 `${base_prompt}` 仍展开为有效的基座提示词，因此正文可以主动包裹它。
+
+```markdown
+---
+name: security-reviewer
+extends: coder
+mode: overlay
+skills:
+  - threat modeling
+  - secrets detection
+---
+
+逐项检查每个改动的注入风险、凭证处理和危险默认值……
+```
+
+Persona 只能收窄基座 Agent，绝不能放宽。它的 `tools` 与 `subagents` 列表会和基座列表取交集，`mcp__` glob 只会在对应服务器的模式内匹配，因此结果始终是基座允许列表的子集。`disallowedTools` 取两者的并集。Persona 永远无法新增基座不具备的工具、subagent 类型或其他能力。
+
+通过 `Agent` 的 `persona` 参数使用 persona 时，文件必须声明 `extends`，且值必须指向本次派生的基座 Agent。缺失 `extends` 会以 `persona.base_required` 拒绝，基座不一致会以 `persona.base_mismatch` 拒绝。路径形式的 persona 只在本次派生中生效，不会注册进 Agent 目录，并且必须位于工作区内。`Agent(name)` 给 subagent 实例一个可寻址的名称，`persona` 选择该实例的角色 —— 两个参数彼此独立。
 
 ### 选择 main agent
 
@@ -156,8 +186,9 @@ SYSTEM.md 是纯 Markdown 正文，不需要也不读取 Frontmatter。文件缺
 | `${additional_dirs_info}` | 加入工作区的额外目录信息；没有时为空 |
 | `${base_prompt}` | 默认系统提示词。在 `SYSTEM.md` 中指内置默认提示词；在 Agent 文件中指有效默认提示词（内置默认，或存在时为你的 `SYSTEM.md` 覆盖） |
 | `${plugin_sections}` | 已启用 plugin 提供的完整 Plugin Instructions 块；没有已启用 plugin 提供指令时为空 |
+| `${persona}` | 生效中的 persona 块，由 persona 正文及其 `skills` 行组成；没有生效的 persona 时为空 |
 
-未知变量原样保留，单独的 `$` 没有特殊含义；上下文中缺失的变量渲染为空字符串。另有四个预组合块——`${windows_notes}`、`${additional_dirs_section}`、`${skills_section}`、`${plugin_sections}`——渲染对应的内置提示词段落，不适用时为空字符串。内置默认提示词已经包含 `${plugin_sections}`；当 `${base_prompt}` 已展开为该提示词时，不要再重复加入此变量。利用这些变量可以重建内置提示词的骨架，例如：
+未知变量原样保留，单独的 `$` 没有特殊含义；上下文中缺失的变量渲染为空字符串。另有五个预组合块——`${windows_notes}`、`${additional_dirs_section}`、`${skills_section}`、`${plugin_sections}`、`${persona}`——渲染对应的内置提示词段落，不适用时为空字符串。内置默认提示词已经包含 `${plugin_sections}`；当 `${base_prompt}` 已展开为该提示词时，不要再重复加入此变量。利用这些变量可以重建内置提示词的骨架，例如：
 
 ```markdown
 You are Kimi, running at ${cwd} on ${os}.

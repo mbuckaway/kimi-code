@@ -33,8 +33,13 @@ export class SessionAgentProfileCatalogService
 
   private merged = new Map<string, AgentProfile>();
   private inspections = new Map<string, AgentProfileInspection>();
+  private revisionValue = 0;
   private readonly onDidChangeEmitter = this._register(new Emitter<string>());
   readonly onDidChange: Event<string> = this.onDidChangeEmitter.event;
+
+  get revision(): number {
+    return this.revisionValue;
+  }
 
   constructor(
     @IAgentProfileRegistry private readonly registry: IAgentProfileRegistry,
@@ -185,6 +190,7 @@ export class SessionAgentProfileCatalogService
 
     this.merged = merged;
     this.inspections = inspections;
+    this.revisionValue += 1;
   }
 }
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { ContextSpliced } from '#/agent/contextMemory/contextEvents';
@@ -6,6 +6,7 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { contextMemoryKey } from '#/agent/contextMemory/contextOps';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { AgentReminder, type ReminderRuntime } from '#/features/reminder/reminderAgentRuntime';
+import type { ContextInjectionContext } from '#/features/reminder/types';
 import type { AgentRuntimeDefinition } from '#/agent/runtime/agentRuntime';
 import { IEventBus } from '#/app/event/eventBus';
 import { IFeatureManager } from '#/app/feature/featureManager';
@@ -33,6 +34,19 @@ function compactionSummary(text: string): ContextMessage {
   };
 }
 
+function injectionMessage(
+  variant: string,
+  text: string,
+  disclosure?: unknown,
+): ContextMessage {
+  return {
+    role: 'user',
+    content: [{ type: 'text', text }],
+    toolCalls: [],
+    origin: { kind: 'injection', variant, disclosure },
+  };
+}
+
 function lastText(context: IAgentContextMemoryService): string | undefined {
   const message = context.get().at(-1);
   const part = message?.content[0];
@@ -55,6 +69,7 @@ describe('ReminderRuntime', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await ctx.dispose();
   });
 
@@ -214,6 +229,178 @@ describe('ReminderRuntime', () => {
     await runInjectionStep();
 
     expect(seen).toEqual([[], [0], [0, 2]]);
+  });
+
+  it('reads the history once per step no matter how many variants are registered', async () => {
+    const seen: string[] = [];
+    const registerVariant = (variant: string): void => {
+      reminder.register(variant, () => {
+        seen.push(variant);
+        return undefined;
+      });
+    };
+    for (const variant of ['variant_a', 'variant_b', 'variant_c', 'variant_d']) {
+      registerVariant(variant);
+    }
+    const getSpy = vi.spyOn(context, 'get');
+
+    await runInjectionStep();
+    expect(seen).toEqual(['variant_a', 'variant_b', 'variant_c', 'variant_d']);
+    const baseline = getSpy.mock.calls.length;
+    getSpy.mockClear();
+    seen.length = 0;
+    for (const variant of ['variant_e', 'variant_f', 'variant_g', 'variant_h']) {
+      registerVariant(variant);
+    }
+    await runInjectionStep();
+
+    expect(seen).toEqual([
+      'variant_a',
+      'variant_b',
+      'variant_c',
+      'variant_d',
+      'variant_e',
+      'variant_f',
+      'variant_g',
+      'variant_h',
+    ]);
+    expect(getSpy).toHaveBeenCalledTimes(baseline);
+    expect(getSpy.mock.calls.length).toBeLessThan(8);
+  });
+
+  it('gives every provider its own interleaved injection positions from one shared index', async () => {
+    context.append(
+      userMessage('first'),
+      injectionMessage('alpha', 'alpha one', 'alpha-receipt-1'),
+      userMessage('middle'),
+      injectionMessage('beta', 'beta one'),
+      userMessage('later'),
+      injectionMessage('alpha', 'alpha two', 'alpha-receipt-2'),
+    );
+    const seen = new Map<string, ContextInjectionContext>();
+
+    reminder.register('alpha', (providerCtx) => {
+      seen.set('alpha', providerCtx);
+      return undefined;
+    });
+    reminder.register('beta', (providerCtx) => {
+      seen.set('beta', providerCtx);
+      return undefined;
+    });
+
+    await runInjectionStep();
+
+    const history = context.get();
+    const alpha = seen.get('alpha');
+    const beta = seen.get('beta');
+    expect(alpha?.injectedPositions).toEqual([1, 5]);
+    expect(alpha?.lastInjectedAt).toBe(5);
+    expect(alpha?.lastInjection).toBe(history[5]);
+    expect(alpha?.lastDisclosure).toBe('alpha-receipt-2');
+    expect(alpha?.isNewTurn).toBe(false);
+    expect(beta?.injectedPositions).toEqual([3]);
+    expect(beta?.lastInjectedAt).toBe(3);
+    expect(beta?.lastInjection).toBe(history[3]);
+    expect(beta?.lastDisclosure).toBeUndefined();
+    expect(history).toHaveLength(6);
+  });
+
+  it('keeps a provider on the pass-start snapshot when its own variant was appended earlier in the pass', async () => {
+    const seen: Array<{
+      readonly injectedPositions: readonly number[];
+      readonly lastInjectedAt: number | null;
+      readonly historyLength: number;
+      readonly tail: string | undefined;
+    }> = [];
+    const observe = (providerCtx: ContextInjectionContext): string => {
+      seen.push({
+        injectedPositions: providerCtx.injectedPositions,
+        lastInjectedAt: providerCtx.lastInjectedAt,
+        historyLength: context.get().length,
+        tail: lastText(context),
+      });
+      return 'same-pass reminder';
+    };
+
+    reminder.register('snapshot_variant', observe);
+    reminder.register('snapshot_variant', observe);
+
+    await runInjectionStep();
+
+    expect(seen).toEqual([
+      { injectedPositions: [], lastInjectedAt: null, historyLength: 0, tail: undefined },
+      {
+        injectedPositions: [],
+        lastInjectedAt: null,
+        historyLength: 1,
+        tail: expect.stringContaining('same-pass reminder'),
+      },
+    ]);
+
+    seen.length = 0;
+    await runInjectionStep();
+
+    expect(seen).toEqual([
+      {
+        injectedPositions: [0, 1],
+        lastInjectedAt: 1,
+        historyLength: 2,
+        tail: expect.stringContaining('same-pass reminder'),
+      },
+      {
+        injectedPositions: [0, 1],
+        lastInjectedAt: 1,
+        historyLength: 3,
+        tail: expect.stringContaining('same-pass reminder'),
+      },
+    ]);
+    expect(context.get()).toHaveLength(4);
+  });
+
+  it('drops injection positions that a mid-pass splice pushed out of range', async () => {
+    context.append(
+      userMessage('first'),
+      userMessage('second'),
+      injectionMessage('snapshot_variant', 'stale reminder'),
+    );
+    const seen: Array<{
+      readonly injectedPositions: readonly number[];
+      readonly lastInjectedAt: number | null;
+      readonly lastInjection: ContextMessage | undefined;
+    }> = [];
+    let signalGate!: () => void;
+    const gateStarted = new Promise<void>((resolve) => {
+      signalGate = resolve;
+    });
+    let releaseGate!: () => void;
+    const gateReleased = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+
+    reminder.register('gate_variant', async () => {
+      signalGate();
+      await gateReleased;
+      return undefined;
+    });
+    reminder.register('snapshot_variant', (providerCtx) => {
+      seen.push({
+        injectedPositions: providerCtx.injectedPositions,
+        lastInjectedAt: providerCtx.lastInjectedAt,
+        lastInjection: providerCtx.lastInjection,
+      });
+      return undefined;
+    });
+
+    const step = runInjectionStep();
+    await gateStarted;
+    spliceContext(0, 3, [userMessage('rewritten history')]);
+    releaseGate();
+    await step;
+
+    expect(seen).toEqual([
+      { injectedPositions: [], lastInjectedAt: null, lastInjection: undefined },
+    ]);
+    expect(context.get().map((message) => message.origin?.kind)).toEqual(['user']);
   });
 
   it('falls back to the previous surviving copy when the newest injection is deleted', async () => {

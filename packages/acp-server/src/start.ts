@@ -196,6 +196,7 @@ export async function runAcpServerWithStream(
       if (agentHandle === undefined) return undefined;
       return agentHandle.accessor.get(IAgentPermissionModeService).mode;
     },
+    promptDeadlineMs: opts.promptDeadlineMs,
   });
 
   let closePromise: Promise<void> | undefined;

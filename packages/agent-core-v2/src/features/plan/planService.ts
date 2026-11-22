@@ -135,11 +135,11 @@ export class AgentPlanService extends Service implements IAgentPlanService {
       return;
     }
 
-    if (toolName === 'TaskStop') {
+    if (PLAN_MODE_BLOCKED_TOOLS.has(toolName)) {
       event.veto(
         denyToolExecution(
           this.toolApproval.formatDenyMessage(
-            'TaskStop is not available in plan mode. Call ExitPlanMode to exit plan mode before stopping a background task.',
+            `${toolName} is not available in plan mode. Call ExitPlanMode to exit plan mode before running it.`,
           ),
         ),
       );
@@ -328,6 +328,14 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     await this.hostFs.mkdir(dirname(path), { recursive: true });
   }
 }
+
+const PLAN_MODE_BLOCKED_TOOLS: ReadonlySet<string> = new Set([
+  'TaskStop',
+  'StopAgent',
+  'StopAgents',
+  'DismissAgents',
+  'InterruptAgent',
+]);
 
 function isMissingFileError(error: unknown): boolean {
   const unwrapped = unwrapErrorCause(error);

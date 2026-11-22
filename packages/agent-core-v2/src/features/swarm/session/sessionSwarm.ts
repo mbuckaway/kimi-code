@@ -12,6 +12,7 @@ type SessionSwarmTaskBase<T> = {
   readonly description: string;
   readonly swarmIndex?: number;
   readonly swarmItem?: string;
+  readonly name?: string;
   readonly runInBackground: boolean;
   readonly timeout?: number;
   readonly signal?: AbortSignal;

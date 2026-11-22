@@ -23,6 +23,7 @@ import {
 } from '#/app/auth/configSection';
 import { IWebSearchProviderService } from '#/app/auth/webSearch/webSearch';
 import { WebSearchProviderService } from '#/app/auth/webSearch/webSearchService';
+import { DeepseekWebSearchProvider } from '#/app/auth/webSearch/providers/deepseek-web-search';
 import { QwenWebSearchProvider } from '#/app/auth/webSearch/providers/qwen-web-search';
 import { ZaiWebSearchProvider } from '#/app/auth/webSearch/providers/zai-web-search';
 import { IAuthLegacyService } from '#/app/authLegacy/authLegacy';
@@ -1214,12 +1215,16 @@ describe('WebSearchProviderService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
   let providers: Record<string, ProviderConfig>;
+  let models: Record<string, ModelRecord>;
+  let defaultModel: string | undefined;
   let servicesConfig: ServicesConfig | undefined;
   let resolveTokenProvider: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     disposables = new DisposableStore();
     providers = {};
+    models = {};
+    defaultModel = undefined;
     servicesConfig = undefined;
     resolveTokenProvider = vi
       .fn()
@@ -1228,6 +1233,10 @@ describe('WebSearchProviderService', () => {
       additionalServices: (reg) => {
         reg.definePartialInstance(IProviderService, {
           get: ((name: string) => providers[name]) as IProviderService['get'],
+        });
+        reg.definePartialInstance(IModelService, {
+          get: ((id: string) => models[id]) as IModelService['get'],
+          getDefaultModel: (() => defaultModel) as IModelService['getDefaultModel'],
         });
         reg.definePartialInstance(IOAuthService, {
           resolveTokenProvider:
@@ -1735,6 +1744,10 @@ describe('WebSearchProviderService', () => {
           domain === SERVICES_SECTION ? servicesConfig : undefined) as IConfigService['get'],
       } as IConfigService,
       notFrozen,
+      {
+        get: ((id: string) => models[id]) as IModelService['get'],
+        getDefaultModel: (() => defaultModel) as IModelService['getDefaultModel'],
+      } as IModelService,
     );
 
     servicesConfig = { search: { provider: 'zai', apiKey: 'zai-key' } };
@@ -1776,6 +1789,10 @@ describe('WebSearchProviderService', () => {
           domain === SERVICES_SECTION ? servicesConfig : undefined) as IConfigService['get'],
       } as IConfigService,
       notFrozen,
+      {
+        get: ((id: string) => models[id]) as IModelService['get'],
+        getDefaultModel: (() => defaultModel) as IModelService['getDefaultModel'],
+      } as IModelService,
     );
 
     expect(svc.hasWebSearchProvider()).toBe(true);
@@ -1793,6 +1810,154 @@ describe('WebSearchProviderService', () => {
       },
     };
     expect(svc.hasWebSearchProvider()).toBe(true);
+  });
+
+  it('builds a deepseek search provider when services.search selects deepseek', async () => {
+    servicesConfig = { search: { provider: 'deepseek', apiKey: 'deepseek-key' } };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({
+        results: [
+          {
+            title: 'Title',
+            url: 'https://example.com/a',
+            snippet: 'Snippet',
+            summary: 'Summary',
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).toBeInstanceOf(DeepseekWebSearchProvider);
+    const results = await provider!.search('hello');
+
+    expect(results).toEqual([
+      { title: 'Title', url: 'https://example.com/a', snippet: 'Summary' },
+    ]);
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.deepseek.com/v1/tools/search');
+    expect(init.headers).toEqual({
+      Authorization: 'Bearer deepseek-key',
+      'Content-Type': 'application/json',
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      query: 'hello',
+      count: 10,
+      need_content: false,
+    });
+  });
+
+  it('prefers the deepseek provider config when services.search selects deepseek without an api key', async () => {
+    servicesConfig = { search: { provider: 'deepseek' } };
+    providers = {
+      deepseek: { type: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'provider-key' },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ results: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).toBeInstanceOf(DeepseekWebSearchProvider);
+    await provider!.search('hello');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.deepseek.com/v1/tools/search');
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer provider-key');
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when services.search selects deepseek without any api key', () => {
+    servicesConfig = { search: { provider: 'deepseek' } };
+    providers = { deepseek: { type: 'deepseek', baseUrl: 'https://api.deepseek.com' } };
+    expect(createService().getWebSearchProvider()).toBeUndefined();
+    expect(createService().hasWebSearchProvider()).toBe(false);
+  });
+
+  it('returns true when services.search selects deepseek with an api key', () => {
+    servicesConfig = { search: { provider: 'deepseek', apiKey: 'deepseek-key' } };
+    expect(createService().hasWebSearchProvider()).toBe(true);
+  });
+
+  it('builds a deepseek search provider from the provider config when services.search leaves the provider unset', async () => {
+    defaultModel = 'deepseek-v4.1-flash';
+    models = { 'deepseek-v4.1-flash': { provider: 'deepseek' } };
+    providers = {
+      deepseek: { type: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'deepseek-key' },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ results: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).toBeInstanceOf(DeepseekWebSearchProvider);
+    expect(createService().hasWebSearchProvider()).toBe(true);
+    await provider!.search('hello');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.deepseek.com/v1/tools/search');
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer deepseek-key');
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('builds a deepseek search provider when the default model declares the web_search capability', async () => {
+    defaultModel = 'custom-model';
+    models = { 'custom-model': { provider: 'custom', capabilities: [' Web_Search '] } };
+    providers = { deepseek: { apiKey: 'deepseek-key' } };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ results: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).toBeInstanceOf(DeepseekWebSearchProvider);
+    expect(createService().hasWebSearchProvider()).toBe(true);
+    await provider!.search('hello');
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.deepseek.com/v1/tools/search');
+  });
+
+  it('keeps the managed oauth fallback when the default model is not deepseek', () => {
+    defaultModel = 'kimi';
+    models = { kimi: { provider: OAUTH_PROVIDER } };
+    providers = {
+      [OAUTH_PROVIDER]: {
+        type: 'kimi',
+        baseUrl: 'https://api.example.com/v1',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+      },
+    };
+    expect(createService().getWebSearchProvider()).not.toBeUndefined();
+    expect(resolveTokenProvider).toHaveBeenCalledWith(OAUTH_PROVIDER, {
+      storage: 'file',
+      key: 'oauth/kimi-code',
+    });
+  });
+
+  it('falls back to the managed oauth provider when the deepseek provider has no api key', () => {
+    defaultModel = 'deepseek-v4.1-flash';
+    models = { 'deepseek-v4.1-flash': { provider: 'deepseek' } };
+    providers = {
+      deepseek: { type: 'deepseek', baseUrl: 'https://api.deepseek.com' },
+      [OAUTH_PROVIDER]: {
+        type: 'kimi',
+        baseUrl: 'https://api.example.com/v1',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+      },
+    };
+    expect(createService().getWebSearchProvider()).not.toBeUndefined();
+    expect(resolveTokenProvider).toHaveBeenCalledWith(OAUTH_PROVIDER, {
+      storage: 'file',
+      key: 'oauth/kimi-code',
+    });
   });
 });
 
@@ -2340,6 +2505,179 @@ describe('QwenWebSearchProvider', () => {
     await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
       code: ErrorCodes.WEB_FETCH_FAILED,
       message: 'Qwen search request failed: HTTP 500.',
+      details: { status: 500 },
+    });
+  });
+});
+
+describe('DeepseekWebSearchProvider', () => {
+  const API_KEY = 'YOUR_API_KEY';
+  const DEFAULT_URL = 'https://api.deepseek.com/v1/tools/search';
+
+  function providerWith(fetchMock: Mock, baseUrl?: string): DeepseekWebSearchProvider {
+    return new DeepseekWebSearchProvider({
+      apiKey: API_KEY,
+      baseUrl,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+  }
+
+  function jsonResponse(status: number, payload: unknown) {
+    return { status, json: async () => payload, text: async () => '' };
+  }
+
+  it('posts the tools search request with the bearer key and maps the result fields', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({
+        results: [
+          {
+            title: 'Title',
+            url: 'https://example.com/a',
+            snippet: 'Snippet',
+            summary: 'Summary',
+            site_name: 'Example',
+            date: '2026-01-02',
+            authority: 'high',
+            rerank_score: 0.9,
+          },
+        ],
+      }),
+    });
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([
+      {
+        title: 'Title',
+        url: 'https://example.com/a',
+        snippet: 'Summary',
+        date: '2026-01-02',
+        siteName: 'Example',
+      },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(DEFAULT_URL);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({
+      Authorization: `Bearer ${API_KEY}`,
+      'Content-Type': 'application/json',
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      query: 'hello',
+      count: 10,
+      need_content: false,
+    });
+  });
+
+  it('falls back to the snippet when the summary is blank', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        results: [
+          { title: 'Title', url: 'https://example.com/a', snippet: 'Snippet', summary: '' },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([
+      { title: 'Title', url: 'https://example.com/a', snippet: 'Snippet' },
+    ]);
+  });
+
+  it('omits date and siteName when date and site_name are blank', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        results: [
+          {
+            title: 'Title',
+            url: 'https://example.com/a',
+            snippet: 'Snippet',
+            site_name: '',
+            date: '',
+          },
+        ],
+      }),
+    );
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([
+      { title: 'Title', url: 'https://example.com/a', snippet: 'Snippet' },
+    ]);
+  });
+
+  it('defaults missing result fields to empty strings', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { results: [{}] }));
+
+    const results = await providerWith(fetchMock).search('hello');
+
+    expect(results).toEqual([{ title: '', url: '', snippet: '' }]);
+  });
+
+  it('returns an empty list when results is missing or not an array', async () => {
+    const missing = vi.fn().mockResolvedValue(jsonResponse(200, {}));
+    const notArray = vi.fn().mockResolvedValue(jsonResponse(200, { results: 'nope' }));
+
+    expect(await providerWith(missing).search('hello')).toEqual([]);
+    expect(await providerWith(notArray).search('hello')).toEqual([]);
+  });
+
+  it('posts to an overridden baseUrl and forwards the abort signal', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { results: [] }));
+    const controller = new AbortController();
+
+    await providerWith(fetchMock, 'https://search.example.test/').search('hello', {
+      signal: controller.signal,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://search.example.test/v1/tools/search');
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it('throws web.fetch_failed on HTTP 401 with the response detail', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 401,
+      text: async () => 'Unauthorized',
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Deepseek search request failed: HTTP 401 (auth/unauthorized). Unauthorized',
+      details: { status: 401 },
+    });
+  });
+
+  it('throws web.fetch_failed on a non-200 response with the status detail', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 503,
+      text: async () => 'busy',
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Deepseek search request failed: HTTP 503. busy',
+      details: { status: 503 },
+    });
+  });
+
+  it('throws web.fetch_failed with an empty detail when the error body cannot be read', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 500,
+      text: async () => {
+        throw new Error('body stream failed');
+      },
+      json: async () => ({}),
+    });
+
+    await expect(providerWith(fetchMock).search('hello')).rejects.toMatchObject({
+      code: ErrorCodes.WEB_FETCH_FAILED,
+      message: 'Deepseek search request failed: HTTP 500.',
       details: { status: 500 },
     });
   });

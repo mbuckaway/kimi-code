@@ -43,6 +43,13 @@ describe('DefaultToolApprovePermissionPolicy', () => {
     expect(policy.evaluate(policyContext('CronList', {}))).toEqual({ kind: 'approve' });
   });
 
+  it('auto-approves agent messaging tools', () => {
+    expect(
+      policy.evaluate(policyContext('SendMessage', { to: 'main', message: 'Ready.' })),
+    ).toEqual({ kind: 'approve' });
+    expect(policy.evaluate(policyContext('ListAgents', {}))).toEqual({ kind: 'approve' });
+  });
+
   it('does not approve CronCreate', () => {
     expect(
       policy.evaluate(policyContext('CronCreate', { cron: '*/5 * * * *', prompt: 'ping' })),

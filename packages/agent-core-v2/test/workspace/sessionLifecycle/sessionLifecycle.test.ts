@@ -143,6 +143,7 @@ function metadataStub(): ISessionMetadata {
     setGeneratedTitleIfUncustomized: () => Promise.resolve(false),
     setArchived: () => Promise.resolve(),
     registerAgent: () => Promise.resolve(),
+    unregisterAgent: () => Promise.resolve(),
   };
 }
 
@@ -1923,6 +1924,7 @@ describe('SessionLifecycleService', () => {
           calls.push('registerAgent');
           return Promise.resolve();
         },
+        unregisterAgent: () => Promise.resolve(),
       };
       const agent = agentContextStub(MAIN_AGENT_ID);
       const svc = await build([

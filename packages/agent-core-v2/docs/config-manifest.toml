@@ -8,10 +8,11 @@
 # commented "# field: type" lines describe the remaining schema fields.
 # Values resolve as: default -> config.toml -> env overlay -> memory.
 
-# Index (29 sections · 2 overlay(s))
+# Index (30 sections · 2 overlay(s))
 #   background               src/agent/task/configSection.ts
 #   builtinProductSkills     src/features/skill/catalog/configSection.ts
 #   cron                     src/features/cron/configSection.ts
+#   crossSessionInbound      src/features/messaging/crossSessionInbound.ts
 #   defaultPermissionMode    src/agent/permissionMode/configSection.ts
 #   defaultPlanMode          src/features/plan/configSection.ts
 #   defaultSwarmMode         src/features/swarm/configSection.ts
@@ -94,6 +95,14 @@ no_jitter = false
 no_stale = false
 disabled = false
 manual_tick = false
+
+# ##########################################################################
+# crossSessionInbound (config.toml: cross_session_inbound)
+#   owner: src/features/messaging/crossSessionInbound.ts
+#   scope: core
+# ##########################################################################
+
+cross_session_inbound = "accept"
 
 # ##########################################################################
 # defaultPermissionMode (config.toml: default_permission_mode)
@@ -408,7 +417,7 @@ merge_all_available_skills = true
   # custom_headers: record<string, string>
 
 # [services.search]
-  # provider: "kimi" | "zai" | "qwen" | "disabled"
+  # provider: "kimi" | "zai" | "qwen" | "deepseek" | "disabled"
   # api_key: string
   # base_url: string
   # model: string

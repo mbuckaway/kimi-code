@@ -9,6 +9,7 @@ import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/state/state';
 import { abortError, isAbortError, isUserCancellation, userCancellationReason } from '#/_base/utils/abort';
 import { toErrorMessage } from '#/_base/errors/errorMessage';
+import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 import { IAgentLLMRequesterService, type AgentLLMRequestFinish } from '#/agent/llmRequester/llmRequester';
 import type { LLMRequestTrace } from '#/kosong/contract/requestTrace';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
@@ -91,6 +92,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
   readonly hooks: IAgentLoopService['hooks'] = {
     onWillBeginStep: new OrderedHookSlot(),
     onDidFinishStep: new OrderedHookSlot(),
+    onWillCancelTurn: new OrderedHookSlot(),
   };
 
   private readonly standaloneStepQueue = new StepRequestQueue();
@@ -280,6 +282,13 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     const job = this.activeTurnJob;
     if (job === undefined || (turnId !== undefined && job.turn.id !== turnId)) return false;
     if (job.controller.signal.aborted) return true;
+    void this.hooks.onWillCancelTurn
+      .run({
+        turnId: job.turn.id,
+        target: 'active',
+        reason: cancellation,
+      })
+      .catch(onUnexpectedError);
     void this.dispatcher.dispatch(
       new TurnCancel({
         agentId: this.scopeContext.agentId,
@@ -297,6 +306,13 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     if (index < 0) return false;
     const [job] = this.pendingTurns.splice(index, 1);
     if (job === undefined || job.turn.state !== 'queued') return false;
+    void this.hooks.onWillCancelTurn
+      .run({
+        turnId,
+        target: 'queued',
+        reason: cancellation,
+      })
+      .catch(onUnexpectedError);
     void this.dispatcher.dispatch(
       new TurnCancel({
         agentId: this.scopeContext.agentId,
@@ -593,6 +609,11 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     const job = this.activeTurnJob?.turn === turn ? this.activeTurnJob : undefined;
     if (job === undefined) return;
     const reason = result?.type === 'cancelled' ? result.reason : abortError('Turn ended');
+    for (const request of job.queue.drain()) {
+      if (request.aborted || request.state !== 'pending') continue;
+      const messages = request.onTurnAbandoned();
+      if (messages.length > 0) this.context.append(...messages);
+    }
     for (const step of job.steps.values()) {
       if (step.state === 'queued' || step.state === 'running') step.cancel(reason);
     }

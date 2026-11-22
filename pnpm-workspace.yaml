@@ -5,6 +5,17 @@ packages:
   - apps/vis/web
   - docs
 
+supportedArchitectures:
+  os:
+    - current
+    - darwin
+    - linux
+    - win32
+  cpu:
+    - current
+    - x64
+    - arm64
+
 catalog:
   zod: 4.3.6
 

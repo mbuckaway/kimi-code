@@ -11,6 +11,11 @@ import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { IProviderService, type ProviderConfig } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
+import {
+  DEEPSEEK_PROVIDER,
+  IModelService,
+  activeModelProvidesWebSearch,
+} from '#/kosong/model/model';
 
 import {
   SERVICES_SECTION,
@@ -18,6 +23,7 @@ import {
   type SearchServiceConfig,
   type ServicesConfig,
 } from '../configSection';
+import { DeepseekWebSearchProvider } from './providers/deepseek-web-search';
 import { MoonshotWebSearchProvider } from './providers/moonshot-web-search';
 import { QwenWebSearchProvider } from './providers/qwen-web-search';
 import { ZaiWebSearchProvider } from './providers/zai-web-search';
@@ -33,34 +39,68 @@ export class WebSearchProviderService implements IWebSearchProviderService {
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IConfigService private readonly config: IConfigService,
     @IAgentIdentity private readonly identity: IAgentIdentity,
+    @IModelService private readonly models: IModelService,
   ) {}
 
   getWebSearchProvider(): WebSearchProvider | undefined {
     const search = this.config.get<ServicesConfig>(SERVICES_SECTION)?.search;
-    switch (searchSelectionOf(search?.provider)) {
+    if (search?.provider === undefined) {
+      return this.deepseekProvider() ?? this.moonshotProvider();
+    }
+    switch (searchSelectionOf(search.provider)) {
       case 'moonshot':
         return this.moonshotProvider();
       case 'disabled':
         return undefined;
       case 'zai':
-        return this.zaiProvider(search?.apiKey);
+        return this.zaiProvider(search.apiKey);
       case 'qwen':
         return this.qwenProvider(search);
+      case 'deepseek':
+        return this.configuredDeepseekProvider(search) ?? this.deepseekProvider();
     }
   }
 
   hasWebSearchProvider(): boolean {
     const search = this.config.get<ServicesConfig>(SERVICES_SECTION)?.search;
-    switch (searchSelectionOf(search?.provider)) {
+    if (search?.provider === undefined) {
+      return (
+        this.deepseekProvider() !== undefined ||
+        this.configuredSearch() !== undefined ||
+        this.managedTokenProvider() !== undefined
+      );
+    }
+    switch (searchSelectionOf(search.provider)) {
       case 'moonshot':
         return this.configuredSearch() !== undefined || this.managedTokenProvider() !== undefined;
       case 'disabled':
         return false;
       case 'zai':
-        return this.zaiProvider(search?.apiKey) !== undefined;
+        return this.zaiProvider(search.apiKey) !== undefined;
       case 'qwen':
         return this.qwenProvider(search) !== undefined;
+      case 'deepseek':
+        return (this.configuredDeepseekProvider(search) ?? this.deepseekProvider()) !== undefined;
     }
+  }
+
+  private deepseekProvider(): DeepseekWebSearchProvider | undefined {
+    const provider = this.providers.get(DEEPSEEK_PROVIDER);
+    const apiKey = nonEmptyString(provider?.apiKey);
+    if (apiKey === undefined || !activeModelProvidesWebSearch(this.models)) return undefined;
+    return new DeepseekWebSearchProvider({ apiKey, baseUrl: nonEmptyString(provider?.baseUrl) });
+  }
+
+  private configuredDeepseekProvider(
+    search: SearchServiceConfig | undefined,
+  ): DeepseekWebSearchProvider | undefined {
+    const provider = this.providers.get(DEEPSEEK_PROVIDER);
+    const apiKey = nonEmptyString(search?.apiKey) ?? nonEmptyString(provider?.apiKey);
+    if (apiKey === undefined) return undefined;
+    return new DeepseekWebSearchProvider({
+      apiKey,
+      baseUrl: nonEmptyString(search?.baseUrl) ?? nonEmptyString(provider?.baseUrl),
+    });
   }
 
   private moonshotProvider(): WebSearchProvider | undefined {
@@ -140,17 +180,18 @@ function nonEmptyString(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
-type SearchSelection = 'moonshot' | 'disabled' | 'zai' | 'qwen';
+type SearchSelection = 'moonshot' | 'disabled' | 'zai' | 'qwen' | 'deepseek';
 
 const SEARCH_SELECTIONS: Record<SearchProviderId, SearchSelection> = {
   kimi: 'moonshot',
   disabled: 'disabled',
   zai: 'zai',
   qwen: 'qwen',
+  deepseek: 'deepseek',
 };
 
-function searchSelectionOf(provider: SearchProviderId | undefined): SearchSelection {
-  return provider === undefined ? 'moonshot' : SEARCH_SELECTIONS[provider];
+function searchSelectionOf(provider: SearchProviderId): SearchSelection {
+  return SEARCH_SELECTIONS[provider];
 }
 
 registerScopedService(

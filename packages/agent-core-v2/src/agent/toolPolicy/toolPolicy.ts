@@ -5,6 +5,7 @@ import type { ToolActivationPolicy } from './evaluate';
 
 export interface IAgentToolPolicyService {
   readonly _serviceBrand: undefined;
+  readonly revision?: number;
 
   isToolActive(name: string, source?: ToolSource): boolean;
   isToolActiveForDisclosure(name: string, source?: ToolSource): boolean;

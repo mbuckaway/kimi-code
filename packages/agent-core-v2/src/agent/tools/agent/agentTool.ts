@@ -18,6 +18,7 @@ import {
   resolveActiveToolNames,
 } from '#/agent/toolPolicy/evaluate';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
+import { TOOLS_SECTION } from '#/agent/toolPolicy/configSection';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import {
@@ -41,28 +42,45 @@ import {
 import { ILogService } from '#/_base/log/log';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
+import { AGENT_FLEET_CONTROL_FLAG_ID, AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
-import { isSubagentMeta, subagentLabels, subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
+import {
+  isSubagentMeta,
+  subagentAncestorIds,
+  subagentChildrenIndex,
+  subagentDescendantsChildFirst,
+  subagentLabels,
+} from '#/session/agentLifecycle/subagentMetadata';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
 import { emitAgentRunSpawned, mirrorAgentRun, SubagentStarted } from '#/session/subagent/mirrorAgentRun';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
-import { FORK_EXPERIMENTAL_UNAVAILABLE, forkIncompatibility } from '#/session/subagent/spawn';
-import { SUBAGENT_FORK_FLAG_ID } from '#/session/subagent/flag';
+import {
+  FORK_EXPERIMENTAL_UNAVAILABLE,
+  forkIncompatibility,
+  PERSONA_EXPERIMENTAL_UNAVAILABLE,
+  PERSONA_WITH_FORK_UNAVAILABLE,
+} from '#/session/subagent/spawn';
+import { AGENT_PERSONA_FLAG_ID, SUBAGENT_FORK_FLAG_ID } from '#/session/subagent/flag';
 import {
   buildSubagentModelDescriptions,
   exposesSubagentModelChoice,
   formatSubagentTimeoutDescription,
   resolveSubagentTimeoutMs,
+  SECONDARY_MODEL_SECTION,
   stripSubagentForkParameter,
   stripSubagentModelParameter,
+  stripSubagentNameParameter,
+  stripParameters,
 } from '#/session/subagent/configSection';
+
 import {
   BACKGROUND_AGENT_UNAVAILABLE,
   DEFAULT_PROFILE_NAME,
   ISubagentTool,
-  RESUME_WITH_TYPE_UNAVAILABLE,
+  NAME_EXPERIMENTAL_UNAVAILABLE,
+  PERSONA_WITH_RESUME_UNAVAILABLE,
   RESUMED_LABEL,
   SUBAGENT_STOPPED_MESSAGE,
   SubagentToolInputSchema,
@@ -73,8 +91,11 @@ import { SubagentTask, type SubagentHandle } from './subagent-task';
 
 import AGENT_BACKGROUND_DISABLED_DESCRIPTION from './agent-background-disabled.md?raw';
 import AGENT_BACKGROUND_DESCRIPTION from './agent-background-enabled.md?raw';
+import AGENT_BACKGROUND_MESSAGING_DESCRIPTION from './agent-background-messaging.md?raw';
 import AGENT_DESCRIPTION_BASE from './agent.md?raw';
 import AGENT_FORK_DESCRIPTION from './agent-fork.md?raw';
+import AGENT_MESSAGING_DESCRIPTION from './agent-messaging.md?raw';
+import AGENT_PERSONA_DESCRIPTION from './agent-persona.md?raw';
 
 const SUBAGENT_TOOL_PARAMETERS = toInputJsonSchema(SubagentToolInputSchema);
 const SUBAGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(SUBAGENT_TOOL_PARAMETERS);
@@ -84,18 +105,48 @@ export class SubagentTool implements ISubagentTool {
   readonly name: string = 'Agent';
 
   get parameters(): Record<string, unknown> {
+    const key = this.parametersKey();
+    const cached = this.parametersCache;
+    if (cached !== undefined && cached.key === key) return cached.value;
+    const value = this.renderParameters();
+    this.parametersCache = { key, value };
+    return value;
+  }
+
+  private renderParameters(): Record<string, unknown> {
     const parameters = exposesSubagentModelChoice(this.config, this.flags)
       ? SUBAGENT_TOOL_PARAMETERS
       : SUBAGENT_TOOL_PARAMETERS_NO_MODEL;
-    return this.flags.enabled(SUBAGENT_FORK_FLAG_ID)
+    const withFork = this.flags.enabled(SUBAGENT_FORK_FLAG_ID)
       ? parameters
       : stripSubagentForkParameter(parameters);
+    const withName = this.flags.enabled(AGENT_MESSAGING_FLAG_ID)
+      ? withFork
+      : stripSubagentNameParameter(withFork);
+    return this.flags.enabled(AGENT_PERSONA_FLAG_ID)
+      ? withName
+      : stripParameters(withName, 'persona');
+  }
+
+  private parametersKey(): string {
+    return [
+      exposesSubagentModelChoice(this.config, this.flags) ? '1' : '0',
+      this.flags.enabled(SUBAGENT_FORK_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_MESSAGING_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_PERSONA_FLAG_ID) ? '1' : '0',
+    ].join('');
   }
 
   private readonly callerAgentId: string;
   private readonly canRunInBackground: () => boolean;
   private catalogReady = false;
-  private frozenCatalogProfiles: readonly AgentProfile[] | undefined;
+  private frozenCatalogProfiles:
+    | { readonly revision: number; readonly profiles: readonly AgentProfile[] }
+    | undefined;
+  private parametersCache:
+    | { readonly key: string; readonly value: Record<string, unknown> }
+    | undefined;
+  private descriptionCache: { readonly key: string; readonly value: string } | undefined;
 
   constructor(
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
@@ -123,10 +174,62 @@ export class SubagentTool implements ISubagentTool {
   }
 
   get description(): string {
+    const key = this.descriptionKey();
+    const cached = this.descriptionCache;
+    if (cached !== undefined && cached.key === key) return cached.value;
+    const value = this.renderDescription();
+    this.descriptionCache = { key, value };
+    return value;
+  }
+
+  private descriptionKey(): string {
+    const own = this.profile.data();
+    return [
+      String(this.toolRegistry.revision ?? 0),
+      this.catalogReady
+        ? `revision:${String(this.catalog.revision)}`
+        : this.catalog
+            .list()
+            .map((profile) => profile.name)
+            .join(','),
+      own.profileName ?? '',
+      (own.subagents ?? this.catalog.getDefault().subagents ?? []).join(','),
+      own.modelAlias ?? '',
+      JSON.stringify(this.config.get(SECONDARY_MODEL_SECTION) ?? null),
+      JSON.stringify(this.config.get(TOOLS_SECTION) ?? null),
+      this.contributions.items
+        .map(
+          (contribution) =>
+            `${contribution.options.name}:${contribution.options.source ?? ''}:${contribution.options.disclosure ?? ''}`,
+        )
+        .toSorted()
+        .join(','),
+      this.profile.getActiveToolNames?.()?.join(',') ?? 'all',
+      this.canRunInBackground() ? '1' : '0',
+      this.flags.enabled(AGENT_MESSAGING_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(AGENT_PERSONA_FLAG_ID) ? '1' : '0',
+      this.flags.enabled(SUBAGENT_FORK_FLAG_ID) ? '1' : '0',
+      exposesSubagentModelChoice(this.config, this.flags) ? '1' : '0',
+      String(this.toolPolicy.revision ?? 0),
+    ].join('\u0000');
+  }
+
+  private renderDescription(): string {
     const backgroundDescription = this.canRunInBackground()
       ? AGENT_BACKGROUND_DESCRIPTION
       : AGENT_BACKGROUND_DISABLED_DESCRIPTION;
-    let description = `${AGENT_DESCRIPTION_BASE}\n\n${backgroundDescription}`;
+    let description = AGENT_DESCRIPTION_BASE;
+    if (this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
+      description += `\n\n${AGENT_MESSAGING_DESCRIPTION}`;
+    }
+    if (this.flags.enabled(AGENT_PERSONA_FLAG_ID)) {
+      description += `\n\n${AGENT_PERSONA_DESCRIPTION}`;
+    }
+    description += `\n\n${backgroundDescription}`;
+    if (this.flags.enabled(AGENT_MESSAGING_FLAG_ID) && this.canRunInBackground()) {
+      description += `\n\n${AGENT_BACKGROUND_MESSAGING_DESCRIPTION}`;
+    }
     if (this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
       description += `\n\n${AGENT_FORK_DESCRIPTION}`;
     }
@@ -142,6 +245,7 @@ export class SubagentTool implements ISubagentTool {
       this.knownToolReferences(),
       (profile, name, source) =>
         this.toolPolicy.isToolActiveForProfile(profile, name, source),
+      this.hiddenToolNames(),
     );
     if (typeLines) {
       description += `\n\nAvailable agent types (pass via subagent_type):\n${typeLines}`;
@@ -158,9 +262,12 @@ export class SubagentTool implements ISubagentTool {
   }
 
   private catalogProfiles(): readonly AgentProfile[] {
-    if (this.frozenCatalogProfiles !== undefined) return this.frozenCatalogProfiles;
+    if (!this.catalogReady) return this.catalog.list();
+    const revision = this.catalog.revision;
+    const frozen = this.frozenCatalogProfiles;
+    if (frozen !== undefined && frozen.revision === revision) return frozen.profiles;
     const profiles = this.catalog.list();
-    if (this.catalogReady) this.frozenCatalogProfiles = profiles;
+    this.frozenCatalogProfiles = { revision, profiles };
     return profiles;
   }
 
@@ -191,6 +298,37 @@ export class SubagentTool implements ISubagentTool {
     return withoutDelegatingTargets(this.catalog, allowlist);
   }
 
+  private hiddenToolNames(): ReadonlySet<string> {
+    const hidden = new Set<string>();
+    if (!this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
+      for (const name of [
+        'SendMessage',
+        'ListAgents',
+        'ListMessages',
+        'ReplyMessage',
+        'BroadcastMessage',
+        'AgentResult',
+        'AgentHealth',
+        'WaitForAll',
+      ]) {
+        hidden.add(name);
+      }
+    }
+    if (!this.flags.enabled(AGENT_FLEET_CONTROL_FLAG_ID)) {
+      for (const name of [
+        'StopAgent',
+        'InterruptAgent',
+        'DismissAgents',
+        'TagAgent',
+        'RenameAgent',
+        'StopAgents',
+      ]) {
+        hidden.add(name);
+      }
+    }
+    return hidden;
+  }
+
   private knownToolReferences(): ToolReference[] {
     const refs = new Map<string, ToolReference>();
     for (const contribution of this.contributions.items) {
@@ -206,34 +344,24 @@ export class SubagentTool implements ISubagentTool {
   }
 
   async resolveExecution(args: SubagentToolInput): Promise<ToolExecution> {
+    const rejection = this.personaLaunchError(args);
+    if (rejection !== undefined) {
+      return { output: rejection, isError: true };
+    }
+
     const requestedProfileName = args.subagent_type?.length ? args.subagent_type : undefined;
     const resumeAgentId = args.resume?.trim();
-
-    if (
-      resumeAgentId !== undefined &&
-      resumeAgentId.length > 0 &&
-      requestedProfileName !== undefined
-    ) {
-      return { output: RESUME_WITH_TYPE_UNAVAILABLE, isError: true };
-    }
-
-    if (args.fork === true) {
-      if (!this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
-        return { output: FORK_EXPERIMENTAL_UNAVAILABLE, isError: true };
-      }
-      const forkError = forkIncompatibility(args, this.profile.data());
-      if (forkError !== undefined) {
-        return { output: forkError, isError: true };
-      }
-    }
+    const persona = normalizePersona(args.persona);
+    const hasResume = resumeAgentId !== undefined && resumeAgentId.length > 0;
 
     const profileNameForDisplay =
-      resumeAgentId !== undefined && resumeAgentId.length > 0
+      persona ??
+      (hasResume
         ? this.resumeProfileName(resumeAgentId) ?? RESUMED_LABEL
         : (requestedProfileName ??
-            (args.fork === true
-              ? (this.profile.data().profileName ?? DEFAULT_PROFILE_NAME)
-              : DEFAULT_PROFILE_NAME));
+          (args.fork === true
+            ? (this.profile.data().profileName ?? DEFAULT_PROFILE_NAME)
+            : DEFAULT_PROFILE_NAME)));
     const prefix = args.run_in_background === true ? 'Launching background' : 'Launching';
     return {
       description: `${prefix} ${profileNameForDisplay} agent: ${args.description}`,
@@ -254,6 +382,22 @@ export class SubagentTool implements ISubagentTool {
     const target = this.agentLifecycle.handleOf(agentId);
     if (target === undefined) return undefined;
     return target.accessor.get(IAgentProfileService).data().profileName;
+  }
+
+  private personaLaunchError(args: SubagentToolInput): string | undefined {
+    const resumeAgentId = args.resume?.trim();
+    const hasResume = resumeAgentId !== undefined && resumeAgentId.length > 0;
+
+    const persona = normalizePersona(args.persona);
+    if (persona !== undefined && !this.flags.enabled(AGENT_PERSONA_FLAG_ID)) {
+      return PERSONA_EXPERIMENTAL_UNAVAILABLE;
+    }
+    if (persona !== undefined && hasResume) return PERSONA_WITH_RESUME_UNAVAILABLE;
+
+    if (args.fork !== true) return undefined;
+    if (!this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) return FORK_EXPERIMENTAL_UNAVAILABLE;
+    if (persona !== undefined) return PERSONA_WITH_FORK_UNAVAILABLE;
+    return forkIncompatibility(args, this.profile.data());
   }
 
   private async launch(
@@ -295,12 +439,14 @@ export class SubagentTool implements ISubagentTool {
         profileName: args.subagent_type,
         model: args.model,
         fork: args.fork === true,
+        persona: normalizePersona(args.persona),
       });
       const spawned = await this.subagents.spawn({
         callerAgentId: this.callerAgentId,
         plan,
         labels: subagentLabels(this.callerAgentId),
         prompt: args.prompt,
+        name: args.name,
       });
       agentId = spawned.agentId;
       profileName = spawned.profileName;
@@ -340,13 +486,19 @@ export class SubagentTool implements ISubagentTool {
     agentId: string,
     target: IAgentScopeHandle,
   ): Promise<void> {
-    const meta = (await this.sessionMetadata.read()).agents?.[agentId];
+    const agents = (await this.sessionMetadata.read()).agents ?? {};
+    const meta = agents[agentId];
     if (!isSubagentMeta(meta)) {
       throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent instance "${agentId}" is not a subagent`, {
         details: { agentId },
       });
     }
-    if (subagentParentAgentId(meta) !== this.callerAgentId) {
+    const reachable =
+      subagentDescendantsChildFirst(this.callerAgentId, subagentChildrenIndex(agents)).includes(
+        agentId,
+      ) ||
+      subagentAncestorIds(this.callerAgentId, agents).includes(agentId);
+    if (!reachable) {
       throw new Error2(
         ErrorCodes.AGENT_NOT_OWNED,
         `Agent instance "${agentId}" does not belong to this parent agent`,
@@ -373,18 +525,13 @@ export class SubagentTool implements ISubagentTool {
       const resumeAgentId = args.resume?.trim();
       const isResume = resumeAgentId !== undefined && resumeAgentId.length > 0;
 
-      if (isResume && requestedProfileName !== undefined) {
-        return { output: RESUME_WITH_TYPE_UNAVAILABLE, isError: true };
+      if (args.name !== undefined && !this.flags.enabled(AGENT_MESSAGING_FLAG_ID)) {
+        return { output: NAME_EXPERIMENTAL_UNAVAILABLE, isError: true };
       }
 
-      if (args.fork === true) {
-        if (!this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
-          return { output: FORK_EXPERIMENTAL_UNAVAILABLE, isError: true };
-        }
-        const forkError = forkIncompatibility(args, this.profile.data());
-        if (forkError !== undefined) {
-          return { output: forkError, isError: true };
-        }
+      const rejection = this.personaLaunchError(args);
+      if (rejection !== undefined) {
+        return { output: rejection, isError: true };
       }
 
       const allowBackground = this.canRunInBackground();
@@ -410,7 +557,10 @@ export class SubagentTool implements ISubagentTool {
           toolCallId,
           runInBackground,
           operation: isResume ? 'resume' : 'spawn',
-          subagentType: requestedProfileName ?? DEFAULT_PROFILE_NAME,
+          subagentType:
+            isResume && resumeAgentId !== undefined
+              ? (this.resumeProfileName(resumeAgentId) ?? RESUMED_LABEL)
+              : (requestedProfileName ?? DEFAULT_PROFILE_NAME),
           resumeAgentId: isResume ? resumeAgentId : undefined,
           error,
         });
@@ -511,6 +661,11 @@ registerAgentToolService(ISubagentTool, SubagentTool, {
   requiredRuntimeCapabilities: ['process'],
 });
 
+function normalizePersona(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+}
+
 function buildProfileDescriptions(
   profiles: readonly AgentProfile[],
   tools: readonly ToolReference[],
@@ -519,7 +674,10 @@ function buildProfileDescriptions(
     name: string,
     source: ToolReference['source'],
   ) => boolean,
+  hiddenTools: ReadonlySet<string> = new Set(),
 ): string {
+  const visible = (names: readonly string[]): readonly string[] =>
+    hiddenTools.size === 0 ? names : names.filter((name) => !hiddenTools.has(name));
   return profiles
     .map((profile) => {
       const details = [profile.description, profile.whenToUse].filter(
@@ -533,24 +691,28 @@ function buildProfileDescriptions(
           !isToolActive(profile, tool.name, tool.source),
       );
       if (externallyRestricted) {
-        const effectiveTools = tools
-          .filter((tool) => isToolActive(profile, tool.name, tool.source))
-          .map((tool) => tool.name);
+        const effectiveTools = visible(
+          tools
+            .filter((tool) => isToolActive(profile, tool.name, tool.source))
+            .map((tool) => tool.name),
+        );
         if (effectiveTools.length === 0) {
           return `${header}\n  Tools: none`;
         }
         return `${header}\n  Tools: ${effectiveTools.join(', ')}`;
       }
       if (activeTools === undefined) {
-        if ((profile.disallowedTools?.length ?? 0) > 0) {
-          return `${header}\n  Tools: all except ${profile.disallowedTools!.join(', ')}`;
+        const disallowed = visible(profile.disallowedTools ?? []);
+        if (disallowed.length > 0) {
+          return `${header}\n  Tools: all except ${disallowed.join(', ')}`;
         }
         return `${header}\n  Tools: all`;
       }
-      if (activeTools.length === 0) {
+      const listed = visible(activeTools);
+      if (listed.length === 0) {
         return `${header}\n  Tools: none`;
       }
-      return `${header}\n  Tools: ${activeTools.join(', ')}`;
+      return `${header}\n  Tools: ${listed.join(', ')}`;
     })
     .join('\n');
 }

@@ -12,6 +12,8 @@ const INTERNAL_ORIGINS = new Set<PromptOrigin["kind"]>([
   "hook_result",
   "cron_job",
   "cron_missed",
+  "agent_message",
+  "session_message",
 ]);
 
 const TOOL_HINT_KEYS = ["path", "file_path", "command", "query", "url", "name", "pattern"];

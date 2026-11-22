@@ -794,6 +794,8 @@ export class ToolManager {
       this.isExactToolEnabled('TaskStop');
     const allowBackground = canRunInBackground();
     const goalToolsEnabled = this.agent.type === 'main';
+    const agentMessagingEnabled = this.agent.experimentalFlags.enabled('agent_messaging');
+    const agentFleetControlEnabled = this.agent.experimentalFlags.enabled('agent_fleet_control');
     this.builtinTools = new Map(
       [
         new b.ReadTool(kaos, workspace),
@@ -858,6 +860,7 @@ export class ToolManager {
               subagentTimeoutMs: resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
               showModelPreferences: this.agent.experimentalFlags.enabled('secondary-model'),
               modelChoiceEnabled: this.agent.experimentalFlags.enabled('secondary-model'),
+              agentMessagingEnabled,
               subagentModelDescription: buildSubagentModelDescriptions(
                 this.agent.kimiConfig,
                 this.agent.experimentalFlags,
@@ -865,6 +868,44 @@ export class ToolManager {
               ),
             },
           ),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.SendMessageTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.ListAgentsTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.ListMessagesTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.ReplyMessageTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.BroadcastMessageTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.StopAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.InterruptAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.DismissAgentsTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.TagAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.RenameAgentTool(this.agent.subagentHost),
+        this.agent.subagentHost &&
+          agentFleetControlEnabled &&
+          new b.StopAgentsTool(this.agent.subagentHost),
+        agentMessagingEnabled && new b.AgentResultTool(background),
+        this.agent.subagentHost &&
+          agentMessagingEnabled &&
+          new b.AgentHealthTool(background, this.agent.subagentHost),
+        agentMessagingEnabled && new b.WaitForAllTool(background),
         this.agent.subagentHost &&
           new b.AgentSwarmTool(
             this.agent.subagentHost,
@@ -876,6 +917,10 @@ export class ToolManager {
               this.agent.config.modelAlias,
             ),
             this.agent.experimentalFlags.enabled('secondary-model'),
+            agentMessagingEnabled,
+            Object.keys(
+              this.agent.subagentHost.delegatableSubagents(this.agent.config.profileName),
+            ),
           ),
         toolServices?.webSearcher && new b.WebSearchTool(toolServices.webSearcher),
         toolServices?.urlFetcher && new b.FetchURLTool(toolServices.urlFetcher),

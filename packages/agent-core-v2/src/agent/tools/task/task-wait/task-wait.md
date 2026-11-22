@@ -2,6 +2,8 @@ Wait for background tasks to finish without ending the current turn.
 
 Use this when your next step depends on the result of a running background task (a sub-agent, a background bash command, or a background AskUserQuestion). The call suspends inside the current turn until the task finishes or the timeout elapses, then returns the outcome so you can keep working in the same turn. While waiting, no LLM requests are made.
 
+WaitFor waits for ANY one task — a specific `task_id`, or the first of the tasks running at call time. To wait for ALL of a cohort under one shared deadline, use WaitForAll instead.
+
 Guidelines:
 
 - Do not call WaitFor right after dispatching work whose result you do not need yet — finished background tasks notify you automatically. WaitFor is for the moment you genuinely cannot proceed without a result.

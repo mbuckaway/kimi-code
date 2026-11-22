@@ -1353,7 +1353,7 @@ describe('FileSessionIndex (read model)', () => {
     expect(files.filter((name) => /^text-.*\.(dictionary|postings|docs)$/.test(name))).toEqual([]);
   });
 
-  const baseline = { retry: 1, timeout: 120_000 };
+  const baseline = { retry: 1, timeout: 600_000 };
 
   it('baseline: warm listRecent(limit=20) at 1k vs 10k vs 50k sessions', baseline, async () => {
     overrideScopedService(

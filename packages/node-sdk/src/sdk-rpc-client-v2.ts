@@ -267,6 +267,7 @@ import {
   type SwitchSessionRuntimeRpcInput,
   type SessionPromptRpcInput,
   type SessionPromptWithSkillsRpcInput,
+  type SetSessionCrossSessionInboundRpcInput,
   type SetSessionModelRpcInput,
   type SetSessionModelRpcResult,
   type SetSessionPermissionRpcInput,
@@ -289,6 +290,7 @@ import type {
   ConfigDiagnostics,
   CreateGoalInput,
   CreateSessionOptions,
+  CrossSessionInbound,
   ExportSessionInput,
   ExportSessionResult,
   FileMeta,
@@ -1832,6 +1834,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return agent.setPermission(input.mode);
   }
 
+  override async getCrossSessionInbound(input: SessionIdRpcInput): Promise<CrossSessionInbound> {
+    return this.klient.session(input.sessionId).getCrossSessionInbound();
+  }
+
+  override async setCrossSessionInbound(input: SetSessionCrossSessionInboundRpcInput): Promise<void> {
+    return this.klient.session(input.sessionId).setCrossSessionInbound(input.value);
+  }
+
   /** v1 maps the toggle onto two RPCs (`enterPlan` / `cancelPlan`); so does v2. */
   override async setPlanMode(input: SetSessionPlanModeRpcInput): Promise<void> {
     const agent = await this.agentFacade(input.sessionId);
@@ -2276,7 +2286,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
         );
       }
     } else {
-      tower.exit();
+      await tower.exit();
     }
     await agent.accessor.get(IAgentLifecycleService).resolve(agentContextOf(agent), AgentReminder).reconcileWhenIdle('tower_mode');
   }

@@ -5,10 +5,25 @@ import type { Logger, LogPayload } from '../../src/logging';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
+  MAX_AGENT_MESSAGE_CHARS,
   formatSubagentTimeoutDescription,
+  type AgentRosterEntry,
+  type SendMessageResult,
   type SessionSubagentHost,
 } from '../../src/session/subagent-host';
+import {
+  stripSubagentModelParameter,
+  stripToolParameter,
+} from '../../src/session/subagent-binding';
 import { AgentTool, AgentToolInputSchema } from '../../src/tools/builtin/collaboration/agent';
+import {
+  ListAgentsTool,
+  ListAgentsToolInputSchema,
+} from '../../src/tools/builtin/collaboration/list-agents';
+import {
+  SendMessageTool,
+  SendMessageToolInputSchema,
+} from '../../src/tools/builtin/collaboration/send-message';
 import { userCancellationReason } from '../../src/utils/abort';
 import { agentTask, createBackgroundManager } from '../agent/background/helpers';
 import { executeTool } from './fixtures/execute-tool';
@@ -104,16 +119,16 @@ describe('AgentTool', () => {
     expect(properties['run_in_background']?.description).toContain('false');
   });
 
-  it('documents that resume excludes subagent_type', () => {
+  it('documents that resume ignores subagent_type', () => {
     const host = mockSubagentHost({ spawn: vi.fn() });
     const tool = agentTool(host);
     const properties = (
       tool.parameters as { properties: Record<string, { description?: string }> }
     ).properties;
 
-    // Passing both resume and subagent_type is rejected at runtime (agent.ts execution()),
-    // so the resume param must steer the model away from it.
-    expect((properties['resume']?.description ?? '').toLowerCase()).toContain('subagent_type');
+    const resumeDescription = (properties['resume']?.description ?? '').toLowerCase();
+    expect(resumeDescription).toContain('subagent_type');
+    expect(resumeDescription).toContain('ignored');
   });
 
   it('does not expose a timeout parameter in the JSON schema', () => {
@@ -385,10 +400,15 @@ describe('AgentTool', () => {
     expect(result.output).toContain('resumed result');
   });
 
-  it('returns an error when resuming with a subagent type', async () => {
+  it('ignores subagent_type when resuming and keeps the bound profile', async () => {
     const host = mockSubagentHost({
       spawn: vi.fn(),
-      resume: vi.fn(),
+      resume: vi.fn().mockResolvedValue({
+        agentId: 'agent-existing',
+        profileName: 'explore',
+        resumed: true,
+        completion: Promise.resolve({ result: 'resumed result' }),
+      }),
     });
     const tool = agentTool(host);
 
@@ -397,15 +417,28 @@ describe('AgentTool', () => {
         prompt: 'Continue',
         description: 'Continue work',
         resume: 'agent-existing',
-        subagent_type: 'explore',
+        subagent_type: 'coder',
       }),
     );
 
-    expect(result).toMatchObject({
-      isError: true,
-      output: 'Cannot set subagent_type when resuming an existing agent. Resume by agent id only.',
-    });
-    expect(host.resume).not.toHaveBeenCalled();
+    expect(result.isError).toBeFalsy();
+    expect(host.spawn).not.toHaveBeenCalled();
+    expect(host.resume).toHaveBeenCalledWith(
+      'agent-existing',
+      expect.objectContaining({
+        parentToolCallId: 'call_agent',
+        prompt: 'Continue',
+        description: 'Continue work',
+        runInBackground: false,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(host.resume).toHaveBeenCalledWith(
+      'agent-existing',
+      expect.not.objectContaining({ profileName: expect.anything() }),
+    );
+    expect(result.output).toContain('actual_subagent_type: explore');
+    expect(result.output).toContain('resumed result');
   });
 
   it('does not consume a background task slot when validation fails before launch', async () => {
@@ -420,14 +453,15 @@ describe('AgentTool', () => {
       }),
       resume: vi.fn(),
     });
+    const foregroundOnlyTool = new AgentTool(host, background, undefined, {
+      allowBackground: false,
+    });
     const tool = new AgentTool(host, background);
 
-    const invalid = await executeTool(tool,
+    const invalid = await executeTool(foregroundOnlyTool,
       context({
-        prompt: 'Continue',
-        description: 'Invalid background resume',
-        resume: 'agent-existing',
-        subagent_type: 'explore',
+        prompt: 'Investigate',
+        description: 'Invalid background launch',
         run_in_background: true,
       }),
     );
@@ -441,7 +475,8 @@ describe('AgentTool', () => {
 
     expect(invalid).toMatchObject({
       isError: true,
-      output: 'Cannot set subagent_type when resuming an existing agent. Resume by agent id only.',
+      output:
+        'Background agent execution is not available for this agent because TaskList, TaskOutput, and TaskStop are not enabled.',
     });
     expect(valid.output).toContain('status: running');
     expect(host.resume).not.toHaveBeenCalled();
@@ -965,6 +1000,378 @@ describe('AgentTool', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('AgentTool name parameter', () => {
+  it('advertises the name parameter when agent messaging is enabled', () => {
+    const host = mockSubagentHost({ spawn: vi.fn() });
+    const tool = agentTool(host, createBackgroundManager().manager, undefined, {
+      agentMessagingEnabled: true,
+    });
+    const properties = (
+      tool.parameters as {
+        properties: Record<string, { description?: string; maxLength?: number }>;
+      }
+    ).properties;
+
+    expect(properties['name']?.maxLength).toBe(64);
+    expect(properties['name']?.description).toContain('SendMessage');
+  });
+
+  it('strips the name parameter when agent messaging is disabled', () => {
+    const host = mockSubagentHost({ spawn: vi.fn() });
+    const properties = (
+      agentTool(host).parameters as { properties: Record<string, unknown> }
+    ).properties;
+
+    expect(properties).not.toHaveProperty('name');
+    expect(properties).toHaveProperty('prompt');
+  });
+
+  it('passes the name to spawn', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn().mockResolvedValue({
+        agentId: 'agent-child',
+        profileName: 'coder',
+        resumed: false,
+        completion: Promise.resolve({ result: 'child result' }),
+      }),
+    });
+    const tool = agentTool(host, createBackgroundManager().manager, undefined, {
+      agentMessagingEnabled: true,
+    });
+
+    await executeTool(
+      tool,
+      context({
+        prompt: 'Investigate',
+        description: 'Find cause',
+        name: 'reviewer',
+      }),
+    );
+
+    expect(host.spawn).toHaveBeenCalledWith(expect.objectContaining({ name: 'reviewer' }));
+  });
+
+  it('rejects the reserved root name before creating an agent', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn().mockRejectedValue(new Error('The name "main" is reserved for the root agent.')),
+    });
+    const tool = agentTool(host, createBackgroundManager().manager, undefined, {
+      agentMessagingEnabled: true,
+    });
+
+    const result = await executeTool(
+      tool,
+      context({ prompt: 'Investigate', description: 'Find cause', name: 'main' }),
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      output: 'subagent error: The name "main" is reserved for the root agent.',
+    });
+    expect(host.spawn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('stripToolParameter', () => {
+  it('returns the input unchanged when the property is absent', () => {
+    const parameters = { type: 'object', properties: { prompt: { type: 'string' } } };
+
+    expect(stripToolParameter(parameters, 'name')).toBe(parameters);
+  });
+
+  it('removes the property and its required entry from a copy', () => {
+    const parameters = {
+      type: 'object',
+      properties: { model: { type: 'string' }, prompt: { type: 'string' } },
+      required: ['model', 'prompt'],
+    };
+
+    expect(stripToolParameter(parameters, 'model')).toEqual({
+      type: 'object',
+      properties: { prompt: { type: 'string' } },
+      required: ['prompt'],
+    });
+    expect(stripSubagentModelParameter(parameters)).toEqual(
+      stripToolParameter(parameters, 'model'),
+    );
+    expect(parameters.properties).toHaveProperty('model');
+  });
+});
+
+describe('SendMessageTool', () => {
+  function sendMessageTool(result: SendMessageResult): SendMessageTool {
+    const host = mockSubagentHost({
+      spawn: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue(result),
+    });
+    return new SendMessageTool(host);
+  }
+
+  it('trims the recipient and rejects an empty one', () => {
+    expect(
+      SendMessageToolInputSchema.parse({ to: ' main ', message: 'Ready.', summary: 'done' }),
+    ).toEqual({ to: 'main', message: 'Ready.', summary: 'done' });
+    expect(SendMessageToolInputSchema.safeParse({ to: '  ', message: 'Ready.' }).success).toBe(
+      false,
+    );
+    expect(SendMessageToolInputSchema.safeParse({ to: 'main', message: '' }).success).toBe(false);
+    expect(SendMessageToolInputSchema.safeParse({ to: 'main', message: '   ' }).success).toBe(
+      false,
+    );
+    // Oversized messages are accepted and truncated by the host, not rejected.
+    expect(
+      SendMessageToolInputSchema.safeParse({
+        to: 'main',
+        message: 'x'.repeat(MAX_AGENT_MESSAGE_CHARS + 1),
+      }).success,
+    ).toBe(true);
+  });
+
+  it('forwards the tool abort signal to the delivery', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue({
+        delivery: 'steered',
+        agentId: 'agent-0',
+        label: 'reviewer',
+        truncated: false,
+      }),
+    });
+    const controller = new AbortController();
+
+    await executeTool(new SendMessageTool(host), {
+      turnId: '0',
+      toolCallId: 'call_send',
+      args: { to: 'reviewer', message: 'Ready.' },
+      signal: controller.signal,
+    });
+
+    expect(host.sendMessage).toHaveBeenCalledWith('reviewer', 'Ready.', controller.signal);
+  });
+
+  it('reports that a steered message started a new turn', async () => {
+    const tool = sendMessageTool({
+      delivery: 'steered',
+      agentId: 'agent-0',
+      label: 'reviewer',
+      truncated: false,
+    });
+
+    const result = await executeTool(
+      tool,
+      context({ to: 'reviewer', message: 'Please verify the tests.' }),
+    );
+
+    expect(result).toEqual({
+      output: 'Message delivered to reviewer (agent-0) and started a new turn.',
+    });
+  });
+
+  it('reports that a buffered message arrives at the next step boundary', async () => {
+    const tool = sendMessageTool({
+      delivery: 'buffered',
+      agentId: 'agent-0',
+      label: 'reviewer',
+      truncated: false,
+    });
+
+    const result = await executeTool(
+      tool,
+      context({ to: 'agent-0', message: 'Please verify the tests.' }),
+    );
+
+    expect(result).toEqual({
+      output:
+        'Message buffered for reviewer (agent-0); it is delivered at the next step boundary.',
+    });
+  });
+
+  it('reports that an idle agent was resumed in the background', async () => {
+    const tool = sendMessageTool({
+      delivery: 'resumed',
+      agentId: 'agent-0',
+      label: 'reviewer',
+      truncated: false,
+    });
+
+    const result = await executeTool(
+      tool,
+      context({ to: 'reviewer', message: 'Please verify the tests.' }),
+    );
+
+    expect(result).toEqual({
+      output:
+        'Message delivered to reviewer (agent-0); the agent was idle and has been resumed in the background. Its reply arrives automatically in a later turn.',
+    });
+  });
+
+  it('reports truncation to the sender', async () => {
+    const tool = sendMessageTool({
+      delivery: 'resumed',
+      agentId: 'agent-0',
+      label: 'reviewer',
+      truncated: true,
+    });
+
+    const result = await executeTool(
+      tool,
+      context({ to: 'reviewer', message: 'Please verify the tests.' }),
+    );
+
+    expect(result).toEqual({
+      output:
+        'Message delivered to reviewer (agent-0); the agent was idle and has been resumed in the background. Its reply arrives automatically in a later turn.\n\nNote: the message exceeded 100000 characters and was truncated before delivery.',
+    });
+  });
+
+  it('reports a duplicate message without delivering it again', async () => {
+    const tool = sendMessageTool({
+      delivery: 'duplicate',
+      agentId: 'agent-0',
+      label: 'reviewer',
+      truncated: false,
+    });
+
+    const result = await executeTool(
+      tool,
+      context({ to: 'reviewer', message: 'Please verify the tests.' }),
+    );
+
+    expect(result).toEqual({
+      output:
+        'Duplicate message: the same message was already sent to reviewer (agent-0); it was not delivered again.',
+    });
+  });
+
+  it('returns the delivery error when the recipient is unknown', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn(),
+      sendMessage: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            'Unknown recipient "ghost" — address main, a named child agent, or a known agent id (known: main).',
+          ),
+        ),
+    });
+
+    const result = await executeTool(
+      new SendMessageTool(host),
+      context({ to: 'ghost', message: 'Hello?' }),
+    );
+
+    expect(result).toEqual({
+      isError: true,
+      output:
+        'Unknown recipient "ghost" — address main, a named child agent, or a known agent id (known: main).',
+    });
+  });
+
+  it('returns a non-Error rejection as text', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn(),
+      sendMessage: vi.fn().mockRejectedValue('delivery failed'),
+    });
+
+    const result = await executeTool(
+      new SendMessageTool(host),
+      context({ to: 'main', message: 'Hello?' }),
+    );
+
+    expect(result).toEqual({ isError: true, output: 'delivery failed' });
+  });
+
+  it('does not stringify an opaque rejection as [object Object]', async () => {
+    const host = mockSubagentHost({
+      spawn: vi.fn(),
+      sendMessage: vi.fn().mockRejectedValue({ code: 'weird' }),
+    });
+
+    const result = await executeTool(
+      new SendMessageTool(host),
+      context({ to: 'main', message: 'Hello?' }),
+    );
+
+    expect(result).toEqual({ isError: true, output: 'The message could not be delivered.' });
+  });
+
+  it('uses the summary as the activity preview and truncates it at 200 characters', () => {
+    const host = mockSubagentHost({ spawn: vi.fn(), sendMessage: vi.fn() });
+    const tool = new SendMessageTool(host);
+    const longSummary = `s${'x'.repeat(250)}`;
+
+    const execution = tool.resolveExecution({
+      to: 'reviewer',
+      message: 'First line\nsecond line',
+      summary: longSummary,
+    });
+
+    if (execution.isError === true) throw new Error('expected runnable execution');
+    expect(execution.description).toBe(`Send message to reviewer: s${'x'.repeat(198)}…`);
+    expect(execution.accesses).toEqual(ToolAccesses.none());
+  });
+
+  it('falls back to the first message line as the activity preview', () => {
+    const host = mockSubagentHost({ spawn: vi.fn(), sendMessage: vi.fn() });
+    const tool = new SendMessageTool(host);
+
+    const execution = tool.resolveExecution({
+      to: 'agent-0',
+      message: 'First line\nsecond line',
+    });
+
+    if (execution.isError === true) throw new Error('expected runnable execution');
+    expect(execution.description).toBe('Send message to agent-0: First line');
+  });
+
+  it('matches permission rules against the recipient', () => {
+    const host = mockSubagentHost({ spawn: vi.fn(), sendMessage: vi.fn() });
+    const tool = new SendMessageTool(host);
+    const execution = tool.resolveExecution({ to: 'reviewer', message: 'Ready.' });
+
+    if (execution.isError === true) throw new Error('expected runnable execution');
+    expect(execution.matchesRule?.('review*')).toBe(true);
+    expect(execution.matchesRule?.('main')).toBe(false);
+  });
+});
+
+describe('ListAgentsTool', () => {
+  it('lists the root agent and the live children with ids and running state', async () => {
+    const roster: readonly AgentRosterEntry[] = [
+      { agentId: 'main', role: 'main', running: false },
+      { agentId: 'agent-0', name: 'reviewer', role: 'sub', running: true },
+      { agentId: 'agent-1', role: 'sub', running: false },
+    ];
+    const host = mockSubagentHost({
+      spawn: vi.fn(),
+      listAgents: vi.fn(() => roster),
+    });
+
+    const result = await executeTool(new ListAgentsTool(host), context({}));
+
+    expect(result).toEqual({
+      output: [
+        'Agents you can message:',
+        '- main (id: main) — idle',
+        '- reviewer (id: agent-0) — running',
+        '- agent-1 (id: agent-1) — idle',
+      ].join('\n'),
+    });
+  });
+
+  it('exposes a closed empty parameter schema', () => {
+    const host = mockSubagentHost({ spawn: vi.fn(), listAgents: vi.fn(() => []) });
+    const tool = new ListAgentsTool(host);
+
+    expect(tool.parameters).toMatchObject({
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    });
+    expect(ListAgentsToolInputSchema.parse({})).toEqual({});
   });
 });
 

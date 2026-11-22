@@ -10,6 +10,7 @@ import { agentContextOf } from '#/agent/scopeContext/scopeContext';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import {
   isSubagentMeta,
+  labelsFromAgentMeta,
   subagentLabels,
   subagentParentAgentId,
   subagentSwarmItem,
@@ -26,6 +27,7 @@ import {
   type SessionSwarmTask,
 } from './sessionSwarm';
 import {
+  resolveSwarmLaunchIntervalMs,
   resolveSwarmMaxConcurrency,
   AgentRunBatch,
   type AgentRunAttemptOptions,
@@ -80,14 +82,16 @@ export class SessionSwarmService implements ISessionSwarmService {
   }
 
   run<T>(args: SessionSwarmRunArgs<T>): Promise<readonly SessionSwarmRunResult<T>[]> {
+    const maxConcurrency = resolveSwarmMaxConcurrency();
+    const normalLaunchIntervalMs = resolveSwarmLaunchIntervalMs();
     const { callerAgentId, tasks } = args;
     const controller = new AbortController();
     this.inFlight.set(callerAgentId, controller);
     const unlinks: Array<() => void> = [];
-    const linkedTasks: SessionSwarmTask<T>[] = tasks.map((task) => {
-      if (task.signal !== undefined) unlinks.push(linkAbortSignal(task.signal, controller));
-      return { ...task, signal: controller.signal };
-    });
+    const release = (): void => {
+      for (const unlink of unlinks) unlink();
+      if (this.inFlight.get(callerAgentId) === controller) this.inFlight.delete(callerAgentId);
+    };
     const launcher: AgentRunBatchLauncher = {
       spawn: (options) => this.spawnAttempt(callerAgentId, options),
       resume: (agentId, options) => this.resumeAttempt(callerAgentId, agentId, options, false),
@@ -102,12 +106,21 @@ export class SessionSwarmService implements ISessionSwarmService {
         );
       },
     };
-    const maxConcurrency = resolveSwarmMaxConcurrency();
-    const promise = new AgentRunBatch(launcher, linkedTasks, { maxConcurrency }).run();
-    void promise.finally(() => {
-      for (const unlink of unlinks) unlink();
-      if (this.inFlight.get(callerAgentId) === controller) this.inFlight.delete(callerAgentId);
-    });
+    let promise: Promise<readonly SessionSwarmRunResult<T>[]>;
+    try {
+      const linkedTasks: SessionSwarmTask<T>[] = tasks.map((task) => {
+        if (task.signal !== undefined) unlinks.push(linkAbortSignal(task.signal, controller));
+        return { ...task, signal: controller.signal };
+      });
+      promise = new AgentRunBatch(launcher, linkedTasks, {
+        maxConcurrency,
+        normalLaunchIntervalMs,
+      }).run();
+    } catch (error) {
+      release();
+      throw error;
+    }
+    void promise.finally(release);
     return promise;
   }
 
@@ -127,6 +140,7 @@ export class SessionSwarmService implements ISessionSwarmService {
       plan,
       labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
       prompt: options.prompt,
+      name: options.name,
     });
     emitAgentRunSpawned(caller, spawned.agentId, {
       profileName: plan.profileName,
@@ -158,9 +172,9 @@ export class SessionSwarmService implements ISessionSwarmService {
     retryTurn: boolean,
   ): Promise<AgentRunAttemptHandle> {
     options.signal.throwIfAborted();
-    await this.requireOwnedSubagent(callerAgentId, agentId);
+    const meta = await this.requireOwnedSubagent(callerAgentId, agentId);
     const caller = this.requireHandle(callerAgentId, 'Caller agent');
-    const child = this.requireHandle(agentId, 'Agent instance');
+    const child = await this.requireOrRecreateChild(agentId, meta);
     this.requireIdleSubagent(agentId, child);
     const profileName =
       child.accessor.get(IAgentProfileService).data().profileName ?? RESUMED_PROFILE_FALLBACK;
@@ -217,6 +231,20 @@ export class SessionSwarmService implements ISessionSwarmService {
     return handle;
   }
 
+  private async requireOrRecreateChild(
+    agentId: string,
+    meta: AgentMeta,
+  ): Promise<IAgentScopeHandle> {
+    const existing = this.agentLifecycle.handleOf(agentId);
+    if (existing !== undefined) return existing;
+    await this.agentLifecycle.create({
+      agentId,
+      labels: labelsFromAgentMeta(meta),
+      forkedFrom: meta.forkedFrom,
+    });
+    return this.requireHandle(agentId, 'Agent instance');
+  }
+
   private requireIdleSubagent(agentId: string, child: IAgentScopeHandle): void {
     if (child.accessor.get(IAgentLoopService).status().state === 'running') {
       throw new Error2(
@@ -227,9 +255,9 @@ export class SessionSwarmService implements ISessionSwarmService {
     }
   }
 
-  private async requireOwnedSubagent(callerAgentId: string, agentId: string): Promise<void> {
+  private async requireOwnedSubagent(callerAgentId: string, agentId: string): Promise<AgentMeta> {
     const meta = await this.agentMeta(agentId);
-    if (!isSubagentMeta(meta)) {
+    if (meta === undefined || !isSubagentMeta(meta)) {
       throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent instance "${agentId}" is not a subagent`, {
         details: { agentId },
       });
@@ -241,6 +269,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         { details: { agentId, callerAgentId } },
       );
     }
+    return meta;
   }
 
   private async agentMeta(agentId: string): Promise<AgentMeta | undefined> {

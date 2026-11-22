@@ -26,9 +26,13 @@ import { WorkspaceStateService } from '#/workspace/state/workspaceStateService';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import '#/features/reminder/reminderFeature';
+import { TOOL_SELECT_FLAG_ID } from '#/agent/toolSelect/flag';
+import { AGENT_FLEET_CONTROL_FLAG_ID, AGENT_MESSAGING_FLAG_ID } from '#/features/messaging/flag';
+import { AGENT_PERSONA_FLAG_ID } from '#/session/subagent/flag';
 import { BUILTIN_REPLAYABLE_STATE_KEYS } from '../state/builtinReplayableKeys';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { AgentCron } from '#/features/cron/cronAgentRuntime';
+import { DEFAULT_CRON_CONFIG } from '#/features/cron/configSection';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { AgentGoal } from '#/features/goal/goalAgentRuntime';
 import { IGoalDeadlineScheduler } from '#/features/goal/goalDeadlineScheduler';
@@ -269,6 +273,7 @@ interface KimiConfig {
   readonly models?: Record<string, ModelConfigForConfig>;
   readonly defaultProvider?: string;
   readonly defaultModel?: string;
+  readonly experimental?: Record<string, boolean>;
   readonly [domain: string]: unknown;
 }
 
@@ -2506,7 +2511,20 @@ function configStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot['config
 }
 
 function emptyConfig(): KimiConfig {
-  return configWithProvider({ providers: {} }, MOCK_PROVIDER, undefined);
+  return configWithProvider(
+    {
+      providers: {},
+      experimental: {
+        [TOOL_SELECT_FLAG_ID]: false,
+        [AGENT_MESSAGING_FLAG_ID]: false,
+        [AGENT_PERSONA_FLAG_ID]: false,
+        [AGENT_FLEET_CONTROL_FLAG_ID]: false,
+      },
+      cron: { ...DEFAULT_CRON_CONFIG, pollIntervalMs: 0 },
+    },
+    MOCK_PROVIDER,
+    undefined,
+  );
 }
 
 function applyTestAgentOptionsToConfig(config: KimiConfig, options: TestAgentOptions): KimiConfig {
@@ -2521,6 +2539,10 @@ function applyTestAgentOptionsToConfig(config: KimiConfig, options: TestAgentOpt
     models: {
       ...config.models,
       ...initialConfig.models,
+    },
+    experimental: {
+      ...config.experimental,
+      ...initialConfig.experimental,
     },
   };
 }

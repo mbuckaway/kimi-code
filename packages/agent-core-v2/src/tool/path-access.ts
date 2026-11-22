@@ -18,11 +18,17 @@ const SENSITIVE_BASENAMES = new Set<string>([
   'id_ed25519',
   'id_ecdsa',
   'credentials',
+  '.npmrc',
+  '.netrc',
+  '.git-credentials',
+  'credentials.json',
+  'token.json',
 ]);
 
 const SENSITIVE_PATH_SUFFIXES = [
   ['.aws', 'credentials'],
   ['.gcp', 'credentials'],
+  ['docker', 'config.json'],
 ];
 
 const ENV_PREFIX = '.env.';
@@ -72,6 +78,7 @@ export function isSensitiveFile(path: string): boolean {
     const suffix = suffixParts.join('/');
     const comparableSuffix = comparable(suffix);
     if (
+      comparablePath === comparableSuffix ||
       comparablePath.endsWith(`/${comparableSuffix}`) ||
       comparablePath.includes(`/${comparableSuffix}/`)
     ) {

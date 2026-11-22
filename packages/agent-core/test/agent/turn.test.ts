@@ -27,7 +27,7 @@ import {
 import { describe, expect, it, afterEach, vi } from 'vitest';
 
 import { HookEngine } from '../../src/session/hooks';
-import { abortError } from '../../src/utils/abort';
+import { abortError, userCancellationReason } from '../../src/utils/abort';
 import type { AgentOptions, AgentRecord, AgentRecordPersistence } from '../../src/agent';
 import { ProcessBackgroundTask } from '../../src/agent/background';
 import { InMemoryAgentRecordPersistence } from '../../src/agent/records';
@@ -623,6 +623,107 @@ describe('Agent turn flow', () => {
         interrupt_reason: 'user_cancelled',
       }),
     });
+  });
+
+  it('flushes an agent message buffered in the turn-end window into context', async () => {
+    const ctx = testAgent();
+    ctx.configure();
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+
+    const emit = ctx.agent.emitEvent.bind(ctx.agent);
+    const emitSpy = vi.spyOn(ctx.agent, 'emitEvent').mockImplementation((event) => {
+      if (event.type === 'turn.ended') {
+        // The steer lands while the active turn still exists but after the last
+        // stop-boundary flush: no successor turn would carry it.
+        ctx.agent.turn.steer([{ type: 'text', text: 'late agent message' }], {
+          kind: 'agent_message',
+          from: 'agent-0',
+        });
+      }
+      emit(event);
+    });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'go' }] });
+    await ctx.untilTurnEnd();
+    await Promise.resolve();
+    emitSpy.mockRestore();
+
+    expect(ctx.agent.context.history).toContainEqual(
+      expect.objectContaining({
+        role: 'user',
+        content: [{ type: 'text', text: 'late agent message' }],
+        origin: { kind: 'agent_message', from: 'agent-0' },
+      }),
+    );
+  });
+
+  it('marks a user cancel as an interruption before the aborted worker unwinds', async () => {
+    const ctx = testAgent();
+    ctx.configure({ tools: ['Bash'] });
+    ctx.mockNextResponse({ type: 'text', text: 'I will run Bash.' }, bashCall());
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'go' }] });
+    await ctx.untilApprovalRequest();
+
+    ctx.agent.turn.cancel(undefined, userCancellationReason());
+
+    // Both facts are visible synchronously, before the aborted worker settles.
+    expect(ctx.agent.turn.hasActiveTurn).toBe(false);
+    expect(ctx.agent.turn.lastTurnWasUserInterrupted).toBe(true);
+    await ctx.untilTurnEnd();
+  });
+
+  it('removes an abandoned turn-start waiter on abort', async () => {
+    const ctx = testAgent();
+    ctx.configure();
+    const controller = new AbortController();
+    const waiting = ctx.agent.turn.waitForTurnStart(controller.signal);
+    expect(ctx.agent.turn.turnStartWaiterCount).toBe(1);
+
+    controller.abort(new Error('stop waiting'));
+
+    await expect(waiting).rejects.toThrow('stop waiting');
+    expect(ctx.agent.turn.turnStartWaiterCount).toBe(0);
+  });
+
+  it('resolves a signalled turn-start waiter when a turn starts', async () => {
+    const ctx = testAgent();
+    ctx.configure();
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+    const controller = new AbortController();
+    const waiting = ctx.agent.turn.waitForTurnStart(controller.signal);
+    expect(ctx.agent.turn.turnStartWaiterCount).toBe(1);
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'go' }] });
+
+    await expect(waiting).resolves.toBeUndefined();
+    expect(ctx.agent.turn.turnStartWaiterCount).toBe(0);
+    await ctx.untilTurnEnd();
+  });
+
+  it('resolves turn-start waiting immediately when a turn is already active', async () => {
+    const ctx = testAgent();
+    ctx.configure();
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+    const running = ctx.rpc.prompt({ input: [{ type: 'text', text: 'go' }] });
+
+    await expect(ctx.agent.turn.waitForTurnStart()).resolves.toBeUndefined();
+
+    await running;
+    await ctx.untilTurnEnd();
+  });
+
+  it('rejects a pending first request with a readable Error when the turn ends early', async () => {
+    const ctx = testAgent({
+      generate: async () => {
+        throw new Error('provider unavailable');
+      },
+    });
+    ctx.configure();
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'go' }] });
+    const firstRequest = ctx.agent.turn.waitForTurnFirstRequest();
+
+    await expect(firstRequest).rejects.toThrow(/ended before its first request/);
   });
 
   it('reports turn_interrupted telemetry as aborted on programmatic abort', async () => {

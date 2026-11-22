@@ -2,10 +2,10 @@ import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import type { Interaction } from '@moonshot-ai/agent-core-v2';
 import type { SessionHandle } from '@moonshot-ai/klient';
 import type { ToolInputDisplay } from '@moonshot-ai/protocol';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AcpClient } from '../src/acp-client';
-import { AcpInteractionBridge } from '../src/interaction-bridge';
+import { AcpInteractionBridge, INTERACTION_TIMEOUT_MS } from '../src/interaction-bridge';
 
 const SESSION_ID = 'session_test';
 
@@ -364,5 +364,88 @@ describe('AcpInteractionBridge', () => {
     });
     expect(session.responses).toEqual([{ id: 'question-el-1', response: { 'Pick one': 'B' } }]);
     bridge.dispose();
+  });
+
+  it('rejects an approval after the interaction deadline when the client never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = makeFakeSession();
+      const conn = {
+        requestPermission: () => new Promise<RequestPermissionResponse>(() => {}),
+      } as unknown as AcpClient;
+      session.setPending([approvalInteraction]);
+      const bridge = new AcpInteractionBridge(conn, session.handle, SESSION_ID);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.responses).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(INTERACTION_TIMEOUT_MS);
+
+      expect(session.responses).toEqual([
+        { id: 'approval-1', response: { decision: 'rejected' } },
+      ]);
+      bridge.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('answers a question with its first option after the interaction deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = makeFakeSession();
+      const conn = {
+        requestPermission: () => new Promise<RequestPermissionResponse>(() => {}),
+      } as unknown as AcpClient;
+      const interaction: Interaction = {
+        id: 'question-timeout-1',
+        kind: 'question',
+        payload: {
+          toolCallId: 'tc_q',
+          turnId: 5,
+          questions: [{ question: 'Pick one', options: [{ label: 'A' }, { label: 'B' }] }],
+        },
+        origin: { turnId: 5 },
+        createdAt: 0,
+      };
+      session.setPending([interaction]);
+      const bridge = new AcpInteractionBridge(conn, session.handle, SESSION_ID);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.responses).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(INTERACTION_TIMEOUT_MS);
+
+      expect(session.responses).toEqual([
+        { id: 'question-timeout-1', response: { 'Pick one': 'A' } },
+      ]);
+      bridge.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('answers an elicitation form with the first option after the interaction deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = makeFakeSession();
+      const conn = {
+        createElicitation: () => new Promise<never>(() => {}),
+      } as unknown as AcpClient;
+      session.setPending([questionInteraction]);
+      const bridge = new AcpInteractionBridge(conn, session.handle, SESSION_ID, true);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.responses).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(INTERACTION_TIMEOUT_MS);
+
+      expect(session.responses).toEqual([
+        { id: 'question-el-1', response: { 'Pick one': 'A', 'Pick many': 'X' } },
+      ]);
+      bridge.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
