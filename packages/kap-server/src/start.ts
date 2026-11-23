@@ -113,6 +113,7 @@ export interface ServerStartOptions {
   readonly disableHostCheck?: boolean;
   readonly insecureNoTls?: boolean;
   readonly allowRemoteShutdown?: boolean;
+  readonly onShutdownRequested?: () => void | Promise<void>;
   readonly authTokenService?: IAuthTokenService;
   readonly disableAuth?: boolean;
   readonly enableKimiOauth?: boolean;
@@ -548,7 +549,14 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
       (process.env['KIMI_CODE_PLUGIN_MARKETPLACE_URL'] === undefined ||
         process.env['KIMI_CODE_PLUGIN_MARKETPLACE_FROM_DEV_SERVER'] === '1'),
     onShutdown: () => {
-      void close().catch((err: unknown) => logger.error({ err }, 'server close failed'));
+      void (async () => {
+        try {
+          await opts.onShutdownRequested?.();
+        } catch (err) {
+          logger.error({ err }, 'shutdown hook failed; closing the server anyway');
+        }
+        await close().catch((err: unknown) => logger.error({ err }, 'server close failed'));
+      })();
     },
     connectionRegistry,
     broadcaster,

@@ -7,6 +7,23 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type RunningServer, startServer } from '../src/start';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
 
+async function healthStatus(url: string): Promise<number | undefined> {
+  try {
+    return (await fetch(url)).status;
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('condition not met within timeout');
+}
+
 describe('server-v2 exposure hardening hooks', () => {
   let server: RunningServer | undefined;
   let home: string | undefined;
@@ -113,5 +130,51 @@ describe('server-v2 exposure hardening hooks', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(terminals.statusCode).toBe(404);
+  });
+
+  it('runs the requested shutdown hook before closing the server', async () => {
+    let hookPort = 0;
+    let healthDuringHook: number | undefined;
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+      disableAuth: true,
+      onShutdownRequested: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        healthDuringHook = await healthStatus(
+          `http://127.0.0.1:${hookPort}/api/v1/healthz`,
+        );
+      },
+    });
+    hookPort = server.port;
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const res = await fetch(`${base}/api/v1/shutdown`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    await waitFor(async () => (await healthStatus(`${base}/api/v1/healthz`)) === undefined);
+
+    expect(healthDuringHook).toBe(200);
+  });
+
+  it('closes the server when the requested shutdown hook rejects', async () => {
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+      disableAuth: true,
+      onShutdownRequested: async () => {
+        throw new Error('shutdown hook failed');
+      },
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const res = await fetch(`${base}/api/v1/shutdown`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    await waitFor(async () => (await healthStatus(`${base}/api/v1/healthz`)) === undefined);
   });
 });
