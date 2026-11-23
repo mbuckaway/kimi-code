@@ -177,12 +177,14 @@ export function installServerSignalHandlers(deps: ServerSignalDeps): () => void 
       .reload()
       .then(
         (report) => reportReload(report),
+        // A rejection is not a config-file verdict: it can also be a disposed
+        // core (a SIGHUP racing SIGINT) or an engine listener throwing. Only
+        // the returned `error` field means the file failed to load and writes
+        // are blocked, so this path makes no claim about the file or writes.
         (error: unknown) =>
-          reportReload({
-            changedDomains: [],
-            error: error instanceof Error ? error.message : String(error),
-            restartKeys: [],
-          }),
+          deps.stdout.write(
+            `config reload failed: ${error instanceof Error ? error.message : String(error)}\n`,
+          ),
       )
       .finally(() => {
         reloading = false;

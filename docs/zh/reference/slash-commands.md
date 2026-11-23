@@ -40,7 +40,10 @@
 | `/export-debug-zip` | — | 将当前会话导出为调试用 ZIP 压缩包（与 [`kimi export`](./kimi-command.md#kimi-export) 行为一致） | 否 |
 | `/copy` | — | 将最后一条 AI 回复复制到剪贴板 | 否 |
 | `/add-dir [<path>]` | — | 为当前会话添加额外的工作目录。不带路径（或传入 `list`）运行时列出已配置的目录。添加时可选择是否将目录记入项目的 `.kimi-code/local.toml` | 否 |
-| `/web` | — | 在 web UI 中打开当前会话：选择一个运行中的实例进行连接，或在 TUI 退出后新开一个前台服务器。以这种方式启动的服务与 `kimi web` 使用同一套默认值：先读 `config.toml` 的 `[server]` 段落，再用内置默认。`/rc`（`/remote-control`）同理。参见 [`kimi web`](./kimi-command.md#kimi-web) | 是 |
+| `/web` | — | 在 web UI 中打开当前会话：TUI 退出后总是新开一个本地前台服务器。它从不启动 Remote Control——这里会忽略 `[server] remote_control = true` 的设置；如需 Remote Control 请用 `/rc` | 是 |
+| `/remote-control` | `/rc` | 通过 Kimi Remote Control 打开当前会话：TUI 退出后总是启动 Remote Control 并新开一个本地服务器；要求 `[server] host` 为回环地址，拒绝 `dangerous_bypass_auth = true`，且仅在 remote-control 实验开关打开时可用 | 是 |
+
+这两个命令按与 `kimi web` 相同的 **CLI 标志 > `[server]` 键 > 内置默认值** 顺序读取 `config.toml` 的 `[server]` 节；它们自身不接受任何标志，因此文件中的值优先于内置默认值。两者都会遵循 `[server] open` 决定是否打开浏览器。完整选项说明参见 [`kimi web`](./kimi-command.md#kimi-web)。
 
 ## 模式与运行控制
 

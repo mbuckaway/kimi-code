@@ -22,6 +22,7 @@ import {
 
 import { listLiveServerInstances } from '../src/instanceRegistry';
 import { registerShutdownRoutes } from '../src/routes/shutdown';
+import { SessionEventBroadcaster } from '../src/transport/ws/v1/sessionEventBroadcaster';
 import {
   CLOSE_DRAIN_TIMEOUT_MS,
   listenWithPortRetry,
@@ -123,7 +124,9 @@ interface CloseWarningRecord {
   readonly level?: number;
   readonly drains?: string[];
   readonly drain?: string;
+  readonly step?: string;
   readonly err?: string;
+  readonly msg?: string;
 }
 
 function warnRecords(lines: string[]): CloseWarningRecord[] {
@@ -590,10 +593,12 @@ describe('server-v2 boot', () => {
 
       expect(thrownMirrorLookups).toBe(1);
       expect(drainRetirements).toHaveBeenCalledTimes(2);
-      expect(abandonedDrains(lines)).toEqual(['ISessionIndexMirror.drain']);
-      expect(
-        warnRecords(lines).find((record) => record.drain === 'ISessionIndexMirror.drain')?.err,
-      ).toContain('session index mirror lookup failed after dispose');
+      expect(abandonedDrains(lines)).toEqual([]);
+      const mirrorFailure = warnRecords(lines).find(
+        (record) => record.drain === 'ISessionIndexMirror.drain',
+      );
+      expect(mirrorFailure?.err).toContain('session index mirror lookup failed after dispose');
+      expect(mirrorFailure?.msg).toContain('server close drain failed');
       expect(() => core.accessor.get(IBootstrapService)).toThrow();
       expect(() => resolveRegisteredService(ISessionIndexMirror)).toThrow();
       expect(await listLiveServerInstances(home)).toEqual([]);
@@ -620,13 +625,48 @@ describe('server-v2 boot', () => {
       await expect(closingServer.close()).resolves.toBeUndefined();
 
       expect(drainRetirements).toHaveBeenCalledTimes(2);
-      expect(abandonedDrains(lines)).toEqual(['drainLogCloses']);
-      expect(
-        warnRecords(lines).find((record) => record.drain === 'drainLogCloses')?.err,
-      ).toContain('log close failed on disposed worker');
+      expect(abandonedDrains(lines)).toEqual([]);
+      const logCloseFailure = warnRecords(lines).find(
+        (record) => record.drain === 'drainLogCloses',
+      );
+      expect(logCloseFailure?.err).toContain('log close failed on disposed worker');
+      expect(logCloseFailure?.msg).toContain('server close drain failed');
       expect(() => core.accessor.get(IBootstrapService)).toThrow();
       expect(await listLiveServerInstances(home)).toEqual([]);
     });
+  });
+
+  it('keeps draining when an onClose hook rejects app.close', async () => {
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-onclose-failure-'));
+    const { logger, lines } = recordingLogger();
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logger,
+    });
+    const closingServer = server;
+    const core = closingServer.core;
+    server = undefined;
+    const drainRetirements = vi.spyOn(core.accessor.get(IAppendLogStore), 'drainRetirements');
+    const broadcasterClose = vi
+      .spyOn(SessionEventBroadcaster.prototype, 'close')
+      .mockRejectedValueOnce(new Error('broadcaster close failed'));
+    closeDrainSeams.logCloses.mockClear();
+    try {
+      await expect(closingServer.close()).resolves.toBeUndefined();
+
+      expect(broadcasterClose).toHaveBeenCalledTimes(1);
+      expect(drainRetirements).toHaveBeenCalledTimes(2);
+      expect(closeDrainSeams.logCloses).toHaveBeenCalled();
+      const appCloseFailure = warnRecords(lines).find((record) => record.step === 'app.close');
+      expect(appCloseFailure?.err).toContain('broadcaster close failed');
+      expect(() => core.accessor.get(IBootstrapService)).toThrow();
+      expect(await listLiveServerInstances(home)).toEqual([]);
+    } finally {
+      broadcasterClose.mockRestore();
+    }
   });
 
   it('installs process-level rejection handlers while running and removes them on close', async () => {

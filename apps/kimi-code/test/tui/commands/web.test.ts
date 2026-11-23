@@ -18,6 +18,7 @@ import { renderTerminalQr } from '#/utils/remote-control-qr';
 const mocks = vi.hoisted(() => ({
   startServerForeground: vi.fn(),
   startRemoteControl: vi.fn(),
+  isRemoteControlEnabled: vi.fn(() => true),
   tryResolveServerToken: vi.fn(),
   getDataDir: vi.fn(() => '/tmp/kimi-home'),
   openUrl: vi.fn(),
@@ -25,7 +26,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('#/cli/sub/web/remote-control', async (importOriginal) => {
   const actual = await importOriginal<typeof import('#/cli/sub/web/remote-control')>();
-  return { ...actual, startRemoteControl: mocks.startRemoteControl };
+  return {
+    ...actual,
+    startRemoteControl: mocks.startRemoteControl,
+    isRemoteControlEnabled: mocks.isRemoteControlEnabled,
+  };
 });
 
 vi.mock('#/cli/sub/web/run', async (importOriginal) => {
@@ -51,7 +56,7 @@ vi.mock('#/utils/paths', async (importOriginal) => {
   return { ...actual, getDataDir: mocks.getDataDir };
 });
 
-// `/web` and `/rc` resolve `[server]` defaults through `tryReadServerConfig`,
+// `/web` and `/rc` resolve `[server]` defaults through `readServerConfig`,
 // which reads `<KIMI_CODE_HOME>/config.toml` at call time. Point it at a private
 // directory so a `[server]` key in the developer's own config cannot change (or
 // fail) these suites; the parity tests write their own file into it.
@@ -169,12 +174,12 @@ describe('handleWebCommand', () => {
   it('carries [server] ipv6 into the takeover banner hints', async () => {
     // `/web` builds its own banner options, so the flag has to survive this hop
     // too: without it the TUI prints a different link list than `kimi web`.
-    writeFileSync(isolatedConfigPath, '[server]\nhost = "0.0.0.0"\nipv6 = true\n', 'utf-8');
+    writeFileSync(isolatedConfigPath, '[server]\nhost = "::"\nipv6 = true\n', 'utf-8');
     mocks.tryResolveServerToken.mockReturnValue('tok-1');
     const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     mocks.startServerForeground.mockImplementation(
       async (_options: unknown, hooks: { onReady?: (origin: string) => void }) => {
-        hooks.onReady?.('http://0.0.0.0:58627');
+        hooks.onReady?.('http://[::]:58627');
       },
     );
     const host = makeHost();
@@ -189,6 +194,7 @@ describe('handleWebCommand', () => {
       expect(
         written
           .split('\n')
+          .filter((line) => line.includes('Network:'))
           .map((line) => line.match(/http:\/\/\[[^\]]+\]/)?.[0] ?? '')
           .filter((origin) => origin !== ''),
       ).toEqual(
@@ -250,12 +256,14 @@ describe('handleWebCommand', () => {
     }
   });
 
-  it('keeps working on a [server] typo instead of throwing after the TUI stopped', async () => {
-    // `/web` runs its takeover after `host.stop()`, so a throwing reader would
-    // escape into machinery no handler catches. The lenient reader warns instead.
+  it('reports a [server] typo on the restored terminal instead of rejecting', async () => {
+    // `/web` runs its takeover after `host.stop()`, so a throwing reader has to
+    // be caught inside the task; otherwise it escapes into machinery with no
+    // handler. The strict reader matches `kimi web`: name the key, exit 1.
     writeFileSync(isolatedConfigPath, '[server]\nbost = "127.0.0.1"\n', 'utf-8');
     mocks.startServerForeground.mockResolvedValue(undefined);
     const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const host = makeHost();
 
     try {
@@ -263,19 +271,114 @@ describe('handleWebCommand', () => {
       const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
       await task();
 
-      expect(mocks.startServerForeground).toHaveBeenCalledWith(
-        expect.objectContaining({ port: 58627 }),
-        expect.anything(),
-      );
+      expect(mocks.startServerForeground).not.toHaveBeenCalled();
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("unknown key 'bost'"));
+      expect(exitSpy).toHaveBeenCalledWith(1);
     } finally {
       errSpy.mockRestore();
+      exitSpy.mockRestore();
+      rmSync(isolatedConfigPath, { force: true });
+    }
+  });
+
+  it('prints the danger banner and withholds the token when the file disables auth', async () => {
+    writeFileSync(isolatedConfigPath, '[server]\ndangerous_bypass_auth = true\n', 'utf-8');
+    mocks.tryResolveServerToken.mockReturnValue('tok-1');
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    mocks.startServerForeground.mockImplementation(
+      async (_options: unknown, hooks: { onReady?: (origin: string) => void }) => {
+        hooks.onReady?.('http://127.0.0.1:58627');
+      },
+    );
+    const host = makeHost();
+
+    try {
+      await handleWebCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      const written = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      expect(written).toContain('DANGER: authentication is DISABLED');
+      expect(written).not.toContain('#token=');
+      expect(mocks.openUrl).toHaveBeenCalledWith(
+        'http://127.0.0.1:58627/sessions/ses-1',
+      );
+    } finally {
+      writeSpy.mockRestore();
       rmSync(isolatedConfigPath, { force: true });
     }
   });
 });
 
 describe('handleRemoteControlCommand', () => {
+  it('refuses to start when the remote-control gate is closed', async () => {
+    vi.clearAllMocks();
+    mocks.isRemoteControlEnabled.mockReturnValue(false);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const host = makeHost();
+
+    try {
+      await handleRemoteControlCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      expect(mocks.startServerForeground).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('experimental'));
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      mocks.isRemoteControlEnabled.mockReturnValue(true);
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('refuses dangerous_bypass_auth from the config file', async () => {
+    vi.clearAllMocks();
+    writeFileSync(isolatedConfigPath, '[server]\ndangerous_bypass_auth = true\n', 'utf-8');
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const host = makeHost();
+
+    try {
+      await handleRemoteControlCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      expect(mocks.startServerForeground).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('dangerous_bypass_auth'),
+      );
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
+      rmSync(isolatedConfigPath, { force: true });
+    }
+  });
+
+  it('refuses a non-loopback [server] host', async () => {
+    vi.clearAllMocks();
+    writeFileSync(isolatedConfigPath, '[server]\nhost = "0.0.0.0"\n', 'utf-8');
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const host = makeHost();
+
+    try {
+      await handleRemoteControlCommand(host);
+      const task = host.setExitForegroundTask.mock.calls[0]![0] as () => Promise<void>;
+      await task();
+
+      expect(mocks.startServerForeground).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('loopback'));
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
+      rmSync(isolatedConfigPath, { force: true });
+    }
+  });
+
   it('stays in the TUI with a readable error when another instance holds Remote Control', async () => {
     vi.clearAllMocks();
     const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import('node:fs');

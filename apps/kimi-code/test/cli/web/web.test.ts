@@ -588,7 +588,9 @@ describe('ready banner reflects the bind class', () => {
     expect(raw).not.toContain('2001:db8::1');
   });
 
-  it('lists the bracketed IPv6 interface hint when --ipv6 is passed', async () => {
+  it('keeps the IPv6 hints out of an IPv4 wildcard bind even when --ipv6 is passed', async () => {
+    // `--ipv6` only changes what is printed, never what is bound; a 0.0.0.0
+    // socket cannot accept IPv6 connections, so its hints would be dead links.
     const { handleWebCommand } = await import('#/cli/sub/web/run');
     const { runner, calls } = makeRunner('http://0.0.0.0:58627');
     const { stdout, stderr, readStdout } = makeIo();
@@ -609,9 +611,63 @@ describe('ready banner reflects the bind class', () => {
     );
 
     const raw = stripAnsi(readStdout());
-    expect(calls.options?.ipv6).toBe(true);
+    expect(calls.options).toMatchObject({ host: '0.0.0.0', ipv6: true });
+    expect(raw).toContain('http://192.0.2.66:58627/#token=tok-xyz');
+    expect(raw).not.toContain('2001:db8::1');
+  });
+
+  it('lists the bracketed IPv6 interface hint for --host :: when --ipv6 is passed', async () => {
+    const { handleWebCommand } = await import('#/cli/sub/web/run');
+    const { runner, calls } = makeRunner(serverOrigin('::', 58627));
+    const { stdout, stderr, readStdout } = makeIo();
+
+    await handleWebCommand(
+      { host: '::', ipv6: true, open: false },
+      {
+        startServerForeground: runner,
+        resolveToken: () => 'tok-xyz',
+        networkAddresses: [
+          { address: '192.0.2.66', family: 'IPv4' },
+          { address: '2001:db8::1', family: 'IPv6' },
+        ],
+        openUrl: vi.fn(),
+        stdout,
+        stderr,
+      },
+    );
+
+    const raw = stripAnsi(readStdout());
+    expect(calls.options).toMatchObject({ host: '::', ipv6: true });
+    expect(raw).toContain('Local:    http://localhost:58627/#token=tok-xyz');
     expect(raw).toContain('http://192.0.2.66:58627/#token=tok-xyz');
     expect(raw).toContain('http://[2001:db8::1]:58627/#token=tok-xyz');
+  });
+
+  it('treats --host ::0 as the IPv6 wildcard bind', async () => {
+    const { handleWebCommand } = await import('#/cli/sub/web/run');
+    const { runner } = makeRunner(serverOrigin('::0', 58627));
+    const { stdout, stderr, readStdout } = makeIo();
+
+    await handleWebCommand(
+      { host: '::0', ipv6: true, open: false },
+      {
+        startServerForeground: runner,
+        resolveToken: () => 'tok-v6',
+        networkAddresses: [
+          { address: '192.0.2.66', family: 'IPv4' },
+          { address: '2001:db8::1', family: 'IPv6' },
+        ],
+        openUrl: vi.fn(),
+        stdout,
+        stderr,
+      },
+    );
+
+    const raw = stripAnsi(readStdout());
+    expect(raw).toContain('Local:    http://localhost:58627/#token=tok-v6');
+    expect(raw).toContain('Network:  http://192.0.2.66:58627/#token=tok-v6');
+    expect(raw).toContain('Network:  http://[2001:db8::1]:58627/#token=tok-v6');
+    expect(raw).not.toContain('URL:      http://[::0]:58627');
   });
 
   it('prints an IPv6 bind chosen with --host even without --ipv6', async () => {
@@ -1410,6 +1466,46 @@ describe('accessUrlLines', () => {
     ]);
   });
 
+  it('keeps IPv6 addresses out of an IPv4 wildcard bind even when includeIpv6 is set', async () => {
+    const { accessUrlLines } = await import('#/cli/sub/web/access-urls');
+    const lines = accessUrlLines(
+      '0.0.0.0',
+      58627,
+      'tok',
+      [
+        { address: '192.0.2.66', family: 'IPv4' },
+        { address: '2001:db8::1', family: 'IPv6' },
+      ],
+      true,
+    );
+    expect(lines).toEqual([
+      { label: 'Local:    ', url: 'http://localhost:58627/#token=tok' },
+      { label: 'Network:  ', url: 'http://192.0.2.66:58627/#token=tok' },
+    ]);
+  });
+
+  it('treats ::0 and [::] as the IPv6 wildcard bind', async () => {
+    const { accessUrlLines } = await import('#/cli/sub/web/access-urls');
+    for (const host of ['::0', '[::]']) {
+      expect(
+        accessUrlLines(
+          host,
+          58627,
+          'tok',
+          [
+            { address: '192.0.2.66', family: 'IPv4' },
+            { address: '2001:db8::1', family: 'IPv6' },
+          ],
+          true,
+        ),
+      ).toEqual([
+        { label: 'Local:    ', url: 'http://localhost:58627/#token=tok' },
+        { label: 'Network:  ', url: 'http://192.0.2.66:58627/#token=tok' },
+        { label: 'Network:  ', url: 'http://[2001:db8::1]:58627/#token=tok' },
+      ]);
+    }
+  });
+
   it('prints an IPv6 bind host chosen with --host even when includeIpv6 is off', async () => {
     // The gate covers interface hints only: `--host 2001:db8::1` is a chosen
     // bind, so hiding it would print a URL that is not where the server listens.
@@ -1514,7 +1610,7 @@ describe('`kimi web rotate-token`', () => {
    * enumerates this machine — so the expectations below are derived from the
    * same enumerator instead of hardcoded addresses.
    */
-  async function rotateWildcardBind(config: string): Promise<string> {
+  async function rotateWildcardBind(config: string, host = '0.0.0.0'): Promise<string> {
     const { mkdirSync } = await import('node:fs');
     mkdirSync(join(dir, 'server', 'instances'), { recursive: true });
     writeFileSync(
@@ -1522,7 +1618,7 @@ describe('`kimi web rotate-token`', () => {
       JSON.stringify({
         server_id: '01JWILDCARD0000000000000000',
         pid: process.pid,
-        host: '0.0.0.0',
+        host,
         port: 58627,
         started_at: Date.now(),
         heartbeat_at: Date.now(),
@@ -1557,8 +1653,14 @@ describe('`kimi web rotate-token`', () => {
     expect(bracketedOrigins(stdout)).toEqual([]);
   });
 
-  it('re-prints the displayed IPv6 hints when [server] ipv6 is on', async () => {
+  it('does not add IPv6 hints to a 0.0.0.0 instance even when [server] ipv6 is on', async () => {
     const stdout = await rotateWildcardBind('[server]\nipv6 = true\n');
+
+    expect(bracketedOrigins(stdout)).toEqual([]);
+  });
+
+  it('re-prints the displayed IPv6 hints for an IPv6 bind when [server] ipv6 is on', async () => {
+    const stdout = await rotateWildcardBind('[server]\nipv6 = true\n', '::');
     const { listNetworkAddresses } = await import('#/cli/sub/web/networks');
 
     expect(bracketedOrigins(stdout)).toEqual(
@@ -2358,6 +2460,22 @@ describe('`kimi web` config reload on SIGHUP', () => {
     void run;
   });
 
+  it('does not invent restart keys when the section cannot be re-read', async () => {
+    expect.assertions(3);
+    writeConfig('[server]\nport = 58627\n');
+    const { proc, io, run } = await runWithReload({ changedDomains: [], error: undefined });
+    writeConfig('[server]\nport = 58627\nbost = "127.0.0.1"\n');
+
+    void proc.listener('SIGHUP')?.();
+    await flushMicrotasks();
+
+    const out = io.readStdout();
+    expect(out).toContain('restart advisory unavailable');
+    expect(out).not.toContain('restart required for: port');
+    expect(out).toContain('config reloaded: no changes');
+    void run;
+  });
+
   it('survives a reload that rejects', async () => {
     expect.assertions(3);
     const { proc, io, run } = await runWithReload(undefined, async () => {
@@ -2368,7 +2486,7 @@ describe('`kimi web` config reload on SIGHUP', () => {
     await flushMicrotasks();
 
     expect(io.readStdout()).toContain('config reload failed: engine reload threw');
-    expect(io.readStdout()).toContain('kept previous values');
+    expect(io.readStdout()).not.toContain('kept previous values');
     expect(proc.exit).not.toHaveBeenCalled();
     void run;
   });
@@ -2934,13 +3052,14 @@ describe('`kimi web` against a [server] config file', () => {
   /**
    * The wildcard-bind banner for the current config, with a fixed interface
    * list so the hint output does not depend on this machine's addresses.
+   * `cliHost` is omitted when the bind host must come from the config file.
    */
-  async function runWithHints() {
+  async function runWithHints(cliHost?: string) {
     const { handleWebCommand } = await import('#/cli/sub/web/run');
-    const { runner } = makeRunner('http://0.0.0.0:58627');
+    const { runner } = makeRunner(serverOrigin(cliHost ?? '0.0.0.0', 58627));
     const io = makeIo();
     await handleWebCommand(
-      { host: '0.0.0.0', open: false },
+      { host: cliHost, open: false },
       {
         startServerForeground: runner,
         resolveToken: () => 'tok',
@@ -2956,10 +3075,19 @@ describe('`kimi web` against a [server] config file', () => {
     return io;
   }
 
-  it('carries [server] ipv6 into the ready banner hints', async () => {
+  it('does not add IPv6 hints to a 0.0.0.0 bind even when [server] ipv6 is on', async () => {
+    writeConfig('[server]\nipv6 = true\nhost = "0.0.0.0"\n');
+    const io = await runWithHints('0.0.0.0');
+
+    const raw = stripAnsi(io.readStdout());
+    expect(raw).toContain('http://192.0.2.66:58627/#token=tok');
+    expect(raw).not.toContain('2001:db8::1');
+  });
+
+  it('carries [server] ipv6 into the hints of an IPv6 wildcard bind', async () => {
     // `ipv6` is resolved in `parseServerOptions`, so a config-only switch must
     // reach the same hint filter as the flag — otherwise it is a silent no-op.
-    writeConfig('[server]\nipv6 = true\nhost = "0.0.0.0"\n');
+    writeConfig('[server]\nipv6 = true\nhost = "::"\n');
     const io = await runWithHints();
 
     expect(stripAnsi(io.readStdout())).toContain('http://[2001:db8::1]:58627/#token=tok');
@@ -2967,7 +3095,7 @@ describe('`kimi web` against a [server] config file', () => {
 
   it('drops the IPv6 hints from the banner when [server] ipv6 = false', async () => {
     writeConfig('[server]\nipv6 = false\nhost = "0.0.0.0"\n');
-    const io = await runWithHints();
+    const io = await runWithHints('0.0.0.0');
 
     const raw = stripAnsi(io.readStdout());
     expect(raw).toContain('http://192.0.2.66:58627/#token=tok');
@@ -3148,6 +3276,24 @@ describe('`kimi web` against a [server] config file', () => {
 
     expect(calls.options?.insecureNoTls).toBe(true);
     expect(stripAnsi(io.readStderr())).not.toContain(configPath);
+  });
+
+  it('reports a [server] host that widens the bind', async () => {
+    writeConfig('[server]\nhost = "0.0.0.0"\n');
+    const { io } = await run();
+    const plain = stripAnsi(io.readStderr());
+
+    expect(plain).toContain('[server] host = "0.0.0.0"');
+    expect(plain).toContain(configPath);
+  });
+
+  it('reports a [server] allowed_host list', async () => {
+    writeConfig('[server]\nallowed_host = ["example.test"]\n');
+    const { io } = await run();
+    const plain = stripAnsi(io.readStderr());
+
+    expect(plain).toContain('[server] allowed_host');
+    expect(plain).toContain(configPath);
   });
 
   it('lets --no-dangerous-bypass-auth turn off [server] dangerous_bypass_auth', async () => {

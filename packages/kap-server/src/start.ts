@@ -299,14 +299,34 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     app.addHook('onSend', createSecurityHeadersHook({ tls: false }));
   }
 
+  const runTeardownStep = async <T>(step: string, run: () => T): Promise<T | undefined> => {
+    try {
+      return await run();
+    } catch (error) {
+      logger.warn(
+        { err: error instanceof Error ? error.message : String(error), step },
+        'server teardown step failed; continuing with the remaining steps',
+      );
+      return undefined;
+    }
+  };
+
   const disposeServer = async (): Promise<void> => {
-    configChangedPublisher.close();
-    await app.close();
-    configWarningSubscription.dispose();
-    pluginChangeSubscription.dispose();
-    capabilityInstallSubscription.dispose();
-    authFailureLimiter?.dispose();
-    modelCatalogRefreshScheduler.dispose();
+    await runTeardownStep('configChangedPublisher.close', () => configChangedPublisher.close());
+    await runTeardownStep('app.close', () => app.close());
+    await runTeardownStep('configWarningSubscription.dispose', () =>
+      configWarningSubscription.dispose(),
+    );
+    await runTeardownStep('pluginChangeSubscription.dispose', () =>
+      pluginChangeSubscription.dispose(),
+    );
+    await runTeardownStep('capabilityInstallSubscription.dispose', () =>
+      capabilityInstallSubscription.dispose(),
+    );
+    await runTeardownStep('authFailureLimiter.dispose', () => authFailureLimiter?.dispose());
+    await runTeardownStep('modelCatalogRefreshScheduler.dispose', () =>
+      modelCatalogRefreshScheduler.dispose(),
+    );
     try {
       await shutdownServerTelemetry(telemetry);
     } catch (error) {
@@ -349,12 +369,24 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
       const pending = startDrain(drain);
       const outcome = await Promise.race([
         pending.then(
-          () => 'drained' as const,
-          () => 'failed' as const,
+          () => ({ status: 'drained' as const }),
+          (error: unknown) => ({ status: 'failed' as const, error }),
         ),
         closeDrainBudget,
       ]);
-      if (outcome !== 'drained') abandonDrain(name, pending);
+      if (outcome === 'spent') {
+        abandonDrain(name, pending);
+        return;
+      }
+      if (outcome.status === 'failed') {
+        logger.warn(
+          {
+            err: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+            drain: name,
+          },
+          'server close drain failed; continuing with the remaining drains',
+        );
+      }
     };
     const removeProcessErrorHandlers = (): void => {
       process.off('unhandledRejection', onUnhandledRejection);
@@ -368,16 +400,22 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
       await drainWithinCloseBudget('IMcpOAuthService.shutdown', () =>
         core.accessor.get(IMcpOAuthService).shutdown(),
       );
-      fsWatchBridge.dispose();
-      const appendLogStore = core.accessor.get(IAppendLogStore);
-      core.dispose();
-      await appendLogStore.drainRetirements();
+      await runTeardownStep('fsWatchBridge.dispose', () => fsWatchBridge.dispose());
+      const appendLogStore = await runTeardownStep('IAppendLogStore lookup', () =>
+        core.accessor.get(IAppendLogStore),
+      );
+      await runTeardownStep('core.dispose', () => core.dispose());
+      await runTeardownStep('IAppendLogStore.drainRetirements', () =>
+        appendLogStore?.drainRetirements(),
+      );
       await drainWithinCloseBudget('drainSessionIndexMirror', drainSessionIndexMirror);
       await drainWithinCloseBudget('drainGlobalSearchDisposals', drainGlobalSearchDisposals);
       await drainWithinCloseBudget('drainQueryStoreDisposals', drainQueryStoreDisposals);
       await drainWithinCloseBudget('drainSessionMetadataWrites', drainSessionMetadataWrites);
       await drainWithinCloseBudget('drainLogCloses', drainLogCloses);
-      await appendLogStore.drainRetirements();
+      await runTeardownStep('IAppendLogStore.drainRetirements', () =>
+        appendLogStore?.drainRetirements(),
+      );
       if (abandonedDrainNames.length > 0) {
         logger.warn(
           { drains: abandonedDrainNames, budgetMs: CLOSE_DRAIN_TIMEOUT_MS },

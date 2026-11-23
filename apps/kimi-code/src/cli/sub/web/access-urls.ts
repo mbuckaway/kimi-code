@@ -38,8 +38,15 @@ export interface AccessUrlLine {
   url: string;
 }
 
+const IPV6_WILDCARD_HOSTS: ReadonlySet<string> = new Set(['::', '::0', '[::]']);
+
 function isWildcard(host: string): boolean {
-  return host === '' || host === '0.0.0.0' || host === '::';
+  return host === '' || host === '0.0.0.0' || IPV6_WILDCARD_HOSTS.has(host);
+}
+
+function isIpv6Host(host: string): boolean {
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  return bare.includes(':');
 }
 
 /** True when `host` is a loopback address (this host only). */
@@ -50,13 +57,14 @@ export function isLoopbackHost(host: string): boolean {
 /**
  * Compute the access-URL lines for a bind host/port.
  *
- * - wildcard (`0.0.0.0` / `::` / empty): a `Local:` line (localhost) plus one
- *   `Network:` line per non-loopback interface.
+ * - wildcard (`0.0.0.0` / `::` / `::0` / `[::]` / empty): a `Local:` line
+ *   (localhost) plus one `Network:` line per non-loopback interface.
  * - loopback: a single `Local:` line.
  * - specific host: a single `URL:` line.
  *
- * `includeIpv6` gates the interface hints only: an IPv6 bind chosen with
- * `--host` is printed either way, because that is where the server listens.
+ * `includeIpv6` gates the IPv6 interface hints of an IPv6 wildcard bind. An
+ * IPv4 wildcard (`0.0.0.0` / empty) never lists them, because that socket does
+ * not accept IPv6 connections, and a specific bind prints only its own URL.
  */
 export function accessUrlLines(
   host: string,
@@ -69,8 +77,9 @@ export function accessUrlLines(
     const lines: AccessUrlLine[] = [
       { label: 'Local:    ', url: buildOpenableUrl(serverOrigin('localhost', port), token) },
     ];
+    const showIpv6Hints = includeIpv6 && isIpv6Host(host);
     const addrs = (networkAddresses ?? listNetworkAddresses()).filter(
-      (addr) => includeIpv6 || addr.family === 'IPv4',
+      (addr) => addr.family === 'IPv4' || showIpv6Hints,
     );
     for (const addr of addrs) {
       lines.push({

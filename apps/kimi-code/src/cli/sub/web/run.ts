@@ -63,11 +63,7 @@ import {
   type RemoteControlOptions,
   type RemoteControlStatus,
 } from './remote-control';
-import {
-  readServerConfig,
-  tryReadServerConfig,
-  type ServerConfigDefaults,
-} from './server-config';
+import { readServerConfig, type ServerConfigDefaults } from './server-config';
 import {
   DEFAULT_FOREGROUND_LOG_LEVEL,
   DEFAULT_LAN_HOST,
@@ -170,17 +166,25 @@ function isSameResolvedValue(a: unknown, b: unknown): boolean {
  * user's own `--port` as drift on every reload, and it demands a restart for a
  * key the flag pins, which a restart could not change.
  *
- * Lenient on purpose. The server already runs on the values parsed at startup,
- * and this runs only after the engine applied a reload, so a value that turned
- * invalid since startup must not come back as a reload failure: the parser's own
- * message travels as a separate note. `tryReadServerConfig` has already put the
- * reader's warning on stderr.
+ * A section that cannot be re-read (unknown key, out-of-range value, broken
+ * TOML) is reported as "advisory unavailable" rather than compared against
+ * built-in defaults: falling back to the defaults would invent drift for keys
+ * the running server actually took from the file. A valid section whose
+ * `log_level` (or CLI port) no longer parses keeps the same treatment.
  */
 function restartAdvisoryFor(
   runningOptions: ParsedServerOptions,
   cliOptions: ServerCliOptions,
 ): Pick<ConfigReloadReport, 'restartKeys' | 'restartAdvisoryError'> {
-  const { defaults } = tryReadServerConfig();
+  let defaults: ServerConfigDefaults;
+  try {
+    defaults = readServerConfig().defaults;
+  } catch (error) {
+    return {
+      restartKeys: [],
+      restartAdvisoryError: error instanceof Error ? error.message : String(error),
+    };
+  }
   let reparsed: ParsedServerOptions;
   try {
     reparsed = parseServerOptions(cliOptions, defaults);
@@ -269,7 +273,7 @@ export function buildWebCommand(
     )
     .option(
       '--ipv6',
-      'Also list the IPv6 interface hints for a wildcard bind. OFF by default; it changes what is printed, never what is bound.',
+      'Also list the IPv6 interface hints when the server binds an IPv6 wildcard. OFF by default; it changes what is printed, never what is bound.',
     )
     .option('--no-ipv6', 'Do not list the IPv6 interface hints (default).')
     // The one security key with no negated counterpart: this flag can only ever
@@ -482,26 +486,39 @@ function formatDangerNoticeLines(): string[] {
  * server, so it is named with the file it came from — that is the line to find
  * and delete.
  */
-function formatConfigProvenanceLines(
+export function formatConfigProvenanceLines(
   opts: ServerCliOptions,
   defaults: ServerConfigDefaults,
 ): string[] {
   const configSourced = SECURITY_CONFIG_KEYS.filter(
     ([key]) => opts[key] === undefined && defaults[key] === true,
   ).map(([, tomlKey]) => tomlKey);
-  if (configSourced.length === 0) return [];
-
-  // The same resolution `readServerConfig` used, so the notice names the file
-  // that was actually read.
   const configPath = resolveConfigPath({ homeDir: resolveKimiHome() });
   const danger = (text: string): string => chalk.hex(darkColors.error)(text);
   const dangerBold = (text: string): string => chalk.bold.hex(darkColors.error)(text);
-  return configSourced.map(
+  const lines = configSourced.map(
     (tomlKey) =>
       `  ${dangerBold('⚠ security setting from config:')} ${danger(
         `[server] ${tomlKey} = true comes from ${configPath}, not from the command line.`,
       )}`,
   );
+  const allowedHosts = opts.allowedHost === undefined ? defaults.allowedHost : undefined;
+  if (allowedHosts !== undefined && allowedHosts.length > 0) {
+    lines.push(
+      `  ${dangerBold('⚠ security setting from config:')} ${danger(
+        `[server] allowed_host comes from ${configPath}, not from the command line.`,
+      )}`,
+    );
+  }
+  const host = opts.host === undefined ? defaults.host : undefined;
+  if (host !== undefined && !isLoopbackHost(host)) {
+    lines.push(
+      `  ${dangerBold('⚠ security setting from config:')} ${danger(
+        `[server] host = "${host}" comes from ${configPath}, not from the command line.`,
+      )}`,
+    );
+  }
+  return lines;
 }
 
 /** The process and stdio a real foreground run reports termination through. */
@@ -572,11 +589,18 @@ async function runServerInProcess(
     }
     try {
       await server.close();
-      await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS });
     } catch (error) {
       server.logger.error(
         { err: error instanceof Error ? error : new Error(String(error)) },
         'server shutdown error',
+      );
+    }
+    try {
+      await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS });
+    } catch (error) {
+      server.logger.error(
+        { err: error instanceof Error ? error : new Error(String(error)) },
+        'telemetry shutdown error',
       );
     }
   }
@@ -629,8 +653,14 @@ async function runServerInProcess(
   }
 
   // Armed before `startServer` so a Ctrl+C during bootstrap is reported and
-  // flushed instead of dying by Node's default disposition.
-  installServerSignalHandlers({ ...targets, shutdown, reload });
+  // flushed instead of dying by Node's default disposition. The uninstall runs
+  // on a startup failure: a caller that catches it and keeps the process alive
+  // must not inherit handlers that would later exit the host.
+  const uninstallSignalHandlers = installServerSignalHandlers({
+    ...targets,
+    shutdown,
+    reload,
+  });
 
   // kap-server (the DI × Scope engine server) is the only server flavor. Its
   // `startServer` returns `{ host, port, close }` rather than `{ address,
@@ -643,36 +673,42 @@ async function runServerInProcess(
       'dev mode: web assets not built; starting the API server without the web UI',
     );
   }
-  const v2 = await startServer({
-    host: options.host,
-    port: options.port,
-    // Report the CLI's product version as `server_version` (/meta, web UI)
-    // rather than kap-server's private package version.
-    serverVersion: version,
-    // The CLI's host identity: feeds the engine's bootstrap client identity
-    // and the derived outbound headers (User-Agent + X-Msh-*), so web-UI
-    // OAuth flows and model / WebSearch requests carry the CLI identity. The
-    // `web` User-Agent suffix distinguishes web-UI traffic from direct CLI
-    // runs upstream (same product token, same platform).
-    hostIdentity: {
-      ...createKimiCodeHostIdentity(version),
-      userAgentSuffix: WEB_USER_AGENT_SUFFIX,
-    },
-    logLevel: options.logLevel,
-    logger,
-    debugEndpoints: options.debugEndpoints,
-    insecureNoTls: options.insecureNoTls,
-    allowRemoteShutdown: options.allowRemoteShutdown,
-    allowedHosts: options.allowedHosts,
-    disableAuth: options.dangerousBypassAuth,
-    enableKimiOauth: options.enableKimiOauth,
-    webTitle: options.webTitle,
-    // Attach the engine's cloud telemetry appender (still gated by the config
-    // `telemetry` toggle). Complements the v1 client registered above, which
-    // only covers host-level events.
-    telemetry: true,
-    webAssetsDir,
-  });
+  let v2: Awaited<ReturnType<typeof startServer>>;
+  try {
+    v2 = await startServer({
+      host: options.host,
+      port: options.port,
+      // Report the CLI's product version as `server_version` (/meta, web UI)
+      // rather than kap-server's private package version.
+      serverVersion: version,
+      // The CLI's host identity: feeds the engine's bootstrap client identity
+      // and the derived outbound headers (User-Agent + X-Msh-*), so web-UI
+      // OAuth flows and model / WebSearch requests carry the CLI identity. The
+      // `web` User-Agent suffix distinguishes web-UI traffic from direct CLI
+      // runs upstream (same product token, same platform).
+      hostIdentity: {
+        ...createKimiCodeHostIdentity(version),
+        userAgentSuffix: WEB_USER_AGENT_SUFFIX,
+      },
+      logLevel: options.logLevel,
+      logger,
+      debugEndpoints: options.debugEndpoints,
+      insecureNoTls: options.insecureNoTls,
+      allowRemoteShutdown: options.allowRemoteShutdown,
+      allowedHosts: options.allowedHosts,
+      disableAuth: options.dangerousBypassAuth,
+      enableKimiOauth: options.enableKimiOauth,
+      webTitle: options.webTitle,
+      // Attach the engine's cloud telemetry appender (still gated by the config
+      // `telemetry` toggle). Complements the v1 client registered above, which
+      // only covers host-level events.
+      telemetry: true,
+      webAssetsDir,
+    });
+  } catch (error) {
+    uninstallSignalHandlers();
+    throw error;
+  }
   logger.info('serving the REST/WS API and the bundled web UI');
   running = {
     address: serverOrigin(v2.host, v2.port),
@@ -708,6 +744,7 @@ async function runServerInProcess(
       await running.close();
       await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS });
     }
+    uninstallSignalHandlers();
     throw error;
   }
 
