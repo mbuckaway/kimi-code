@@ -45,6 +45,10 @@ mark the row `merged-upstream` (keep the row as history).
 | web server signals + `[server]` config | `topic/web-server-signals-config` | `kimi web` shuts down on SIGINT/SIGTERM within a bounded wait and exits with the signal's code (130/143) instead of hanging on an unresponsive WebSocket peer; SIGHUP reloads `config.toml` in place with a `restart required for:` advisory; a new `[server]` config section backs every server option (`CLI > [server] > built-in`); IPv6 banner hints are off by default behind `--ipv6`, and an IPv6 bind prints a bracketed URL. The `preClose` / WebSocket-terminate half of the shutdown fix is an upstream bug too | — | — | local |
 | API shutdown hook | `topic/api-shutdown-hook` | `POST /api/v1/shutdown` now runs the CLI's shutdown hook (Remote Control tunnel close plus telemetry flush) before kap-server closes, so a `--rc` server exits after an API shutdown instead of lingering on the tunnel's ref'd sockets; the hook is bounded and runs at most once across the signal and API paths | — | — | local |
 | registry load hardening | `topic/load-hardening` | Cross-session registry coalesces heartbeat writes (at most one queued per session) and bounds registry-file I/O to 8 concurrent operations so a large registry cannot saturate the libuv threadpool; server close now has an 8s total budget, so shutdown finishes predictably on a loaded machine instead of waiting on unbounded post-drain flush | — | — | local |
+| cross-session messaging | `topic/cross-session-messaging` | Add cross-session messaging between sessions' main agents: the `session_message` tool, per-session inbox transport and discovery, inbound policy, held-message drain on accept, and the SDK surface | — | — | local |
+| win32 stage flake | `topic/fix-win32-stage-flake` | Make the win32 `Expand-Archive` fallback deterministic in the native release staging test | — | — | local |
+| single-commit update channel | `topic/gh-pages-single-commit` | Publish the gh-pages update channel as a single-commit branch so each release replaces the channel instead of appending a full history | — | — | local |
+| patch ledger maintenance | `topic/patches-ledger` | Backfill the three missing change rows (cross-session messaging, win32 stage flake, single-commit update channel) and the 0.39.1-MB.1.27–1.65 release log | — | — | local |
 | agent fleet visibility tools | `feat/agent-fleet-and-persona` | Add read-only fleet tools — `AgentResult`, `AgentHealth`, `WaitForAll`, enriched `ListAgents`, and `IAgentTaskService.capacity()`; auto-approved, riding `agent_messaging` | — | — | local |
 | agent messaging coordination | `feat/agent-fleet-and-persona` | Add `ListMessages` (inbox), `ReplyMessage`, `BroadcastMessage`, and roster-change notifications; push delivery at the receiver's next step boundary | — | — | local |
 | agent lifecycle control | `feat/agent-fleet-and-persona` | Add `agent_fleet_control` (default off): `StopAgent`, `StopAgents`, `DismissAgents`, `TagAgent`, `RenameAgent`, `InterruptAgent`; destructive tools, not auto-approved, plan-mode vetoed, ownership-gated | — | — | local |
@@ -92,4 +96,41 @@ changesets, so the stale name is harmless here.
 | 0.34.0-MB.1.13 | 0.34.0 | Fork web bundle ship (#44) |
 | 0.36.0-MB.1.14 (pending) | 0.36.0 (upstream main tip `102984aa6`) | Upstream 0.36.0 sync: fork patches ported, `dist-web` bundle kept fork-side, supermoon `agent_config` behavior preserved at the kap-server edge (`sessionAgentConfig.ts`), esc-interrupt patch retained (v1 half has no upstream equivalent) |
 | 0.36.0-MB.1.16 (pending) | 0.36.0 | Supermoon tools (replace `/supermoon` slash command with `EnterSupermoonMode` / `ExitSupermoonMode`); prompt submit applies `swarm_mode`/`supermoon_mode` (Mode-menu fix); fork web bundle ship |
-| 0.39.1-MB.1.27 (pending) | 0.39.1 | Upstream 0.39.1 sync (via `main` mirror → `fork/main`): all fork patches re-ported, supermoon migrated to the Event2 model, planning-model preserved, `dist-web` kept fork-side; upstream search/cron/workspace-lifecycle refactors adopted; ACP socket transport, TUI wire-staleness guard, usage-limit surfacing, and language directive retained |
+| 0.39.1-MB.1.27 | 0.39.1 | Upstream 0.39.1 sync (via `main` mirror → `fork/main`): all fork patches re-ported, supermoon migrated to the Event2 model, planning-model preserved, `dist-web` kept fork-side; upstream search/cron/workspace-lifecycle refactors adopted; ACP socket transport, TUI wire-staleness guard, usage-limit surfacing, and language directive retained |
+| 0.39.1-MB.1.28 | 0.39.1 | Fork web bundle ship (port W1-W10) |
+| 0.39.1-MB.1.29 | 0.39.1 | Kimi OAuth login disabled by default (opt-in via `kimi_oauth`) |
+| 0.39.1-MB.1.30 | 0.39.1 | Windows native installer wired up (#83) |
+| 0.39.1-MB.1.31 | 0.39.1 | Web bundle with the WS subprotocol fix; regenerate a malformed server token on load |
+| 0.39.1-MB.1.32 | 0.39.1 | Web bundle with tablet scroll, planning-model, and task-notice fixes |
+| 0.39.1-MB.1.33 | 0.39.1 | Publish native binaries to the gh-pages update channel |
+| 0.39.1-MB.1.34 | 0.39.1 | Release bump |
+| 0.39.1-MB.1.35 | 0.39.1 | Publish bare native binaries in the update-channel manifest |
+| 0.39.1-MB.1.36 | 0.39.1 | Handle `kimi.exe` when publishing bare native binaries |
+| 0.39.1-MB.1.37 | 0.39.1 | Extract native zips in the staged updater |
+| 0.39.1-MB.1.38 | 0.39.1 | Windows release sync; preflight excluded from the Windows job |
+| 0.39.1-MB.1.39 | 0.39.1 | Recover from image rejections; Files API image upload (#101) |
+| 0.39.1-MB.1.40 | 0.39.1 | Stop cross-provider thinking blocks from bricking a session (#103) |
+| 0.39.1-MB.1.41 | 0.39.1 | Restore swarm preference; add `default_swarm_mode` (#105) |
+| 0.39.1-MB.1.42 | 0.39.1 | Make `AgentSwarm` the preferred parallel path (#107) |
+| 0.39.1-MB.1.43 | 0.39.1 | TUI live progress for subagents and background tasks (#109) |
+| 0.39.1-MB.1.44 | 0.39.1 | Web bundle with live agent-task progress (#111) |
+| 0.39.1-MB.1.45 | 0.39.1 | `[services.search]` selects the web search provider (#113) |
+| 0.39.1-MB.1.46 | 0.39.1 | Fetch timeouts hardened, error stacks redacted, type-safety lint enabled (#115) |
+| 0.39.1-MB.1.47 | 0.39.1 | QwenCloud web search provider; OpenAI Responses reasoning settings (#117) |
+| 0.39.1-MB.1.48 | 0.39.1 | Merge text deltas across empty reasoning stream parts (#119) |
+| 0.39.1-MB.1.49 | 0.39.1 | Coalesce replayed assistant frames (#121) |
+| 0.39.1-MB.1.50 | 0.39.1 | Default web search to DeepSeek; bound hung ACP turns (#124) |
+| 0.39.1-MB.1.52 | 0.39.1 | Agent-to-agent messaging tools (#126); darwin-arm64 cross-build on ARM Linux (#128) |
+| 0.39.1-MB.1.53 | 0.39.1 | Agent fleet tools and persona support (#130) |
+| 0.39.1-MB.1.54 | 0.39.1 | Agent fleet control, persona, and tool-select default on (#132) |
+| 0.39.1-MB.1.55 | 0.39.1 | Agent-fleet coordination across the subtree (#134) |
+| 0.39.1-MB.1.56 | 0.39.1 | Upstream tower mode improvements, enabled by default (#136) |
+| 0.39.1-MB.1.57 | 0.39.1 | Cross-session messaging between sessions' main agents (#138) |
+| 0.39.1-MB.1.58 | 0.39.1 | Deterministic win32 `Expand-Archive` fallback test (#140) |
+| 0.39.1-MB.1.59 | 0.39.1 | Gh-pages update channel published as a single-commit branch (#142) |
+| 0.39.1-MB.1.60 | 0.39.1 | Session-metadata teardown drain for the task-manager tests (#146) |
+| 0.39.1-MB.1.61 | 0.39.1 | Fork web bundle with Safari resilience and memory bounds (#145) |
+| 0.39.1-MB.1.62 | 0.39.1 | Server session-open, fleet-spawn, and per-request overhead cut (#144) |
+| 0.39.1-MB.1.63 | 0.39.1 | Web `[server]` config section, bounded shutdown, SIGHUP reload, IPv6 hints (#122) |
+| 0.39.1-MB.1.64 | 0.39.1 | API shutdown runs the CLI shutdown hook (#151) |
+| 0.39.1-MB.1.65 | 0.39.1 | Registry I/O and server close time bounded under load (#153) |
