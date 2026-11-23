@@ -247,6 +247,53 @@ export const AcpConfigSchema = z.object({
 
 export type AcpConfig = z.infer<typeof AcpConfigSchema>;
 
+/**
+ * `[server]`: defaults for the `kimi web` / `kimi rc` server, read by the CLI
+ * before the socket is bound. Every key mirrors one `kimi web` flag and is
+ * written in snake_case in `config.toml`.
+ *
+ * Two deliberate choices, both load-bearing:
+ *  - **No `.default()` values.** Precedence is `CLI flag > [server] > built-in`
+ *    and the built-ins live in the CLI resolver (`parseServerOptions`,
+ *    `apps/kimi-code/src/cli/sub/web/shared.ts`), so an unset key must stay
+ *    absent: a declared default could not be told apart from a value the user
+ *    typed, and `--flag`-vs-config precedence would be unresolvable.
+ *  - **Non-strict**, like every sibling except `HookDefSchema` and the patch
+ *    root. A `.strict()` section would make the loader discard the whole
+ *    section over one typo; the CLI reader compares the raw TOML document with
+ *    the parsed section and names the offending key instead.
+ */
+export const ServerConfigSchema = z.object({
+  /** Bind address. `all`, `*` and an empty string all mean every interface. */
+  host: z.string().optional(),
+  /** Listen port. `0` asks the operating system for a free one. */
+  port: z.number().int().min(0).max(65535).optional(),
+  /** Log level. Checked against the server's own set when the CLI resolves it. */
+  logLevel: z.string().optional(),
+  /** Extra `Host` header values to allow through the DNS-rebinding check. */
+  allowedHost: z.array(z.string()).optional(),
+  /** Custom browser tab title for this web UI instance. */
+  webTitle: z.string().optional(),
+  /** Open the web UI in the default browser once the server is ready. */
+  open: z.boolean().optional(),
+  /** Print the IPv6 access hints for a wildcard bind. */
+  ipv6: z.boolean().optional(),
+  /** Allow a non-loopback bind without a TLS-terminating reverse proxy. */
+  insecureNoTls: z.boolean().optional(),
+  /** Allow `POST /api/v1/shutdown` on a non-loopback bind. */
+  allowRemoteShutdown: z.boolean().optional(),
+  /** Disable bearer-token auth on every route. */
+  dangerousBypassAuth: z.boolean().optional(),
+  /** Enable kimi.com/kimi.ai OAuth login. */
+  enableKimiOauth: z.boolean().optional(),
+  /** Expose the `/api/v1/debug/*` RPC surface. */
+  debugEndpoints: z.boolean().optional(),
+  /** Connect the Remote Control relay tunnel. */
+  remoteControl: z.boolean().optional(),
+});
+
+export type ServerConfig = z.infer<typeof ServerConfigSchema>;
+
 export const ModelCatalogConfigSchema = z.object({
   /** Interval (ms) between automatic provider-model refreshes. `0` disables. */
   refreshIntervalMs: z.number().int().min(0).optional(),
@@ -398,6 +445,7 @@ export const KimiConfigSchema = z.object({
   mcp: McpConfigSchema.optional(),
   image: ImageConfigSchema.optional(),
   acp: AcpConfigSchema.optional(),
+  server: ServerConfigSchema.optional(),
   modelCatalog: ModelCatalogConfigSchema.optional(),
   experimental: ExperimentalConfigSchema.optional(),
   telemetry: z.boolean().optional(),
@@ -417,6 +465,7 @@ const SecondaryModelConfigPatchSchema = SecondaryModelConfigSchema.partial();
 const McpConfigPatchSchema = McpConfigSchema.partial();
 const ImageConfigPatchSchema = ImageConfigSchema.partial();
 const AcpConfigPatchSchema = AcpConfigSchema.partial();
+const ServerConfigPatchSchema = ServerConfigSchema.partial();
 const ModelCatalogConfigPatchSchema = ModelCatalogConfigSchema.partial();
 const ExperimentalConfigPatchSchema = ExperimentalConfigSchema;
 const MoonshotServiceConfigPatchSchema = MoonshotServiceConfigSchema.partial();
@@ -452,6 +501,7 @@ export const KimiConfigPatchSchema = z
     mcp: McpConfigPatchSchema.optional(),
     image: ImageConfigPatchSchema.optional(),
     acp: AcpConfigPatchSchema.optional(),
+    server: ServerConfigPatchSchema.optional(),
     modelCatalog: ModelCatalogConfigPatchSchema.optional(),
     experimental: ExperimentalConfigPatchSchema.optional(),
     telemetry: z.boolean().optional(),

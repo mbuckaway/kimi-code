@@ -1,4 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -9,6 +11,8 @@ import { WebSocket } from 'ws';
 import { type RunningServer, startServer } from '../src/start';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
 import { authHeaders } from './helpers/auth';
+
+const CLOSE_ASSERTION_BUDGET_MS = 900;
 
 interface Envelope<T> {
   code: number;
@@ -72,6 +76,63 @@ describe('server-v2 GET /api/v1/connections', () => {
 
   function send(ws: WebSocket, frame: Record<string, unknown>): void {
     ws.send(JSON.stringify(frame));
+  }
+
+  function connectIgnoringCloseFrames(): Promise<Socket> {
+    const live = server as RunningServer;
+    const token = live.authTokenService.getToken();
+    const socket = createConnection({ host: '127.0.0.1', port: live.port });
+    socket.setNoDelay(true);
+    return new Promise<Socket>((resolve, reject) => {
+      let buffered = Buffer.alloc(0);
+      const onHandshakeData = (chunk: Buffer): void => {
+        buffered = Buffer.concat([buffered, chunk]);
+        const headerEnd = buffered.indexOf('\r\n\r\n');
+        if (headerEnd < 0) return;
+        const head = buffered.subarray(0, headerEnd).toString('latin1');
+        if (!head.startsWith('HTTP/1.1 101')) {
+          socket.destroy();
+          reject(new Error(`ws handshake failed: ${head.split('\r\n')[0] ?? head}`));
+          return;
+        }
+        socket.removeListener('data', onHandshakeData);
+        socket.on('data', () => {});
+        socket.removeListener('error', reject);
+        socket.on('error', () => {});
+        resolve(socket);
+      };
+      socket.on('data', onHandshakeData);
+      socket.once('error', reject);
+      socket.once('connect', () => {
+        socket.write(
+          [
+            'GET /api/v1/ws HTTP/1.1',
+            `Host: 127.0.0.1:${String(live.port)}`,
+            'Upgrade: websocket',
+            'Connection: Upgrade',
+            `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`,
+            'Sec-WebSocket-Version: 13',
+            `Sec-WebSocket-Protocol: kimi-code.bearer.${token}`,
+            '',
+            '',
+          ].join('\r\n'),
+        );
+      });
+    });
+  }
+
+  async function withinAssertionBudget(closing: Promise<void>): Promise<'closed' | 'wedged'> {
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const budget = new Promise<'wedged'>((resolve) => {
+      budgetTimer = setTimeout(() => {
+        resolve('wedged');
+      }, CLOSE_ASSERTION_BUDGET_MS);
+    });
+    try {
+      return await Promise.race([closing.then(() => 'closed' as const), budget]);
+    } finally {
+      if (budgetTimer !== undefined) clearTimeout(budgetTimer);
+    }
   }
 
   async function waitForSize(target: number, timeoutMs = 1000): Promise<void> {
@@ -147,5 +208,16 @@ describe('server-v2 GET /api/v1/connections', () => {
 
     const connections = await listConnections();
     expect(connections).toEqual([]);
+  });
+
+  it('resolves close() against a peer that ignores the close handshake', async () => {
+    const socket = await connectIgnoringCloseFrames();
+    await waitForSize(1);
+    const live = server as RunningServer;
+
+    const outcome = await withinAssertionBudget(live.close());
+
+    expect(outcome).toBe('closed');
+    socket.destroy();
   });
 });

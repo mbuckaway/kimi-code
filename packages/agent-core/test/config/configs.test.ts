@@ -284,6 +284,159 @@ socket = "/tmp/kimi-acp.sock"
     expect(roundTripped.acp).toEqual({ socket: '/tmp/kimi-acp.sock' });
   });
 
+  it('parses every [server] key from its snake_case TOML name', () => {
+    const config = parseConfigString(
+      `
+[server]
+host = "127.0.0.1"
+port = 8080
+log_level = "info"
+allowed_host = ["host.example.com", "www.example.com"]
+web_title = "Example Console"
+open = false
+ipv6 = true
+insecure_no_tls = false
+allow_remote_shutdown = true
+dangerous_bypass_auth = false
+enable_kimi_oauth = true
+debug_endpoints = false
+remote_control = true
+`,
+      'config.toml',
+    );
+
+    expect(config.server).toEqual({
+      host: '127.0.0.1',
+      port: 8080,
+      logLevel: 'info',
+      allowedHost: ['host.example.com', 'www.example.com'],
+      webTitle: 'Example Console',
+      open: false,
+      ipv6: true,
+      insecureNoTls: false,
+      allowRemoteShutdown: true,
+      dangerousBypassAuth: false,
+      enableKimiOauth: true,
+      debugEndpoints: false,
+      remoteControl: true,
+    });
+  });
+
+  it('leaves server undefined when the [server] section is absent', () => {
+    const config = parseConfigString('default_model = "kimi-code/kimi-for-coding"', 'config.toml');
+
+    expect(config.server).toBeUndefined();
+  });
+
+  it('keeps unset [server] keys absent instead of filling in defaults', () => {
+    // The CLI resolver owns the built-ins, so it must be able to tell
+    // "not configured" apart from "configured as false".
+    const config = parseConfigString('[server]\nport = 8080\n', 'config.toml');
+
+    expect(config.server).toEqual({ port: 8080 });
+    expect('open' in config.server!).toBe(false);
+  });
+
+  it('rejects an out-of-range or fractional [server] port', () => {
+    expect(parseConfigString('[server]\nport = 0\n', 'config.toml').server).toEqual({ port: 0 });
+    expect(parseConfigString('[server]\nport = 65535\n', 'config.toml').server).toEqual({
+      port: 65535,
+    });
+
+    expectKimiErrorCode(
+      () => parseConfigString('[server]\nport = -1\n', 'config.toml'),
+      ErrorCodes.CONFIG_INVALID,
+    );
+    expectKimiErrorCode(
+      () => parseConfigString('[server]\nport = 65536\n', 'config.toml'),
+      ErrorCodes.CONFIG_INVALID,
+    );
+    expectKimiErrorCode(
+      () => parseConfigString('[server]\nport = 80.5\n', 'config.toml'),
+      ErrorCodes.CONFIG_INVALID,
+    );
+  });
+
+  it('accepts an empty [server] allowed_host array', () => {
+    expect(parseConfigString('[server]\nallowed_host = []\n', 'config.toml').server).toEqual({
+      allowedHost: [],
+    });
+  });
+
+  it('strips an unknown [server] key without dropping the section', () => {
+    // Non-strict on purpose: the CLI reader compares `raw` against the parsed
+    // section and reports the typo itself, so one bad key must not take the
+    // whole section down (that would lose per-key granularity).
+    const config = parseConfigString('[server]\nport = 8080\nnot_a_key = true\n', 'config.toml');
+
+    expect(config.server).toEqual({ port: 8080 });
+    expect(config.raw?.['server']).toEqual({ port: 8080, not_a_key: true });
+  });
+
+  it('keeps [server] values of every type after a writeConfigFile rewrite', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'server-round-trip.toml');
+    const config = parseConfigString(
+      `
+[server]
+host = "127.0.0.1"
+port = 8080
+log_level = "info"
+allowed_host = ["host.example.com"]
+web_title = "Example Console"
+open = false
+ipv6 = true
+insecure_no_tls = false
+allow_remote_shutdown = true
+dangerous_bypass_auth = false
+enable_kimi_oauth = true
+debug_endpoints = false
+remote_control = true
+`,
+      configPath,
+    );
+    expect(config.server).toEqual({
+      host: '127.0.0.1',
+      port: 8080,
+      logLevel: 'info',
+      allowedHost: ['host.example.com'],
+      webTitle: 'Example Console',
+      open: false,
+      ipv6: true,
+      insecureNoTls: false,
+      allowRemoteShutdown: true,
+      dangerousBypassAuth: false,
+      enableKimiOauth: true,
+      debugEndpoints: false,
+      remoteControl: true,
+    });
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('[server]');
+    expect(text).toContain('log_level = "info"');
+    expect(text).toContain('allow_remote_shutdown = true');
+    expect(text).toContain('dangerous_bypass_auth = false');
+
+    expect(parseConfigString(text, configPath).server).toEqual(config.server);
+  });
+
+  it('keeps an unknown [server] key in the file across a rewrite', async () => {
+    // `serverToToml` starts from the raw section: the CLI refuses to READ an
+    // unknown key (it errors), but the writer must not delete the user's line
+    // behind their back.
+    const dir = makeTempDir();
+    const configPath = join(dir, 'server-unknown-key.toml');
+    const config = parseConfigString('[server]\nport = 8080\nnot_a_key = true\n', configPath);
+    expect(config.server).toEqual({ port: 8080 });
+
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('not_a_key = true');
+    expect(text).toContain('port = 8080');
+    expect(parseConfigString(text, configPath).server).toEqual({ port: 8080 });
+  });
+
   it('round-trips the planning_model scalar', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'planning-model-round-trip.toml');
@@ -803,6 +956,29 @@ micro_compaction = false
     });
 
     expect(merged.acp).toEqual({ socket: '/tmp/kimi-acp.sock' });
+  });
+
+  it('accepts server patches and merges them into the existing section', () => {
+    const base = parseConfigString(
+      `
+[server]
+host = "127.0.0.1"
+port = 8080
+`,
+    );
+
+    const merged = mergeConfigPatch(base, {
+      server: { port: 8090, open: false },
+    });
+
+    expect(merged.server).toEqual({ host: '127.0.0.1', port: 8090, open: false });
+  });
+
+  it('rejects an out-of-range port in a server patch', () => {
+    expectKimiErrorCode(
+      () => mergeConfigPatch({ providers: {} }, { server: { port: 70000 } } as never),
+      ErrorCodes.CONFIG_INVALID,
+    );
   });
 
   it('replaces hooks arrays in config patches', () => {

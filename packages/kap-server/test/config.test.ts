@@ -6,6 +6,8 @@ import {
   ConfigChanged,
   IConfigService,
   IEventService,
+  type ConfigChangeSource,
+  type ConfigDiagnostic,
   type ConfigSectionChangedEvent,
   type Event2,
   type Scope,
@@ -17,6 +19,7 @@ import { WebSocket } from 'ws';
 
 import { type RunningServer, startServer } from '../src/start';
 import { startConfigChangedPublisher } from '../src/services/config/configChangedPublisher';
+import { type ConfigReloadResult, reloadConfig } from '../src/services/config/configReload';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
 import { authedFetch, bearerToken } from './helpers/auth';
 
@@ -484,5 +487,294 @@ describe('configChangedPublisher', () => {
 
     expect(published).toHaveLength(0);
     expect(isDisposed()).toBe(true);
+  });
+});
+
+interface ReloadCoreConfig {
+  readonly domain: string;
+  readonly source: ConfigChangeSource;
+}
+
+function setupReloadCore(options: {
+  readonly committed?: readonly ReloadCoreConfig[];
+  readonly diagnostics?: readonly ConfigDiagnostic[];
+  readonly reloadError?: Error;
+  readonly readyDeferred?: boolean;
+} = {}) {
+  const listeners = new Set<(event: ConfigSectionChangedEvent) => void>();
+  const callLog: string[] = [];
+  let disposedCount = 0;
+  let resolveReady: () => void = () => {};
+  const ready = options.readyDeferred === true
+    ? new Promise<void>((resolve) => {
+        resolveReady = resolve;
+      })
+    : Promise.resolve();
+
+  const fire = (events: readonly ReloadCoreConfig[]): void => {
+    for (const event of events) {
+      for (const listener of [...listeners]) {
+        listener({ domain: event.domain, source: event.source, value: {}, previousValue: {} });
+      }
+    }
+  };
+
+  const config = {
+    ready,
+    onDidSectionChange: (listener: (event: ConfigSectionChangedEvent) => void) => {
+      callLog.push('subscribe');
+      listeners.add(listener);
+      return {
+        dispose: () => {
+          disposedCount += 1;
+          listeners.delete(listener);
+        },
+      };
+    },
+    reload: async (): Promise<void> => {
+      callLog.push('reload');
+      if (options.reloadError !== undefined) throw options.reloadError;
+      fire(options.committed ?? []);
+    },
+    diagnostics: () => options.diagnostics ?? [],
+  };
+  const requestedTokens: unknown[] = [];
+  const core = {
+    accessor: {
+      get: (token: unknown) => {
+        requestedTokens.push(token);
+        return token === IConfigService ? config : undefined;
+      },
+    },
+  } as unknown as Scope;
+
+  return {
+    callLog,
+    core,
+    requestedTokens,
+    disposedCount: () => disposedCount,
+    liveListeners: () => listeners.size,
+    fire,
+    markReady: () => {
+      resolveReady();
+    },
+  };
+}
+
+describe('reloadConfig', () => {
+  it('reports every domain a reload committed, deduped and sorted', async () => {
+    const { core, requestedTokens } = setupReloadCore({
+      committed: [
+        { domain: 'thinking', source: 'reload' },
+        { domain: 'providers', source: 'reload' },
+        { domain: 'thinking', source: 'reload' },
+      ],
+    });
+
+    const result = await reloadConfig(core);
+
+    expect(result).toEqual({ changedDomains: ['providers', 'thinking'] });
+    expect(result.error).toBeUndefined();
+    expect(requestedTokens).toEqual([IConfigService]);
+  });
+
+  it('ignores section changes that did not come from the reload', async () => {
+    const { core } = setupReloadCore({
+      committed: [
+        { domain: 'providers', source: 'set' },
+        { domain: 'thinking', source: 'load' },
+      ],
+    });
+
+    const result = await reloadConfig(core);
+
+    expect(result.changedDomains).toEqual([]);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('subscribes and reloads only after the config is ready', async () => {
+    const { core, callLog, markReady } = setupReloadCore({ readyDeferred: true });
+
+    const pending = reloadConfig(core);
+    await Promise.resolve();
+    expect(callLog).toEqual([]);
+
+    markReady();
+    const result = await pending;
+
+    expect(callLog).toEqual(['subscribe', 'reload']);
+    expect(result.changedDomains).toEqual([]);
+  });
+
+  it('releases the section-change subscription when the reload settles', async () => {
+    const { core, disposedCount, fire, liveListeners } = setupReloadCore({
+      committed: [{ domain: 'providers', source: 'reload' }],
+    });
+
+    const result = await reloadConfig(core);
+    fire([{ domain: 'thinking', source: 'reload' }]);
+
+    expect(result.changedDomains).toEqual(['providers']);
+    expect(disposedCount()).toBe(1);
+    expect(liveListeners()).toBe(0);
+  });
+
+  it('reports the first error diagnostic and keeps reporting the committed domains', async () => {
+    const { core } = setupReloadCore({
+      committed: [{ domain: 'providers', source: 'reload' }],
+      diagnostics: [
+        { severity: 'warning', message: 'Ignored invalid config section' },
+        { severity: 'error', message: 'Failed to parse /tmp/example/config.toml: expected a key' },
+        { severity: 'error', message: 'a second error must not surface' },
+      ],
+    });
+
+    const result = await reloadConfig(core);
+
+    expect(result.error).toBe('Failed to parse /tmp/example/config.toml: expected a key');
+    expect(result.changedDomains).toEqual(['providers']);
+  });
+
+  it('reports an error over a reload that committed nothing', async () => {
+    const { core, callLog, disposedCount } = setupReloadCore({
+      diagnostics: [{ severity: 'error', message: 'Failed to parse /tmp/example/config.toml' }],
+    });
+
+    const result = await reloadConfig(core);
+
+    expect(result).toEqual({
+      changedDomains: [],
+      error: 'Failed to parse /tmp/example/config.toml',
+    });
+    expect(callLog).toEqual(['subscribe', 'reload']);
+    expect(disposedCount()).toBe(1);
+  });
+
+  it('reports no error when the reload left only warnings behind', async () => {
+    const { core } = setupReloadCore({
+      diagnostics: [{ severity: 'warning', message: 'Environment variable is deprecated' }],
+    });
+
+    const result = await reloadConfig(core);
+
+    expect(result.error).toBeUndefined();
+    expect(result.changedDomains).toEqual([]);
+  });
+
+  it('propagates a rejected reload and still releases the subscription', async () => {
+    const reloadError = new Error('config reload exploded');
+    const { core, disposedCount, liveListeners } = setupReloadCore({ reloadError });
+
+    const failure = await reloadConfig(core).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBe(reloadError);
+    expect(disposedCount()).toBe(1);
+    expect(liveListeners()).toBe(0);
+  });
+});
+
+describe('reloadConfig against a running server', () => {
+  let server: RunningServer | undefined;
+  let home: string | undefined;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-reload-'));
+  });
+
+  afterEach(async () => {
+    if (server !== undefined) {
+      await server.close();
+      server = undefined;
+    }
+    if (home !== undefined) {
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 } as never);
+      home = undefined;
+    }
+  });
+
+  async function boot(toml: string): Promise<RunningServer> {
+    await writeFile(join(home as string, 'config.toml'), toml, 'utf-8');
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+    });
+    await server.core.accessor.get(IConfigService).ready;
+    return server;
+  }
+
+  function configOf(live: RunningServer): IConfigService {
+    return live.core.accessor.get(IConfigService);
+  }
+
+  async function reloadOverEditsUntilOneLandsInsideAReloadWindow(
+    live: RunningServer,
+    modes: readonly string[],
+  ): Promise<ConfigReloadResult> {
+    for (const mode of modes) {
+      await writeFile(
+        join(home as string, 'config.toml'),
+        `default_permission_mode = "${mode}"\n`,
+        'utf-8',
+      );
+      const report = await reloadConfig(live.core);
+      if (report.changedDomains.length > 0) return report;
+    }
+    return { changedDomains: [] };
+  }
+
+  it('reports the domains an external config.toml edit changed', async () => {
+    const live = await boot('default_permission_mode = "auto"\n');
+
+    const result = await reloadOverEditsUntilOneLandsInsideAReloadWindow(live, [
+      'yolo',
+      'manual',
+      'yolo',
+      'manual',
+    ]);
+
+    expect(result.error).toBeUndefined();
+    expect(result.changedDomains).toEqual(['defaultPermissionMode']);
+  });
+
+  it('reports no changed domains once the engine watcher already applied the edit', async () => {
+    const live = await boot('default_permission_mode = "auto"\n');
+
+    await writeFile(
+      join(home as string, 'config.toml'),
+      'default_permission_mode = "yolo"\n',
+      'utf-8',
+    );
+    await vi.waitFor(() => {
+      expect(configOf(live).get<string>('defaultPermissionMode')).toBe('yolo');
+    });
+    const result = await reloadConfig(live.core);
+
+    expect(result).toEqual({ changedDomains: [] });
+  });
+
+  it('reports no changed domains when config.toml was not touched', async () => {
+    const live = await boot('default_permission_mode = "auto"\n');
+
+    const result = await reloadConfig(live.core);
+
+    expect(result).toEqual({ changedDomains: [] });
+    expect(configOf(live).get<string>('defaultPermissionMode')).toBe('auto');
+  });
+
+  it('reports the parse error of a broken config.toml and keeps the previous values', async () => {
+    const live = await boot('default_permission_mode = "auto"\n');
+
+    await writeFile(join(home as string, 'config.toml'), '[providers\nbroken\n', 'utf-8');
+    const result = await reloadConfig(live.core);
+
+    expect(result.error).toMatch(/failed to decode .*config\.toml as toml/);
+    expect(result.changedDomains).toEqual([]);
+    expect(configOf(live).get<string>('defaultPermissionMode')).toBe('auto');
   });
 });

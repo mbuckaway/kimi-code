@@ -43,13 +43,16 @@ import {
  * Top-level domains the v2 engine reads via `IConfigService.get` / `inspect`
  * without registering a schema (free-form values, structurally validated
  * nowhere): `defaultModel` / `defaultProvider` (`kosongConfig` default
- * pointers), `modelOverrides` (`llmRequester` / `profile`), and `telemetry`
- * (read by the CLI itself).
+ * pointers), `modelOverrides` (`llmRequester` / `profile`), `telemetry`
+ * (read by the CLI itself), and `server` — the `[server]` section is declared
+ * in the v1 schema and read by `kimi web` before the socket binds, so the v2
+ * engine passes it through untouched and it is not a typo.
  */
 const SCHEMALESS_DOMAINS: ReadonlySet<string> = new Set([
   'defaultModel',
   'defaultProvider',
   'modelOverrides',
+  'server',
   'telemetry',
 ]);
 

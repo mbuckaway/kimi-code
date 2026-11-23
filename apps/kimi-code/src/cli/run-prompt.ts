@@ -22,6 +22,7 @@ import { resolveAgentProfileSelection } from './agent-selection';
 import { isKimiV2Enabled } from './experimental-v2';
 import { resolveOutputFormat } from './options';
 import type { CLIOptions, PromptOutputFormat } from './options';
+import { signalExitCode } from './signals';
 import {
   formatGoalSummaryText,
   goalExitCode,
@@ -453,12 +454,6 @@ export function installPromptTerminationCleanup(
     promptProcess.off('SIGTERM', onSigterm);
     promptProcess.off('SIGHUP', onSighup);
   };
-}
-
-export function signalExitCode(signal: NodeJS.Signals): number {
-  if (signal === 'SIGINT') return 130;
-  if (signal === 'SIGHUP') return 129;
-  return 143;
 }
 
 type PrintTurnSession = PromptSession &

@@ -42,7 +42,10 @@ Some commands are only available in the idle state. Executing these commands whi
 | `/export-debug-zip` | — | Export the current session as a debug ZIP archive (same behavior as [`kimi export`](./kimi-command.md#kimi-export)) | No |
 | `/copy` | — | Copy the last assistant message to the clipboard | No |
 | `/add-dir [<path>]` | — | Add an extra workspace directory to the current session. Run without a path (or with `list`) to list configured directories. When adding, choose whether to remember the directory for the project in `.kimi-code/local.toml` | No |
-| `/web` | — | Open the current session in the web UI: pick a running server to connect to, or start a new foreground server after the TUI exits. See [`kimi web`](./kimi-command.md#kimi-web) | Yes |
+| `/web` | — | Open the current session in the web UI: always start a new local foreground server after the TUI exits. It never starts Remote Control — a `[server] remote_control = true` setting is ignored here; use `/rc` | Yes |
+| `/remote-control` | `/rc` | Open the current session through Kimi Remote Control: always start Remote Control against a new local server after the TUI exits; requires a loopback `[server] host`, refuses `dangerous_bypass_auth = true`, and is available only while the remote-control experimental gate is open | Yes |
+
+Both commands read the `[server]` section of `config.toml` under the same `CLI flag > [server] > built-in` precedence as `kimi web`; they take no flags of their own, so the file value applies over the built-in default. Both honor `[server] open` for the browser launch. See [`kimi web`](./kimi-command.md#kimi-web) for the full option reference.
 
 ## Modes & Run Control
 

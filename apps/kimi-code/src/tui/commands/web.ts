@@ -1,10 +1,12 @@
 import chalk from 'chalk';
 
-import { splitTokenFragment } from '#/cli/sub/web/access-urls';
+import { isLoopbackHost, splitTokenFragment } from '#/cli/sub/web/access-urls';
 import {
   buildRemoteControlUrl,
   formatRemoteControlOutput,
   formatRemoteControlStatus,
+  isRemoteControlEnabled,
+  REMOTE_CONTROL_FLAG_ENV,
   startRemoteControl,
   type RemoteControlStatus,
 } from '#/cli/sub/web/remote-control';
@@ -12,8 +14,17 @@ import {
   formatRemoteControlAlreadyRunning,
   inspectRemoteControlLock,
 } from '#/cli/sub/web/remote-control-lock';
-import { formatReadyBanner, startServerForeground } from '#/cli/sub/web/run';
-import { parseServerOptions, tryResolveServerToken } from '#/cli/sub/web/shared';
+import {
+  formatConfigProvenanceLines,
+  formatReadyBanner,
+  startServerForeground,
+} from '#/cli/sub/web/run';
+import { readServerConfig } from '#/cli/sub/web/server-config';
+import {
+  parseServerOptions,
+  tryResolveServerToken,
+  type ParsedServerOptions,
+} from '#/cli/sub/web/shared';
 import { openUrl } from '#/utils/open-url';
 import { getDataDir } from '#/utils/paths';
 import { generateRemoteControlQr } from '#/utils/remote-control-qr';
@@ -22,6 +33,25 @@ import { NO_ACTIVE_SESSION_MESSAGE } from '../constant/kimi-tui';
 import { darkColors } from '../theme/colors';
 import { formatErrorMessage } from '../utils/event-payload';
 import type { SlashCommandHost } from './dispatch';
+
+/**
+ * Server options for a TUI-initiated server. There are no CLI flags here, so
+ * every value comes from `[server]` or the built-in default — which is what
+ * keeps `/web` and `/rc` from silently diverging from `kimi web`.
+ *
+ * Both call sites run this inside their `try` blocks: a `[server]` typo is a
+ * hard startup error exactly as it is for `kimi web`, and the task's `catch`
+ * reports it on the restored terminal and exits non-zero. The security lines
+ * are printed here too, so a config-sourced widening is not silent.
+ */
+function parseTuiServerOptions(): ParsedServerOptions {
+  const { defaults, warnings } = readServerConfig();
+  for (const warning of warnings) process.stderr.write(`warning: ${warning}\n`);
+  for (const line of formatConfigProvenanceLines({}, defaults)) {
+    process.stderr.write(`${line}\n`);
+  }
+  return parseServerOptions({}, defaults);
+}
 
 /**
  * `/web` — hand the current session off to the browser.
@@ -53,9 +83,22 @@ export async function handleRemoteControlCommand(host: SlashCommandHost): Promis
   }
 
   host.setExitForegroundTask(async () => {
-    const options = parseServerOptions({});
     let remoteControl: Awaited<ReturnType<typeof startRemoteControl>> | undefined;
     try {
+      const options = parseTuiServerOptions();
+      if (!isRemoteControlEnabled()) {
+        throw new Error(
+          `Remote Control is experimental: set ${REMOTE_CONTROL_FLAG_ENV}=1 (or KIMI_CODE_EXPERIMENTAL_FLAG=1) to enable it.`,
+        );
+      }
+      if (options.dangerousBypassAuth) {
+        throw new Error(
+          'Remote Control cannot be combined with [server] dangerous_bypass_auth = true.',
+        );
+      }
+      if (!isLoopbackHost(options.host)) {
+        throw new Error('Remote Control requires a loopback [server] host.');
+      }
       await startServerForeground(options, {
         onReady: async (origin) => {
           const dataDir = getDataDir();
@@ -87,7 +130,7 @@ export async function handleRemoteControlCommand(host: SlashCommandHost): Promis
           );
           outputReady = true;
           for (const line of pendingStatuses) process.stdout.write(line);
-          openUrl(url);
+          if (options.open) openUrl(url);
         },
         onShutdown: async () => {
           await remoteControl?.close();
@@ -110,19 +153,31 @@ export async function handleRemoteControlCommand(host: SlashCommandHost): Promis
  */
 function startNewServerAfterExit(host: SlashCommandHost, sessionId: string): void {
   host.setExitForegroundTask(async () => {
-    const options = parseServerOptions({});
     try {
+      const options = parseTuiServerOptions();
+      if (options.remoteControl) {
+        process.stderr.write(
+          'warning: [server] remote_control = true is ignored by /web; use /rc to start Remote Control.\n',
+        );
+      }
       await startServerForeground(options, {
         onReady: (origin) => {
           // Resolve the token here (after the server is listening): a fresh
           // server writes `server.token` on first boot, so reading it earlier
           // would miss first-time starts and the browser would hit the auth
-          // gate.
-          const token = tryResolveServerToken(getDataDir());
+          // gate. With auth bypassed the token is meaningless, so it is not
+          // shown and does not ride in the URL — same as `kimi web`.
+          const token = options.dangerousBypassAuth ? undefined : tryResolveServerToken(getDataDir());
           const url = webSessionUrl(origin, sessionId, token);
-          process.stdout.write(formatReadyBanner(origin, options.host, { token }));
+          process.stdout.write(
+            formatReadyBanner(origin, options.host, {
+              token,
+              includeIpv6: options.ipv6,
+              dangerousBypassAuth: options.dangerousBypassAuth,
+            }),
+          );
           process.stdout.write(`\n  ${sessionLine(url)}\n`);
-          openUrl(url);
+          if (options.open) openUrl(url);
         },
       });
     } catch (error) {

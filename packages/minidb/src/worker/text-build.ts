@@ -63,6 +63,34 @@ export class WorkerTextBuildError extends Error {
 
 const DEFAULT_ABORT_POLL_MS = 100;
 const DEFAULT_MAX_OLD_SPACE_MB = 1024;
+const DEV_TYPE_TRANSFORM_FLAG = '--experimental-transform-types';
+const DEV_SUPPRESSED_WARNING_FLAG = '--disable-warning=ExperimentalWarning';
+const DEV_MODULE_IMPORT_FLAG = '--import';
+
+function runtimeAcceptsWorkerFlag(flag: string): boolean {
+  const accepted = process.allowedNodeEnvironmentFlags as ReadonlySet<string> | undefined;
+  return accepted === undefined || accepted.has(flag);
+}
+
+/**
+ * execArgv for hosting the worker from its TS source. Passing a flag the running
+ * node refuses makes `new Worker` throw, and the constructor catch below then
+ * hosts the build inline — a silent degradation, so unsupported flags are
+ * filtered out here instead. Dropping `--experimental-transform-types` alone is
+ * not enough (strip-only mode cannot parse the parameter properties in the worker
+ * closure), so on the runtimes that removed it — Node 26 — the same source loads
+ * through the tsx loader, whose `register()` must be called explicitly because
+ * `--import tsx` self-registers only on the main thread.
+ */
+export function textBuildWorkerSourceExecArgv(): string[] {
+  const typeTransform = runtimeAcceptsWorkerFlag(DEV_TYPE_TRANSFORM_FLAG)
+    ? [DEV_TYPE_TRANSFORM_FLAG]
+    : [DEV_MODULE_IMPORT_FLAG, new URL('./register-dev-transform.mjs', import.meta.url).href];
+  const warningSuppression = runtimeAcceptsWorkerFlag(DEV_SUPPRESSED_WARNING_FLAG)
+    ? [DEV_SUPPRESSED_WARNING_FLAG]
+    : [];
+  return [...typeTransform, ...warningSuppression];
+}
 
 export async function verifyFileCrcAsync(
   filePath: string,
@@ -122,9 +150,7 @@ function spawnWorker(
   }
   return new Worker(entry.url, {
     workerData: spec,
-    // --experimental-transform-types runs the TS worker source directly in dev;
-    // silence its experimental warning so it does not bleed into the TUI.
-    execArgv: ['--experimental-transform-types', '--disable-warning=ExperimentalWarning'],
+    execArgv: textBuildWorkerSourceExecArgv(),
     resourceLimits,
   });
 }

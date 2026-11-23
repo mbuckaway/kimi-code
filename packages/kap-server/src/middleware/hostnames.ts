@@ -51,8 +51,16 @@ export function stripPort(host: string): string {
   return host.toLowerCase();
 }
 
+function unbracketHost(host: string): string {
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+}
+
+function normalizeHost(host: string): string {
+  return unbracketHost(stripPort(host));
+}
+
 export function formatHostErrorMessage(host: string | undefined): string {
-  const normalizedHost = host === undefined || host.length === 0 ? undefined : stripPort(host);
+  const normalizedHost = host === undefined || host.length === 0 ? undefined : normalizeHost(host);
   const hostLabel = normalizedHost ?? '<missing>';
   const hostArg = normalizedHost ?? '<host>';
   return `Invalid Host header: ${hostLabel}; allow this host with KIMI_CODE_ALLOWED_HOSTS=${hostArg} or 'kimi web --allowed-host ${hostArg}'.`;
@@ -65,9 +73,9 @@ export function isAllowedHost(host: string | undefined, opts: HostCheckOptions):
   if (host === undefined || host.length === 0) {
     return false;
   }
-  const h = stripPort(host);
+  const h = normalizeHost(host);
 
-  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') {
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1') {
     return true;
   }
   if (h.endsWith('.localhost')) {
@@ -76,12 +84,12 @@ export function isAllowedHost(host: string | undefined, opts: HostCheckOptions):
   if (net.isIP(h) !== 0) {
     return true;
   }
-  if (opts.boundHost !== undefined && h === stripPort(opts.boundHost)) {
+  if (opts.boundHost !== undefined && h === normalizeHost(opts.boundHost)) {
     return true;
   }
   if (opts.extra !== undefined) {
     for (const entry of opts.extra) {
-      const e = entry.toLowerCase();
+      const e = unbracketHost(entry.toLowerCase());
       if (e.startsWith('.')) {
         const base = e.slice(1);
         if (h === base || h.endsWith(e)) {

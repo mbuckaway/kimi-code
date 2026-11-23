@@ -12,7 +12,7 @@ The REST and WebSocket APIs described on this page are experimental: interface s
 
 ### Address
 
-The default address is `http://127.0.0.1:58627`. When the port is taken, the server retries with the next port (up to 100 times); use `--port` / `--host` to change the bind. Multiple instances can coexist under the same home directory; running instances register under `~/.kimi-code/server/instances/`.
+The built-in default address is `http://127.0.0.1:58627`. `kimi web` decides the bind as `CLI flag` > `[server]` in `config.toml` > that default, so `--port` / `--host` and `[server] port` / `[server] host` both change it (see [`server`](../configuration/config-files.md#server)). When the port is taken, the server retries with the next port (up to 100 times); the startup banner prints the address actually bound. Multiple instances can coexist under the same home directory; running instances register under `~/.kimi-code/server/instances/`.
 
 ### Authentication
 
@@ -148,7 +148,7 @@ Endpoints are grouped by resource below. A `:{action}` suffix in a path is the a
 | --- | --- |
 | `GET /api/v1/healthz` | Liveness probe; auth-exempt |
 | `GET /api/v1/meta` | Server version, capability map, `server_id`, experimental flags |
-| `POST /api/v1/shutdown` | Graceful shutdown (replies 200 first); mounted only on loopback binds |
+| `POST /api/v1/shutdown` | Graceful shutdown (replies 200 first, then closes in-flight requests and WebSocket peers); mounted only on loopback binds |
 
 #### `GET /api/v1/healthz`
 
@@ -177,7 +177,9 @@ On success, `data` carries:
 
 #### `POST /api/v1/shutdown`
 
-Asks the server to shut down gracefully. The reply is sent first and the shutdown runs immediately after, so the caller can trust the response it received. The route is mounted only on loopback binds — on a non-loopback bind it is not registered at all (requests hit a 404) unless the server was started with `--allow-remote-shutdown`.
+Asks the server to shut down gracefully. The reply is sent first and the shutdown starts only once that reply is gone, so the caller can trust the response it received — and a client that hangs up before the reply lands does not stall the shutdown either. The route is mounted only on loopback binds — on a non-loopback bind it is not registered at all (requests hit a 404) unless the server was started with `--allow-remote-shutdown`.
+
+The shutdown itself is bounded and closes what is still open rather than waiting for it: in-flight HTTP requests are terminated instead of draining to completion, and every WebSocket peer is asked to close and then dropped if it does not answer promptly. Clients therefore see the connection end during the shutdown; the same teardown runs when the server is stopped by a signal (see [Using Kimi Code in the browser: Signals and reloading](../guides/web.md#signals-and-reloading)).
 
 On success, `data` is `{ "ok": true }`.
 

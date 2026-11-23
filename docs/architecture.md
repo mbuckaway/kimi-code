@@ -76,11 +76,12 @@ Boot flow (`apps/kimi-code/src/cli/run-shell.ts`): load `~/.kimi-code/tui.toml` 
 
 ### 4.3 The `web` subcommand and the local server
 
-`kimi web` → `runServerInProcess` (`apps/kimi-code/src/cli/sub/web/run.ts`) → `startServer()` from `@moonshot-ai/kap-server`. Defaults come from `apps/kimi-code/src/cli/sub/web/shared.ts`:
+`kimi web` → `runServerInProcess` (`apps/kimi-code/src/cli/sub/web/run.ts`) → `startServer()` from `@moonshot-ai/kap-server`. Each option resolves as CLI flag > `[server]` section of `config.toml` (read by `apps/kimi-code/src/cli/sub/web/server-config.ts`) > the built-in default declared in `apps/kimi-code/src/cli/sub/web/shared.ts`:
 
-- Host `127.0.0.1`, **port 58627** (`DEFAULT_SERVER_PORT`), overridable with `--port`/`--host`; on `EADDRINUSE` the port is bumped (`port + 1`, up to 100 retries) so multiple instances can coexist.
+- Host `127.0.0.1`, **port 58627** (`DEFAULT_SERVER_HOST` / `DEFAULT_SERVER_PORT`) as the built-in defaults, overridable with `--port` / `--host` or `[server] port` / `[server] host`; on `EADDRINUSE` the port is bumped (`port + 1`, up to 100 retries) so multiple instances can coexist.
 - A persistent bearer token is written to `<home>/server.token` (0600) on first boot and reused across restarts.
-- Security flags: `--debug-endpoints` (mounts the `/api/v1/debug/*` RPC surface, loopback only), `--dangerous-bypass-auth`, `--allow-remote-shutdown` / `--allow-remote-terminals` (required for non-loopback binds), `--insecure-no-tls`, `--allowed-host`.
+- Security flags: `--debug-endpoints` (mounts the `/api/v1/debug/*` RPC surface, loopback only), `--dangerous-bypass-auth`, `--allow-remote-shutdown` (keeps `POST /api/v1/shutdown` on a non-loopback bind), `--insecure-no-tls`, `--allowed-host`. Session terminals are loopback-only and have no flag.
+- The other options are `--log-level`, `--web-title`, `--enable-kimi-oauth`, `--rc` / `--remote-control`, `--open` / `--no-open` and `--ipv6` / `--no-ipv6` (which only adds the IPv6 interface hints to the printed banner, never to what is bound). All of them have a `[server]` key, and every boolean except `--insecure-no-tls` has a negated form so a value taken from the file can always be overridden on the command line.
 - Multi-instance coordination via an instance registry at `<home>/server/instances/*.json` (heartbeat files).
 
 ## 5. The agent engines

@@ -3,10 +3,12 @@
 //
 // Spawns `tsx ./src/main.ts web --no-open …extraArgs` once, then on each
 // newline read from stdin SIGTERMs the child and respawns after it has
-// cleanly exited. SIGTERM triggers the server's own `shutdown()` handler
-// (apps/kimi-code/src/cli/sub/web/run.ts) which releases the instance
-// registration and closes WS conns before exit, so a fresh start can
-// re-acquire 58627 without a stale-entry fight.
+// exited. SIGTERM triggers the server's own shutdown handler
+// (apps/kimi-code/src/cli/sub/web/run.ts), which releases the instance
+// registration and closes WS conns before exiting with code 143, so a fresh
+// start can re-acquire 58627 without a stale-entry fight. That shutdown is
+// bounded by the server itself (WEB_SHUTDOWN_FORCE_EXIT_MS, currently 12s);
+// the SIGKILL net below sits above it and is only a last resort.
 //
 // CLI args after `--` (or any extras) are passed straight through, so:
 //   pnpm dev:server:restart -- --host 0.0.0.0 --port 58627 --log-level debug
@@ -91,14 +93,16 @@ function restart() {
   restarting = true;
   console.error('[dev:server:restart] restarting…');
   child.kill('SIGTERM');
-  // Safety net: if the child ignores SIGTERM, force-kill after 5s so the
-  // restart loop doesn't wedge.
+  // Safety net: if the child ignores SIGTERM, force-kill after 15s so the
+  // restart loop doesn't wedge. The server bounds its own shutdown at 12s
+  // (WEB_SHUTDOWN_FORCE_EXIT_MS), so this must stay above that or the harness
+  // would pre-empt the graceful path on every restart.
   killTimer = setTimeout(() => {
     if (child !== null && child.exitCode === null && child.signalCode === null) {
       console.error('[dev:server:restart] SIGTERM timed out, sending SIGKILL');
       child.kill('SIGKILL');
     }
-  }, 5000);
+  }, 15000);
 }
 
 process.stdin.setEncoding('utf8');

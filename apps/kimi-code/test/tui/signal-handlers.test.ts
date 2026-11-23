@@ -290,17 +290,25 @@ describe('KimiTUI signal handlers', () => {
   });
 
   it('stop() unregisters previously-installed signal handlers', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
     const { driver, tui } = makeDriver();
     // Suppress real stop work for this test — focus on the cleanup contract.
     vi.spyOn(tui, 'stop').mockImplementation(async () => {
       (tui as unknown as SignalDriver).unregisterSignalHandlers();
     });
     const beforeSigterm = process.listenerCount('SIGTERM');
+    const beforeSighup = process.listenerCount('SIGHUP');
     driver.registerSignalHandlers();
     expect(process.listenerCount('SIGTERM')).toBe(beforeSigterm + 1);
+    expect(process.listenerCount('SIGHUP')).toBe(beforeSighup + 1);
 
     await tui.stop();
     expect(process.listenerCount('SIGTERM')).toBe(beforeSigterm);
+    // SIGHUP matters beyond tidiness: the TUI's handler exits 129, and the
+    // server `kimi web` hands off to treats SIGHUP as a config reload. `stop()`
+    // runs before the exit-foreground task, so the server must be the only
+    // thing left listening for it.
+    expect(process.listenerCount('SIGHUP')).toBe(beforeSighup);
   });
 
   it('stop() drains terminal input before stopping the UI and exiting', async () => {

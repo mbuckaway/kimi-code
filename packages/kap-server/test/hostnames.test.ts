@@ -76,6 +76,25 @@ describe('isAllowedHost (boundHost)', () => {
   it('still denies unrelated hosts', () => {
     expect(isAllowedHost('otherhost', { boundHost: 'myhost' })).toBe(false);
   });
+
+  it('matches a bracketed IPv6 Host against a bracketless bound host', () => {
+    expect(isAllowedHost('[2001:db8::1]:58627', { boundHost: '2001:db8::1' })).toBe(true);
+    expect(isAllowedHost('[2001:db8::1]:58627', { boundHost: '[2001:db8::1]' })).toBe(true);
+  });
+
+  it('allows a bracketed IPv6 Host on a wildcard IPv6 bind', () => {
+    expect(isAllowedHost('[2001:db8::1]:58627', { boundHost: '::' })).toBe(true);
+    expect(isAllowedHost('[2001:db8::1]:58627', { boundHost: '[::]' })).toBe(true);
+  });
+
+  it('keeps loopback and 127.x Hosts allowed', () => {
+    expect(isAllowedHost('[::1]:58627', { boundHost: '2001:db8::1' })).toBe(true);
+    expect(isAllowedHost('127.0.0.2:58627', { boundHost: '2001:db8::1' })).toBe(true);
+  });
+
+  it('still refuses a bracketed host that matches no allowed entry', () => {
+    expect(isAllowedHost('[evil.example.test]:58627', { boundHost: '2001:db8::1' })).toBe(false);
+  });
 });
 
 describe('isAllowedHost (extra)', () => {
