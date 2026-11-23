@@ -259,6 +259,12 @@ vi.mock('node:net', () => ({
 
 const fsReadHook = vi.hoisted(() => ({
   afterRead: undefined as ((path: string) => Promise<void> | void) | undefined,
+  active: 0,
+  maxActive: 0,
+}));
+
+const fsWriteHook = vi.hoisted(() => ({
+  beforeRename: undefined as ((path: string) => Promise<void> | void) | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -266,12 +272,22 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return {
     ...actual,
     readFile: (async (...args: unknown[]) => {
-      const result = await (actual.readFile as (...inner: unknown[]) => Promise<unknown>)(
-        ...args,
-      );
-      await fsReadHook.afterRead?.(String(args[0]));
-      return result;
+      fsReadHook.active += 1;
+      fsReadHook.maxActive = Math.max(fsReadHook.maxActive, fsReadHook.active);
+      try {
+        const result = await (actual.readFile as (...inner: unknown[]) => Promise<unknown>)(
+          ...args,
+        );
+        await fsReadHook.afterRead?.(String(args[0]));
+        return result;
+      } finally {
+        fsReadHook.active -= 1;
+      }
     }) as typeof actual.readFile,
+    rename: (async (...args: unknown[]) => {
+      await fsWriteHook.beforeRename?.(String(args[1]));
+      return (actual.rename as (...inner: unknown[]) => Promise<void>)(...args);
+    }) as typeof actual.rename,
   };
 });
 
@@ -281,6 +297,16 @@ function tick(ticks = 4): Promise<void> {
   let promise = Promise.resolve();
   for (let i = 0; i < ticks; i++) promise = promise.then(() => new Promise<void>((r) => realSetImmediate(r)));
   return promise;
+}
+
+async function tickUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 3_000,
+): Promise<void> {
+  const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
+  while (!(await predicate()) && process.hrtime.bigint() < deadline) {
+    await tick(1);
+  }
 }
 
 function makeAccessor(
@@ -492,6 +518,9 @@ describe('crossSessionRegistry', () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     fsReadHook.afterRead = undefined;
+    fsReadHook.active = 0;
+    fsReadHook.maxActive = 0;
+    fsWriteHook.beforeRename = undefined;
     root = await mkdtemp(join(tmpdir(), 'cross-session-registry-'));
     now = 1_000;
   });
@@ -580,14 +609,72 @@ describe('crossSessionRegistry', () => {
     now = 2_500;
     await vi.advanceTimersByTimeAsync(500);
     const readStored = async () => (await registry().listLive())[0];
-    let stored = await readStored();
-    for (let attempt = 0; attempt < 200 && stored?.heartbeatAt !== 2_500; attempt += 1) {
-      await tick(1);
-      stored = await readStored();
-    }
+    await tickUntil(async () => (await readStored())?.heartbeatAt === 2_500);
+    const stored = await readStored();
     expect(stored?.heartbeatAt).toBe(2_500);
     expect(stored?.startedAt).toBe(900);
     await handle.release();
+  });
+
+  it('heartbeat_coalescesTicksWhileAWriteIsInFlight', async () => {
+    let renames = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fsWriteHook.beforeRename = async () => {
+      renames += 1;
+      if (renames === 2) await blocked;
+    };
+    const handle = await registry({ heartbeatIntervalMs: 500 }).register({
+      sessionId: SESSION_A,
+      socketPath: '/tmp/socket-a.sock',
+      token: 'token-a',
+    });
+
+    try {
+      now = 2_000;
+      await vi.advanceTimersByTimeAsync(500);
+      await tickUntil(() => renames >= 2);
+      expect(renames).toBe(2);
+
+      now = 3_000;
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(500);
+      release();
+      await tickUntil(() => renames >= 3);
+      await tick(100);
+
+      expect(renames).toBe(3);
+    } finally {
+      fsWriteHook.beforeRename = undefined;
+      release();
+      await handle.release();
+    }
+  });
+
+  it('listLive_boundsConcurrentRegistryReads', async () => {
+    const handles: Array<{ release(): Promise<void> }> = [];
+    for (let i = 0; i < 40; i += 1) {
+      const id = `session_${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
+      handles.push(
+        await registry().register({
+          sessionId: id,
+          socketPath: `/tmp/socket-${i}.sock`,
+          token: `token-${i}`,
+        }),
+      );
+    }
+
+    fsReadHook.active = 0;
+    fsReadHook.maxActive = 0;
+    try {
+      const live = await registry().listLive();
+      expect(live).toHaveLength(40);
+      expect(fsReadHook.maxActive).toBeLessThanOrEqual(8);
+    } finally {
+      for (const handle of handles) await handle.release();
+    }
   });
 
   it('release_stopsTheHeartbeatAndUnlinksTheFile', async () => {

@@ -63,6 +63,8 @@ const TEMP_FILE_MARKER = `${REGISTRY_FILE_SUFFIX}.tmp.`;
 
 const TEMP_FILE_MAX_AGE_MS = 60_000;
 
+const REGISTRY_FS_CONCURRENCY = 8;
+
 const REGISTRY_DIR_MODE = 0o700;
 
 const REGISTRY_FILE_MODE = 0o600;
@@ -201,6 +203,23 @@ async function registryNames(registryDir: string): Promise<string[]> {
   }
 }
 
+async function mapWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      await run(items[index] as T);
+    }
+  });
+  await Promise.all(workers);
+}
+
 export function createCrossSessionRegistry(
   options: CrossSessionRegistryOptions = {},
 ): ICrossSessionRegistry {
@@ -219,8 +238,10 @@ export function createCrossSessionRegistry(
     now() - entry.heartbeatAt > offlineAfterMs ? 'offline' : 'live';
 
   const removeStaleTempFiles = async (names: readonly string[]): Promise<void> => {
-    await Promise.all(
-      names.filter(isTempRegistryFile).map(async (name) => {
+    await mapWithConcurrency(
+      names.filter(isTempRegistryFile),
+      REGISTRY_FS_CONCURRENCY,
+      async (name) => {
         const filePath = join(registryDir, name);
         let info: Stats;
         try {
@@ -230,7 +251,7 @@ export function createCrossSessionRegistry(
         }
         if (!info.isFile() || now() - info.mtimeMs <= TEMP_FILE_MAX_AGE_MS) return;
         await unlinkIfPresent(filePath);
-      }),
+      },
     );
   };
 
@@ -238,8 +259,10 @@ export function createCrossSessionRegistry(
     names: readonly string[],
     onLive: (entry: CrossSessionRegistration) => void,
   ): Promise<void> => {
-    await Promise.all(
-      names.filter(isRegistryFile).map(async (name) => {
+    await mapWithConcurrency(
+      names.filter(isRegistryFile),
+      REGISTRY_FS_CONCURRENCY,
+      async (name) => {
         const filePath = join(registryDir, name);
         const snapshot = await snapshotRegistryFile(filePath);
         if (snapshot === undefined) return;
@@ -249,7 +272,7 @@ export function createCrossSessionRegistry(
           return;
         }
         onLive(entry);
-      }),
+      },
     );
   };
 
@@ -289,11 +312,21 @@ export function createCrossSessionRegistry(
         return next;
       };
 
+      let heartbeatQueued = false;
+
+      const enqueueHeartbeat = (): void => {
+        if (heartbeatQueued || state.released) return;
+        heartbeatQueued = true;
+        const next = writeChain.then(async () => {
+          heartbeatQueued = false;
+          await write();
+        });
+        writeChain = next.catch(() => {});
+      };
+
       await enqueueWrite();
 
-      const timer = setInterval(() => {
-        void enqueueWrite().catch(() => {});
-      }, heartbeatIntervalMs);
+      const timer = setInterval(enqueueHeartbeat, heartbeatIntervalMs);
       timer.unref();
 
       return {

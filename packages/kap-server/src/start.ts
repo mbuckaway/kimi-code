@@ -142,6 +142,8 @@ const DEFAULT_PORT = 58627;
 
 export const CLOSE_DRAIN_TIMEOUT_MS = 3_000;
 
+export const CLOSE_TOTAL_TIMEOUT_MS = 8_000;
+
 export async function startServer(opts: ServerStartOptions): Promise<RunningServer> {
   const host = opts.host ?? DEFAULT_HOST;
   const port = opts.port ?? DEFAULT_PORT;
@@ -312,7 +314,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     }
   };
 
-  const disposeServer = async (): Promise<void> => {
+  const disposeServerSteps = async (): Promise<void> => {
     await runTeardownStep('configChangedPublisher.close', () => configChangedPublisher.close());
     await runTeardownStep('app.close', () => app.close());
     await runTeardownStep('configWarningSubscription.dispose', () =>
@@ -434,6 +436,37 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
           void Promise.allSettled(settlingAbandonedDrains).then(removeProcessErrorHandlers);
         }
       }
+    }
+  };
+
+  const disposeServer = async (): Promise<void> => {
+    const steps = disposeServerSteps();
+    void steps.catch((error: unknown) =>
+      logger.error(
+        { err: error instanceof Error ? error : new Error(String(error)) },
+        'server close failed',
+      ),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([
+        steps.then(
+          () => 'done' as const,
+          () => 'failed' as const,
+        ),
+        new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), CLOSE_TOTAL_TIMEOUT_MS);
+          timer.unref();
+        }),
+      ]);
+      if (outcome === 'timeout') {
+        logger.warn(
+          { budgetMs: CLOSE_TOTAL_TIMEOUT_MS },
+          'server close exceeded the total budget; continuing shutdown with cleanup incomplete',
+        );
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   };
 

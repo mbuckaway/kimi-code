@@ -25,6 +25,7 @@ import { registerShutdownRoutes } from '../src/routes/shutdown';
 import { SessionEventBroadcaster } from '../src/transport/ws/v1/sessionEventBroadcaster';
 import {
   CLOSE_DRAIN_TIMEOUT_MS,
+  CLOSE_TOTAL_TIMEOUT_MS,
   listenWithPortRetry,
   type RunningServer,
   startServer,
@@ -561,6 +562,42 @@ describe('server-v2 boot', () => {
         for (const stall of otherStalls) {
           stall.release();
         }
+        server = undefined;
+      }
+    });
+
+    it('bounds the whole close at the total budget when a post-drain step stalls', async () => {
+      home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-close-total-budget-'));
+      const { logger, lines } = recordingLogger();
+      server = await startServer({
+        hostIdentity: TEST_HOST_IDENTITY,
+        host: '127.0.0.1',
+        port: 0,
+        homeDir: home,
+        logger,
+      });
+      const closingServer = server;
+      vi.spyOn(closingServer.core.accessor.get(IAppendLogStore), 'drainRetirements')
+        .mockImplementation(() => new Promise<void>(() => {}));
+
+      vi.useFakeTimers();
+      const startedAt = Date.now();
+      let elapsedMs = -1;
+      try {
+        const closing = closingServer.close().then(() => {
+          elapsedMs = Date.now() - startedAt;
+        });
+        await advanceUntilOrBudget(() => elapsedMs >= 0, advanceStepMs, advanceCeilingMs);
+        await closing;
+
+        expect(elapsedMs).toBeGreaterThanOrEqual(CLOSE_TOTAL_TIMEOUT_MS);
+        expect(elapsedMs).toBeLessThan(CLOSE_TOTAL_TIMEOUT_MS + 1_000);
+        expect(
+          warnRecords(lines).some(
+            (record) => record.msg?.includes('exceeded the total budget') === true,
+          ),
+        ).toBe(true);
+      } finally {
         server = undefined;
       }
     });
