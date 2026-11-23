@@ -579,8 +579,12 @@ describe('crossSessionRegistry', () => {
     });
     now = 2_500;
     await vi.advanceTimersByTimeAsync(500);
-    await tick(50);
-    const [stored] = await registry().listLive();
+    const readStored = async () => (await registry().listLive())[0];
+    let stored = await readStored();
+    for (let attempt = 0; attempt < 200 && stored?.heartbeatAt !== 2_500; attempt += 1) {
+      await tick(1);
+      stored = await readStored();
+    }
     expect(stored?.heartbeatAt).toBe(2_500);
     expect(stored?.startedAt).toBe(900);
     await handle.release();

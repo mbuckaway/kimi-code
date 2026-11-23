@@ -2169,6 +2169,37 @@ describe('`kimi web` foreground shutdown', () => {
     expect(io.readStderr()).toContain('Shutting down (SIGTERM)…');
   });
 
+  it('runs the shutdown hook for an API shutdown too, and only once', async () => {
+    expect.assertions(6);
+    const events: string[] = [];
+    const server = startedServer();
+    webRunMocks.shutdownTelemetry.mockImplementation(async () => {
+      events.push('telemetry');
+    });
+    const onShutdown = vi.fn(async () => {
+      events.push('hook');
+    });
+
+    const { proc } = await runForeground({ onShutdown }, () => server);
+    const options = webRunMocks.startServer.mock.calls[0]![0] as {
+      onShutdownRequested?: () => Promise<void>;
+    };
+
+    expect(options.onShutdownRequested).toBeTypeOf('function');
+    await options.onShutdownRequested?.();
+
+    expect(events).toEqual(['hook', 'telemetry']);
+    expect(onShutdown).toHaveBeenCalledWith('api_shutdown');
+
+    await options.onShutdownRequested?.();
+    void proc.listener('SIGTERM')?.();
+    await flushMicrotasks();
+
+    expect(onShutdown).toHaveBeenCalledTimes(1);
+    expect(webRunMocks.shutdownTelemetry).toHaveBeenCalledTimes(1);
+    expect(proc.exit).toHaveBeenCalledWith(143);
+  });
+
   it('hands the ready hook a bracketed origin for an IPv6 bind', async () => {
     expect.assertions(1);
     const onReady = vi.fn();

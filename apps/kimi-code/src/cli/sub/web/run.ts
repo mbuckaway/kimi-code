@@ -576,17 +576,41 @@ async function runServerInProcess(
     resolveRunningServer = resolve;
   });
 
+  // The hook runs at most once even when the API shutdown and a signal (or a
+  // startup abort) race: both paths meet here.
+  let shutdownHookRan = false;
+
+  /** Runs the caller's shutdown hook inside the CLI shutdown budget. A hook that
+   *  never settles is abandoned so the server close can proceed; a rejection is
+   *  logged, never propagated. */
+  async function runShutdownHook(reason: string, log: RoutedServer['logger']): Promise<void> {
+    if (shutdownHookRan) return;
+    shutdownHookRan = true;
+    const hook = hooks.onShutdown;
+    if (hook === undefined) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.resolve(hook(reason)).catch((error: unknown) => {
+          log.error(
+            { err: error instanceof Error ? error : new Error(String(error)) },
+            'foreground shutdown hook error',
+          );
+        }),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, CLI_SHUTDOWN_TIMEOUT_MS);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   /** Closes the server and flushes what it still owes. Never rethrows. */
   async function closeRunningServer(server: RoutedServer, reason: string): Promise<void> {
     server.logger.info({ reason }, 'server shutting down');
-    try {
-      await hooks.onShutdown?.(reason);
-    } catch (error) {
-      server.logger.error(
-        { err: error instanceof Error ? error : new Error(String(error)) },
-        'foreground shutdown hook error',
-      );
-    }
+    await runShutdownHook(reason, server.logger);
     try {
       await server.close();
     } catch (error) {
@@ -695,6 +719,22 @@ async function runServerInProcess(
       debugEndpoints: options.debugEndpoints,
       insecureNoTls: options.insecureNoTls,
       allowRemoteShutdown: options.allowRemoteShutdown,
+      onShutdownRequested: async () => {
+        if (stopReason !== undefined) return;
+        // Commit the reason before awaiting so a signal arriving during the
+        // hook cannot start a second teardown; kap-server closes the server
+        // itself after this returns.
+        stopReason = 'api_shutdown';
+        await runShutdownHook('api_shutdown', logger);
+        try {
+          await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS });
+        } catch (error) {
+          logger.error(
+            { err: error instanceof Error ? error : new Error(String(error)) },
+            'telemetry shutdown error',
+          );
+        }
+      },
       allowedHosts: options.allowedHosts,
       disableAuth: options.dangerousBypassAuth,
       enableKimiOauth: options.enableKimiOauth,
